@@ -7,9 +7,6 @@ from arrangement import process
 from enumeration import gen_rows, rows_to_rowdict
 
 if __name__ == "__main__":
-    tup_bank = {}
-    primes = (2, 3, 5, 7, 11, 13, 17, 19, 23)
-
     P = tuple([int(i) for i in sys.argv[1:]])
     N = 6
 

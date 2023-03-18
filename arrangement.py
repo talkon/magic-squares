@@ -1,17 +1,7 @@
 import time
 
 
-def process(input):
-    S, filt_rows = input
-    start = time.time()
-
-    # print(f"[{S}] (Starting)", flush=True)
-
-    # filt_rows = row_dict[S]
-    # sorted([row for row in all_rows if sum(row) == S and len(set(row)) == len(row)], reverse=True)
-    l1 = len(filt_rows)
-    # print(filt_rows)
-
+def make_vecs(S, filt_rows, start):
     eltc = {}
     eltcl = []
 
@@ -22,7 +12,7 @@ def process(input):
                 f"[{S}] (Completed in {time.time()-start} seconds by reduction)",
                 flush=True,
             )
-            return 0, [], []
+            return [], [], 0
         eltc = {}
         for row in filt_rows:
             for elt in row:
@@ -51,29 +41,21 @@ def process(input):
     # for vec in vecs:
     #   print(vec)
     nvecs = len(vecs)
+    return inv_map, vecs, nvecs
 
-    # print(">>> finished in", time.time()-start, "seconds")
 
-    def make_intersections(vecs):
-        d = {}
-        for i in range(len(vecs)):
-            dd = {}
-            for j in range(len(vecs)):
-                dd[j] = len(set(vecs[i]).intersection(set(vecs[j])))
-            d[i] = dd
-        return d
+def make_intersections(vecs):
+    d = {}
+    for i in range(len(vecs)):
+        dd = {}
+        for j in range(len(vecs)):
+            dd[j] = len(set(vecs[i]).intersection(set(vecs[j])))
+        d[i] = dd
+    return d
 
-    # print(">>> Precomputing intersections")
-    # start = time.time()
-    intersections = make_intersections(vecs)
-    # print(">>> finished in", time.time()-start, "seconds")
 
-    count = [0]
-    search_start = time.time()
-    sols = []
-    nms = []
-
-    def record(rows, cols, ris, cis, count, sols, nms):
+def recorder(inv_map, start, vecs, S, count):
+    def record(rows, cols, ris, cis, sols, nms):
         count[0] += 1
         if count[0] % 100000 == 0:
             rs = [tuple(inv_map[e] for e in row) for row in rows]
@@ -111,6 +93,10 @@ def process(input):
             print(f"[{S}] (SOLUTION  6x6) {(rs, cs)}", flush=True)
             sols += [(rs, cs)]
 
+    return record
+
+
+def searcher(nvecs, vecs, record, sols, nms, intersections):
     def search_aux(i, rows, cols, ris, cis, unmatched):
         # print(i, rows, cols)
         if i < nvecs:
@@ -124,7 +110,7 @@ def process(input):
             # if not union_rows.issuperset(sorted(e for e in union_cols if e > mr)):
             #   return
 
-        record(rows, cols, ris, cis, count, sols, nms)
+        record(rows, cols, ris, cis, sols, nms)
 
         for j in range(i, nvecs):
             vec = vecs[j]
@@ -144,6 +130,33 @@ def process(input):
             if is_valid_col:
                 um = unmatched.symmetric_difference(vec)
                 search_aux(j + 1, rows, cols + [vec], ris, cis + [j], um)
+
+    return search_aux
+
+
+def process(input):
+    S, filt_rows = input
+    start = time.time()
+
+    inv_map, vecs, nvecs = make_vecs(S, filt_rows, start)
+    if not inv_map:
+        return 0, [], []
+
+    # print(f"[{S}] (Starting)", flush=True)
+    # print(">>> finished in", time.time()-start, "seconds")
+
+    # print(">>> Precomputing intersections")
+    # start = time.time()
+    intersections = make_intersections(vecs)
+    # print(">>> finished in", time.time()-start, "seconds")
+
+    count = [0]
+    search_start = time.time()
+    sols = []
+    nms = []
+
+    record = recorder(inv_map, start, vecs, S, count)
+    search_aux = searcher(nvecs, vecs, record, sols, nms, intersections)
 
     # print(f"[{S}] (Searching)", flush=True)
     search_aux(0, [], [], [], [], set())
