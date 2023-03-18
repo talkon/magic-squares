@@ -3,6 +3,8 @@ from typing import Callable
 
 
 Vec = tuple[int, int, int, int, int, int]
+Table = tuple[list[Vec], list[Vec]]
+TableIndices = tuple[list[int], list[int]]
 
 
 def make_vecs(
@@ -62,18 +64,18 @@ def make_intersections(vecs: list[Vec]) -> dict[int, dict[int, int]]:
 
 def recorder(
     inv_map: dict[int, int], start: float, vecs: list[Vec], S: int, count: list[int]
-) -> Callable[
-    [list[Vec], list[Vec], list[int], list[int]],
-    tuple[tuple[list[Vec], list[Vec]] | None, tuple[list[Vec], list[Vec]] | None],
-]:
-    def translate(rows: list[Vec], cols: list[Vec]) -> tuple[list[Vec], list[Vec]]:
+) -> Callable[[Table, TableIndices], tuple[Table | None, Table | None],]:
+    def translate(rowscols: Table) -> Table:
+        rows, cols = rowscols
         rs = [tuple(inv_map[e] for e in row) for row in rows]
         cs = [tuple(inv_map[e] for e in col) for col in cols]
         return rs, cs
 
     def record(
-        rows: list[Vec], cols: list[Vec], ris: list[int], cis: list[int]
-    ) -> tuple[tuple[list[Vec], list[Vec]] | None, tuple[list[Vec], list[Vec]] | None]:
+        rowscols: Table, riscis: TableIndices
+    ) -> tuple[Table | None, Table | None]:
+        rows, cols = rowscols
+        ris, cis = riscis
         count[0] += 1
         if count[0] % 100000 == 0:
             print(
@@ -82,7 +84,7 @@ def recorder(
             )
 
         score = len(rows) * len(cols)
-        rs, cs = translate(rows, cols)
+        rs, cs = translate(rowscols)
 
         if score == 25:
             missing_elt = 6 * S - sum(set().union(*rs).union(*cs))
@@ -113,21 +115,26 @@ def searcher(
     nvecs: int,
     vecs: list[Vec],
     record: Callable[
-        [list[Vec], list[Vec], list[int], list[int]],
-        tuple[tuple[list[Vec], list[Vec]] | None, tuple[list[Vec], list[Vec]] | None],
+        [Table, TableIndices],
+        tuple[Table | None, Table | None],
     ],
-    sols: list[tuple[list[Vec], list[Vec]]],
-    nms: list[tuple[list[Vec], list[Vec]]],
     intersections: dict[int, dict[int, int]],
-) -> Callable[[int, list[Vec], list[Vec], list[int], list[int], set[int]], None]:
+) -> tuple[
+    Callable[[int, Table, TableIndices, set[int]], None],
+    list[Table],
+    list[Table],
+]:
+    sols: list[Table] = []
+    nms: list[Table] = []
+
     def search_aux(
         i: int,
-        rows: list[Vec],
-        cols: list[Vec],
-        ris: list[int],
-        cis: list[int],
+        rowscols: Table,
+        riscis: TableIndices,
         unmatched: set[int],
     ):
+        rows, cols = rowscols
+        ris, cis = riscis
         nonlocal sols
         nonlocal nms
         # print(i, rows, cols)
@@ -142,7 +149,7 @@ def searcher(
             # if not union_rows.issuperset(sorted(e for e in union_cols if e > mr)):
             #   return
 
-        nm, sol = record(rows, cols, ris, cis)
+        nm, sol = record(rowscols, riscis)
         if nm:
             nms += [nm]
         if sol:
@@ -156,7 +163,7 @@ def searcher(
             )
             if is_valid_row:
                 um = unmatched.symmetric_difference(vec)
-                search_aux(j + 1, rows + [vec], cols, ris + [j], cis, um)
+                search_aux(j + 1, (rows + [vec], cols), (ris + [j], cis), um)
 
             is_valid_col = (
                 len(rows) > 0
@@ -165,14 +172,12 @@ def searcher(
             )
             if is_valid_col:
                 um = unmatched.symmetric_difference(vec)
-                search_aux(j + 1, rows, cols + [vec], ris, cis + [j], um)
+                search_aux(j + 1, (rows, cols + [vec]), (ris, cis + [j]), um)
 
-    return search_aux
+    return search_aux, sols, nms
 
 
-def process(
-    input: tuple[int, list[Vec]]
-) -> tuple[int, list[tuple[list[Vec], list[Vec]]], list[tuple[list[Vec], list[Vec]]]]:
+def process(input: tuple[int, list[Vec]]) -> tuple[int, list[Table], list[Table]]:
     S, filt_rows = input
     start = time.time()
 
@@ -190,14 +195,12 @@ def process(
 
     count = [0]
     search_start = time.time()
-    sols = []
-    nms = []
 
     record = recorder(inv_map, start, vecs, S, count)
-    search_aux = searcher(nvecs, vecs, record, sols, nms, intersections)
+    search_aux, sols, nms = searcher(nvecs, vecs, record, intersections)
 
     # print(f"[{S}] (Searching)", flush=True)
-    search_aux(0, [], [], [], [], set())
+    search_aux(0, ([], []), ([], []), set())
     # print(f"[{S}] (Log) {count[0]} {time.time()-search_start} {len(vecs)}")
     print(
         f"[{S}] (Completed in {time.time()-start} seconds: explored {count[0]} configs, {len(nms)} near misses, {len(sols)} solutions)",
