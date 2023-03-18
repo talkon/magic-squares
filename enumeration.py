@@ -1,8 +1,10 @@
+Vec = tuple[int, int, int, int, int, int]
+
 tup_bank = {}
 primes = (2, 3, 5, 7, 11, 13, 17, 19, 23)
 
 
-def gen_tup(s, n):
+def gen_tup(s: int, n: int) -> list[tuple[int, ...]]:
     if (s, n) in tup_bank.keys():
         return tup_bank[(s, n)]
 
@@ -24,7 +26,7 @@ def gen_tup(s, n):
     return out
 
 
-def gen_rows(pows, n):
+def gen_rows(pows: tuple[int, ...], n: int) -> set[Vec]:
     rows = {(1,) * n}
     for p, pow in zip(primes, pows):
         ptups = gen_tup(pow, n)
@@ -42,7 +44,7 @@ def gen_rows(pows, n):
     return rows
 
 
-def split_by_sum(all_rows):
+def split_by_sum(all_rows: set[Vec]) -> list[tuple[int, int]]:
     counts = {}
     unique_counts = {}
     for row in all_rows:
@@ -55,7 +57,7 @@ def split_by_sum(all_rows):
     return ucs
 
 
-def rows_to_rowdict(all_rows):
+def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
     ucs = split_by_sum(all_rows)
     S_list = [S for S, c in ucs if c >= 12]
     S_set = set(S_list)
