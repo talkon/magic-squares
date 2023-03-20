@@ -3,16 +3,57 @@ import sys
 from enumeration import gen_rows, rows_to_rowdict
 from arrangement import make_vecs
 
-'''
+description = '''
 Code for generating LAD-formatted graphs
 Example uses:
-    `python graph.py pattern`
-    `python graph.py target 327 10 4 3 2`
+    `python graph.py bipartite pattern`
+    `python graph.py bipartite target 327 10 4 3 2`
+Options for the first argument are `bipartite` or `induced`
 Output graphs can be used with Glasgow subgraph solver like this:
-    `(path-to-glasgow-subgraph-solver) --format lad 6x6.lad_pattern 6x6_P_10_4_3_2_S_327.lad_target
+    `(path-to-glasgow-subgraph-solver) --format lad 6x6.lad_pattern 6x6_P_10_4_3_2_S_327.lad_target`
+    Use `--induced` if the LAD files are for the induced construction.
 '''
 
-def make_pattern(N: int) -> None:
+'''
+Induced construction: 
+Target graph has rows as vertices, and edges between non-disjoint rows. 
+Pattern graph is a complete bipartite subgraph K_{N,N}, we require this to be an induced subgraph
+'''
+def make_pattern_induced(N: int) -> None:
+    with open(f'{N}x{N}.lad_pattern', 'w') as f:
+        print(2*N, file=f)
+        for _ in range(N):
+            print(' '.join(map(str, [N] + list(range(N, 2*N)))), file=f)
+        for _ in range(N):
+            print(' '.join(map(str, [N] + list(range(N)))), file=f)
+
+def make_target_induced(S: int, P: tuple[int, ...], N: int) -> None:
+    all_rows = gen_rows(P, N)
+    row_dict = rows_to_rowdict(all_rows)
+
+    filt_rows = row_dict[S]
+    inv_map, vecs, n_vecs = make_vecs(S, filt_rows, start=0)
+    print("inv_map:", inv_map)
+
+    edges = {n: [] for n in range(n_vecs)}
+    for i, v1 in enumerate(vecs):
+        for j, v2 in enumerate(vecs):
+            if i != j and set(v1).intersection(set(v2)):
+                edges[i] += [j]
+    
+    fname = f"{N}x{N}_P_" + ('_'.join(map(str, P))) + f"_S_{S}.lad_target"
+    with open(fname, 'w') as f:
+        print(n_vecs, file=f)
+        for i in range(n_vecs):
+            print(' '.join(map(str, [len(edges[i])] + list(edges[i]))), file=f)
+            
+'''
+Bipartite construction: 
+Target graph has rows and numbers as vertices, and an edge (r, n) if row r contains number n.
+Pattern graph created from a NxN square, this doesn't have to be an induced subgraph
+(Note: a few extra vertices and edges are added to enforce a subgraph that has the correct type of vertices)
+'''
+def make_pattern_bipartite(N: int) -> None:
     with open(f'{N}x{N}.lad_pattern', 'w') as f:
         print(N*N + 2*N + 3, file=f)
         for i in range(N*N):
@@ -26,8 +67,7 @@ def make_pattern(N: int) -> None:
         print(f'2 {N*N + 2*N} {N*N + 2*N + 2}', file=f)
         print(' '.join(map(str, [2*N+2] + list(range(N*N, N*N+2*N+2)))), file=f)
         
-
-def make_target(S: int, P: tuple[int, ...], N: int) -> None:
+def make_target_bipartite(S: int, P: tuple[int, ...], N: int) -> None:
     all_rows = gen_rows(P, N)
     row_dict = rows_to_rowdict(all_rows)
 
@@ -60,14 +100,26 @@ def make_target(S: int, P: tuple[int, ...], N: int) -> None:
         print(' '.join(map(str, [n_vecs + 2] + list(range(n_nums, n_vtxs + 2)))), file=f)
 
 if __name__ == "__main__":
-    mode = sys.argv[1]
-    if mode == "pattern":
-        make_pattern(6)
-    if mode == "target":
-        S = int(sys.argv[2])
-        P = tuple([int(i) for i in sys.argv[3:]])
-        N = 6
-        make_target(S, P, N)
+    N = 6
+    arg = sys.argv[1]
+    if arg == "help":
+        print(description)
+    else:
+        mode = arg, sys.argv[2]
+        if mode == ("bipartite", "pattern"):
+            make_pattern_bipartite(N)
+        elif mode == ("induced", "pattern"):
+            make_pattern_induced(N)
+        elif mode == ("bipartite", "target"):
+            S = int(sys.argv[3])
+            P = tuple([int(i) for i in sys.argv[4:]])
+            make_target_bipartite(S, P, N)
+        elif mode == ("induced", "target"):
+            S = int(sys.argv[3])
+            P = tuple([int(i) for i in sys.argv[4:]])
+            make_target_induced(S, P, N)
+        else:
+            raise ValueError("Unknown mode")
 
         
 
