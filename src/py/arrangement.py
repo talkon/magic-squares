@@ -1,210 +1,231 @@
+import dataclasses
+import math
 import time
+from collections import Counter
+from enum import Enum
 from typing import Callable
 
 
 Vec = tuple[int, int, int, int, int, int]
-Table = tuple[list[Vec], list[Vec]]
-TableIndices = tuple[list[int], list[int]]
 
 
-def make_vecs(
-    S: int, filt_rows: list[Vec], start: float
-) -> tuple[dict[int, int], list[Vec], int]:
-    eltc = {}
-    eltcl = []
+class Judgment(Enum):
+    NOTHING = 0
+    NEAR_MISS = 1
+    SOLUTION = 2
 
-    while True:
-        if len(filt_rows) <= 11:
-            # print(f"[{S}] (Eliminated by reduction)")
-            print(
-                f"[{S}] (Completed in {time.time()-start} seconds by reduction)",
-                flush=True,
-            )
-            return {}, [], 0
-        eltc = {}
-        for row in filt_rows:
-            for elt in row:
-                eltc[elt] = eltc.get(elt, 0) + 1
-        eltcl = sorted(eltc.items(), key=lambda x: x[1], reverse=True)
-        if eltcl[-1][1] >= 2:
+
+@dataclasses.dataclass
+class Table:
+    rows: list[Vec]
+    cols: list[Vec]
+    ris: list[int] = dataclasses.field(default_factory=list)  # row indices
+    cis: list[int] = dataclasses.field(default_factory=list)  # column indices
+
+
+@dataclasses.dataclass
+class SearchStats:
+    count: int
+    start_time: float
+    near_misses: list[Table]
+    solutions: list[Table]
+
+
+def elapsed(stats: SearchStats) -> float:
+    """
+    Return elapsed time since search start.
+    """
+    return time.time() - stats.start_time
+
+
+PROCESS_ID = None
+
+
+def log(type: str, message: str) -> None:
+    print(f"[{PROCESS_ID}] ({type}) {message}", flush=True)
+
+
+def make_vecs(vecs: list[Vec]) -> tuple[dict[int, int], list[Vec]]:
+    """
+    Remove vecs that can't appear in the table, and relabel by frequency.
+    Returns label_to_elt dictionary and the new vecs.
+    """
+    count = Counter()
+
+    while len(vecs) >= 12:
+        count = Counter([elt for vec in vecs for elt in vec])
+        if count.most_common()[-1][1] >= 2:
             break
-        else:
-            filt_rows = [row for row in filt_rows if all(eltc[elt] > 1 for elt in row)]
+        vecs = [vec for vec in vecs if all(count[elt] > 1 for elt in vec)]
+    else:
+        return {}, []  # not enough vecs to fill grid
 
-    # print(f"[{S}] (Setup) reduced from {l1} vecs to {len(filt_rows)} vecs", flush=True)
+    # log(f"(Setup) reduced from {l1} vecs to {len(sp_sets)} vecs")
 
-    rename_map = {}
-    inv_map = {}
-    for i, elt in enumerate(eltcl):
-        rename_map[elt[0]] = i
-        inv_map[i] = elt[0]
+    elt_to_label = {}
+    for i, (elt, _) in enumerate(count.most_common()):
+        elt_to_label[elt] = i  # more common elt = smaller label
 
     vecs = sorted(
-        [
-            tuple(sorted([rename_map[i] for i in row], reverse=True))
-            for row in filt_rows
-        ],
+        [tuple(sorted([elt_to_label[i] for i in vec], reverse=True)) for vec in vecs],
         reverse=True,
     )
-    # for vec in vecs:
-    #   print(vec)
-    nvecs = len(vecs)
-    return inv_map, vecs, nvecs
+
+    label_to_elt = {label: elt for elt, label in elt_to_label.items()}
+    return label_to_elt, vecs
 
 
 def make_intersections(vecs: list[Vec]) -> dict[int, dict[int, int]]:
-    d = {}
-    for i in range(len(vecs)):
-        dd = {}
-        for j in range(len(vecs)):
-            dd[j] = len(set(vecs[i]).intersection(set(vecs[j])))
-        d[i] = dd
-    return d
+    """
+    Precompute intersections[i][j] = len(set(vecs[i]) & set(vecs[j])).
+    """
+    intersections = {}
+    for i, vec1 in enumerate(vecs):
+        intersections[i] = {
+            j: len(set(vec1) & set(vec2)) for j, vec2 in enumerate(vecs)
+        }
+    return intersections
+
+
+def to_elts(label_to_elt: dict[int, int], table: Table) -> Table:
+    """
+    Translate a table of labels to a table of elements.
+    """
+    return Table(
+        [tuple(label_to_elt[label] for label in row) for row in table.rows],
+        [tuple(label_to_elt[label] for label in col) for col in table.cols],
+    )
+
+
+def judge(S: int, elt_table: Table) -> Judgment:
+    """
+    Judge a table of elements, and returns if it's a solution, a near miss, or
+    neither.
+    """
+    score = len(elt_table.rows) * len(elt_table.cols)
+
+    if score == 25:
+        row_elts = {elt for row in elt_table.rows for elt in row}
+        col_elts = {elt for col in elt_table.cols for elt in col}
+        # missing elt, additively
+        missing_elt = 6 * S - sum(row_elts | col_elts)
+        last_row = [*(row_elts - col_elts), missing_elt]
+
+        if math.prod(elt_table.rows[0]) == math.prod(last_row):
+            return Judgment.SOLUTION
+        else:
+            return Judgment.NEAR_MISS
+
+    if score > 25:
+        raise Exception(f"{score} should never happen?")
+
+    return Judgment.NOTHING
 
 
 def recorder(
-    inv_map: dict[int, int], start: float, vecs: list[Vec], S: int, count: list[int]
-) -> Callable[[Table, TableIndices], tuple[Table | None, Table | None],]:
-    def translate(rowscols: Table) -> Table:
-        rows, cols = rowscols
-        rs = [tuple(inv_map[e] for e in row) for row in rows]
-        cs = [tuple(inv_map[e] for e in col) for col in cols]
-        return rs, cs
+    stats: SearchStats, S: int, label_to_elt: dict[int, int], vecs: list[Vec]
+) -> Callable[[Table], None]:
+    """
+    Returns a function that records a found table, then updates stats.
+    """
 
-    def record(
-        rowscols: Table, riscis: TableIndices
-    ) -> tuple[Table | None, Table | None]:
-        rows, cols = rowscols
-        ris, cis = riscis
-        count[0] += 1
-        if count[0] % 100000 == 0:
-            print(
-                f"[{S}] (Log) {count[0]} {time.time()-start} {len(vecs)} {sorted(ris+cis)}",
-                flush=True,
-            )
+    def record(table: Table) -> None:
+        """
+        Record a found table, updating stats if needed.
+        """
+        stats.count += 1
+        if stats.count % 100000 == 0:
+            nvecs = len(vecs)
+            indices = sorted(table.ris + table.cis)
+            log("Log", f"{stats.count} {elapsed(stats)} {nvecs} {indices}")
 
-        score = len(rows) * len(cols)
-        rs, cs = translate(rowscols)
-
-        if score == 25:
-            missing_elt = 6 * S - sum(set().union(*rs).union(*cs))
-            last_row = list(set().union(*rs).difference(set().union(*cs))) + [
-                missing_elt
-            ]
-            pl = 1
-            p1 = 1
-            for e1, el in zip(rs[0], last_row):
-                pl = pl * el
-                p1 = p1 * e1
-            # print(e, p1, pl, flush=True)
-            if p1 == pl:
-                print(f"[{S}] (SOLUTION  6x6) {(rs, cs)}", flush=True)
-                return ((rs, cs), None)
-            if p1 != pl:
-                print(f"[{S}] (Near miss 5x5) {(rs, cs)}", flush=True)
-                return (None, (rs, cs))
-
-        if score > 25:
-            raise Exception(f"{score} should never happen?")
-        return (None, None)
+        elt_table = to_elts(label_to_elt, table)
+        match judge(S, elt_table):
+            case Judgment.NOTHING:
+                pass
+            case Judgment.NEAR_MISS:
+                log("near miss 5x5", f"{elt_table}")
+                stats.near_misses.append(elt_table)
+            case Judgment.SOLUTION:
+                log("SOLUTION  6x6", f"{elt_table}")
+                stats.solutions.append(elt_table)
 
     return record
 
 
 def searcher(
-    nvecs: int,
     vecs: list[Vec],
-    record: Callable[
-        [Table, TableIndices],
-        tuple[Table | None, Table | None],
-    ],
     intersections: dict[int, dict[int, int]],
-) -> tuple[
-    Callable[[int, Table, TableIndices, set[int]], None],
-    list[Table],
-    list[Table],
-]:
-    sols: list[Table] = []
-    nms: list[Table] = []
+    record: Callable[[Table], None],
+) -> Callable[[int, Table, set[int]], None]:
+    """
+    Returns a backtracking search function.
+    """
 
-    def search_aux(
-        i: int,
-        rowscols: Table,
-        riscis: TableIndices,
-        unmatched: set[int],
-    ):
-        rows, cols = rowscols
-        ris, cis = riscis
-        nonlocal sols
-        nonlocal nms
-        # print(i, rows, cols)
-        if i < nvecs:
-            mr = vecs[i][0]
-            if unmatched and max(unmatched) > mr:
+    def search_aux(i: int, table: Table, unmatched: set[int]):
+        """
+        Backtracking: start searching from partial table, with vecs beginning
+        from index i.
+        """
+        if i < len(vecs):
+            max_elt = vecs[i][0]
+            if unmatched and max(unmatched) > max_elt:
                 return
-            # union_rows = set().union(*rows)
-            # union_cols = set().union(*cols)
-            # if not union_cols.issuperset(sorted(e for e in union_rows if e > mr)):
-            #   return
-            # if not union_rows.issuperset(sorted(e for e in union_cols if e > mr)):
-            #   return
 
-        nm, sol = record(rowscols, riscis)
-        if nm:
-            nms += [nm]
-        if sol:
-            sols += [sol]
+        record(table)
 
-        for j in range(i, nvecs):
+        for j in range(i, len(vecs)):
             vec = vecs[j]
 
-            is_valid_row = all(intersections[j][ri] == 0 for ri in ris) and all(
-                intersections[j][ci] == 1 for ci in cis
+            is_valid_row = (
+                # can't overlap existing rows:
+                all(intersections[j][ri] == 0 for ri in table.ris)
+                # must overlap existing cols:
+                and all(intersections[j][ci] == 1 for ci in table.cis)
             )
             if is_valid_row:
-                um = unmatched.symmetric_difference(vec)
-                search_aux(j + 1, (rows + [vec], cols), (ris + [j], cis), um)
+                new_table = dataclasses.replace(
+                    table, rows=table.rows + [vec], ris=table.ris + [j]
+                )
+                search_aux(j + 1, new_table, unmatched ^ set(vec))
 
             is_valid_col = (
-                len(rows) > 0
-                and all(intersections[j][ri] == 1 for ri in ris)
-                and all(intersections[j][ci] == 0 for ci in cis)
+                len(table.rows) > 0
+                # must overlap existing rows:
+                and all(intersections[j][ri] == 1 for ri in table.ris)
+                # can't overlap existing cols:
+                and all(intersections[j][ci] == 0 for ci in table.cis)
             )
             if is_valid_col:
-                um = unmatched.symmetric_difference(vec)
-                search_aux(j + 1, (rows, cols + [vec]), (ris, cis + [j]), um)
+                new_table = dataclasses.replace(
+                    table, cols=table.cols + [vec], cis=table.cis + [j]
+                )
+                search_aux(j + 1, new_table, unmatched ^ set(vec))
 
-    return search_aux, sols, nms
+    return search_aux
 
 
 def process(input: tuple[int, list[Vec]]) -> tuple[int, list[Table], list[Table]]:
-    S, filt_rows = input
-    start = time.time()
+    global PROCESS_ID
+    S, vecs = input
+    PROCESS_ID = S
+    stats = SearchStats(0, time.time(), [], [])
 
-    inv_map, vecs, nvecs = make_vecs(S, filt_rows, start)
-    if not inv_map:
+    label_to_elt, vecs = make_vecs(vecs)
+    if not vecs:
+        log(f"Completed in {elapsed(stats)} seconds", "by reduction")
         return 0, [], []
 
-    # print(f"[{S}] (Starting)", flush=True)
-    # print(">>> finished in", time.time()-start, "seconds")
-
-    # print(">>> Precomputing intersections")
-    # start = time.time()
     intersections = make_intersections(vecs)
-    # print(">>> finished in", time.time()-start, "seconds")
 
-    count = [0]
-    search_start = time.time()
+    record = recorder(stats, S, label_to_elt, vecs)
+    search_aux = searcher(vecs, intersections, record)
 
-    record = recorder(inv_map, start, vecs, S, count)
-    search_aux, sols, nms = searcher(nvecs, vecs, record, intersections)
-
-    # print(f"[{S}] (Searching)", flush=True)
-    search_aux(0, ([], []), ([], []), set())
-    # print(f"[{S}] (Log) {count[0]} {time.time()-search_start} {len(vecs)}")
-    print(
-        f"[{S}] (Completed in {time.time()-start} seconds: explored {count[0]} configs, {len(nms)} near misses, {len(sols)} solutions)",
-        flush=True,
+    # log("Searching", "")
+    search_aux(0, Table([], []), set())
+    log(
+        f"Completed in {elapsed(stats)} seconds",
+        f"explored {stats.count} configs, {len(stats.near_misses)} near misses, {len(stats.solutions)} solutions",
     )
 
-    return count[0], sols, nms
+    return stats.count, stats.solutions, stats.near_misses
