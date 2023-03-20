@@ -140,15 +140,13 @@ def recorder(
             log("Log", f"{stats.count} {elapsed(stats)} {nvecs} {indices}")
 
         elt_table = to_elts(label_to_elt, table)
-        match judge(S, elt_table):
-            case Judgment.NOTHING:
-                pass
-            case Judgment.NEAR_MISS:
-                log("near miss 5x5", f"{elt_table}")
-                stats.near_misses.append(elt_table)
-            case Judgment.SOLUTION:
-                log("SOLUTION  6x6", f"{elt_table}")
-                stats.solutions.append(elt_table)
+        judgment = judge(S, elt_table)
+        if judgment == Judgment.NEAR_MISS:
+            log("near miss 5x5", f"{elt_table}")
+            stats.near_misses.append(elt_table)
+        elif judgment == Judgment.SOLUTION:
+            log("SOLUTION  6x6", f"{elt_table}")
+            stats.solutions.append(elt_table)
 
     return record
 
