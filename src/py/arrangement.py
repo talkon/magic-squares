@@ -106,8 +106,7 @@ def judge(S: int, elt_table: Table) -> Judgment:
             return Judgment.SOLUTION
         else:
             return Judgment.NEAR_MISS
-
-    if score > 25:
+    elif score > 25:
         raise Exception(f"{score} should never happen?")
 
     return Judgment.NOTHING
@@ -115,12 +114,12 @@ def judge(S: int, elt_table: Table) -> Judgment:
 
 def recorder(
     stats: SearchStats, S: int, label_to_elt: dict[int, int], vecs: list[Vec]
-) -> Callable[[Table], None]:
+) -> Callable[[Table], Judgment]:
     """
     Returns a function that records a found table, then updates stats.
     """
 
-    def record(table: Table) -> None:
+    def record(table: Table) -> Judgment:
         """
         Record a found table, updating stats if needed.
         """
@@ -138,6 +137,7 @@ def recorder(
         elif judgment == Judgment.SOLUTION:
             log("SOLUTION  6x6", f"{elt_table}")
             stats.solutions.append(elt_table)
+        return judgment
 
     return record
 
@@ -145,7 +145,7 @@ def recorder(
 def searcher(
     vecs: list[Vec],
     intersections: dict[int, dict[int, int]],
-    record: Callable[[Table], None],
+    record: Callable[[Table], Judgment],
 ) -> Callable[[int, Table, set[int]], None]:
     """
     Returns a backtracking search function.
@@ -161,7 +161,8 @@ def searcher(
             if unmatched and max(unmatched) > max_elt:
                 return
 
-        record(table)
+        if record(table) != Judgment.NOTHING:
+            return
 
         for j in range(i, len(vecs)):
             vec = vecs[j]

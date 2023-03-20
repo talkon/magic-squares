@@ -1,3 +1,4 @@
+import argparse
 import multiprocessing
 import random
 import sys
@@ -7,7 +8,12 @@ from arrangement import process
 from enumeration import gen_rows, rows_to_rowdict
 
 if __name__ == "__main__":
-    P = tuple([int(i) for i in sys.argv[1:]])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sum", metavar="S", type=int, nargs="?")
+    parser.add_argument("exponents", metavar="P", type=int, nargs="+")
+    args = parser.parse_args()
+
+    P = tuple(args.exponents)
     N = 6
 
     print(">>> Generating and simplifying rows")
@@ -15,7 +21,10 @@ if __name__ == "__main__":
 
     all_rows = gen_rows(P, N)
     row_dict = rows_to_rowdict(all_rows)
+    if args.sum is not None:
+        row_dict = {S: vecs for S, vecs in row_dict.items() if S == args.sum}
 
+    print(f">>> number of S to consider: {len(row_dict)}")
     print(f">>> finished in {time.time()-start} seconds", flush=True)
 
     print(">>> Starting parallel search", flush=True)
