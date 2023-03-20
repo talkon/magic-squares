@@ -1,3 +1,5 @@
+from collections import Counter
+
 Vec = tuple[int, int, int, int, int, int]
 
 tup_bank = {}
@@ -66,7 +68,21 @@ def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
     print(f">>> total possible 6-vecs: {sum(u[1] for u in ucs)}")
     for row in all_rows:
         if len(set(row)) == len(row) and sum(row) in S_set:
-            row_dict[sum(row)] += [row]
+            row_dict[sum(row)].append(row)
+
+    # reduction: if there's less than 12 vecs, we can't fill the grid
+    for i, vecs in row_dict.items():
+        while len(vecs) >= 12:
+            count = Counter([elt for vec in vecs for elt in vec])
+            if count.most_common()[-1][1] >= 2:
+                break
+            # reduction: we can't use vecs that have unique elts
+            vecs = [vec for vec in vecs if all(count[elt] > 1 for elt in vec)]
+        else:
+            vecs = []
+        row_dict[i] = vecs
+
+    row_dict = {i: vecs for i, vecs in row_dict.items() if vecs}
 
     # print(S_list)
     print(f">>> number of S to consider: {len(S_list)}")

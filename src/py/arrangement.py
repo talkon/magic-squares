@@ -47,18 +47,9 @@ def log(type: str, message: str) -> None:
 
 def make_vecs(vecs: list[Vec]) -> tuple[dict[int, int], list[Vec]]:
     """
-    Remove vecs that can't appear in the table, and relabel by frequency.
-    Returns label_to_elt dictionary and the new vecs.
+    Relabel vecs by frequency. Returns label_to_elt dictionary and the new vecs.
     """
-    count = Counter()
-
-    while len(vecs) >= 12:
-        count = Counter([elt for vec in vecs for elt in vec])
-        if count.most_common()[-1][1] >= 2:
-            break
-        vecs = [vec for vec in vecs if all(count[elt] > 1 for elt in vec)]
-    else:
-        return {}, []  # not enough vecs to fill grid
+    count = Counter([elt for vec in vecs for elt in vec])
 
     # log(f"(Setup) reduced from {l1} vecs to {len(sp_sets)} vecs")
 
@@ -210,10 +201,6 @@ def process(input: tuple[int, list[Vec]]) -> tuple[int, list[Table], list[Table]
     stats = SearchStats(0, time.time(), [], [])
 
     label_to_elt, vecs = make_vecs(vecs)
-    if not vecs:
-        log(f"Completed in {elapsed(stats)} seconds", "by reduction")
-        return 0, [], []
-
     intersections = make_intersections(vecs)
 
     record = recorder(stats, S, label_to_elt, vecs)
