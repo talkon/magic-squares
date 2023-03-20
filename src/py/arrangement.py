@@ -102,12 +102,13 @@ def judge(S: int, elt_table: Table) -> Judgment:
         missing_elt = 6 * S - sum(row_elts | col_elts)
         last_row = [*(row_elts - col_elts), missing_elt]
 
-        if math.prod(elt_table.rows[0]) == math.prod(last_row):
-            return Judgment.SOLUTION
-        else:
+        # this is slightly silly code, but we need to ensure solutions aren't counted twice
+        if math.prod(elt_table.rows[0]) != math.prod(last_row):
             return Judgment.NEAR_MISS
-    elif score > 25:
-        raise Exception(f"{score} should never happen?")
+    elif score == 36:
+        return Judgment.SOLUTION
+    # elif score > 25:
+    #     raise Exception(f"{score} should never happen?")
 
     return Judgment.NOTHING
 
