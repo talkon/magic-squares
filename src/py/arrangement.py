@@ -216,8 +216,13 @@ def searcher(
                 )
             search_aux(j + 1, new_table, unmatched ^ set(vec), temp_row_indices, temp_col_indices)
         
+        if i == 0:
+            return 
+
         temp_row_indices = new_row_indices
         temp_col_indices = new_col_indices
+       
+        
         for j in new_col_indices:
             vec = vecs[j]
             if vec[0] < max_unmatched:
