@@ -174,9 +174,9 @@ def searcher(
             vec = vecs[j]
             is_valid_row = (
                 # can't overlap existing rows:
-                all(intersections[j][ri] == 0 for ri in table.ris)
+                (len(table.ris) == 0 or intersections[j][table.ris[-1]] == 0)
                 # must overlap existing cols:
-                and all(intersections[j][ci] == 1 for ci in table.cis)
+                and (len(table.cis) == 0 or intersections[j][table.cis[-1]] == 1) 
             )
             if(is_valid_row):
                 new_row_indices.append(j)
@@ -187,9 +187,9 @@ def searcher(
             is_valid_col = (
                 len(table.rows) > 0
                 # must overlap existing rows:
-                and all(intersections[j][ri] == 1 for ri in table.ris)
+                and (len(table.ris) == 0 or intersections[j][table.ris[-1]] == 1)
                 # can't overlap existing cols:
-                and all(intersections[j][ci] == 0 for ci in table.cis)
+                and (len(table.cis) == 0 or intersections[j][table.cis[-1]] == 0)
             )
             if(is_valid_col):
                 new_col_indices.append(j)
