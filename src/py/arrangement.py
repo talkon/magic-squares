@@ -233,8 +233,8 @@ def searcher(
             if max_el == max_unmatched:
                 for j in row_buckets[max_el]:
                     vec = vecs[j]
-                    temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
-                    temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
+                    temp_row_indices = new_row_indices[bisect.bisect_right(new_row_indices, j):]
+                    temp_col_indices = new_col_indices[bisect.bisect_right(new_col_indices, j):]
                     new_table = dataclasses.replace(
                             table, rows=table.rows + [vec], ris=table.ris + [j]
                         )
@@ -250,8 +250,8 @@ def searcher(
                             vec1 = vecs[j1]
                             vec2 = vecs[j2]
                             j = max(j1, j2)
-                            temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
-                            temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
+                            temp_row_indices = new_row_indices[bisect.bisect_right(new_row_indices, j):]
+                            temp_col_indices = new_col_indices[bisect.bisect_right(new_col_indices, j):]
                             new_table = dataclasses.replace(
                                     table, rows=table.rows + [vec1], ris=table.ris + [j1],
                                         cols=table.cols + [vec2], cis=table.cis + [j2]
@@ -261,8 +261,8 @@ def searcher(
         if max_unmatched in col_buckets:
             for j in col_buckets[max_unmatched]:
                 vec = vecs[j]
-                temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
-                temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
+                temp_row_indices = new_row_indices[bisect.bisect_right(new_row_indices, j):]
+                temp_col_indices = new_col_indices[bisect.bisect_right(new_col_indices, j):]
                 new_table = dataclasses.replace(
                         table, cols=table.cols + [vec], cis=table.cis + [j]
                     )
