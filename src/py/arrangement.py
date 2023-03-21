@@ -205,34 +205,68 @@ def searcher(
 
         max_unmatched = max(unmatched, default = 0)
 
+        row_buckets = {}
+        col_buckets = {}
+
+        # group rows and cols by max value
         for j in new_row_indices:
             vec = vecs[j]
             if vec[0] < max_unmatched:
                 continue
-            temp_row_indices = temp_row_indices[1:]
-            temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
-            new_table = dataclasses.replace(
-                    table, rows=table.rows + [vec], ris=table.ris + [j]
-                )
-            search_aux(j + 1, new_table, unmatched ^ set(vec), temp_row_indices, temp_col_indices)
-        
-        if i == 0:
-            return 
+            if vec[0] not in row_buckets:
+                row_buckets[vec[0]] = set()
+            if vec[0] not in col_buckets:
+                col_buckets[vec[0]] = set()
+            row_buckets[vec[0]].add(j)
 
-        temp_row_indices = new_row_indices
-        temp_col_indices = new_col_indices
-       
-        
         for j in new_col_indices:
             vec = vecs[j]
             if vec[0] < max_unmatched:
                 continue
-            temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
-            temp_col_indices = temp_col_indices[1:]
-            new_table = dataclasses.replace(
-                    table, cols=table.cols + [vec], cis=table.cis + [j]
-                )
-            search_aux(j + 1, new_table, unmatched ^ set(vec), temp_row_indices, temp_col_indices)
+            if vec[0] not in row_buckets:
+                row_buckets[vec[0]] = set()
+            if vec[0] not in col_buckets:
+                col_buckets[vec[0]] = set()
+            col_buckets[vec[0]].add(j)
+
+        for max_el in row_buckets:
+            if max_el == max_unmatched:
+                for j in row_buckets[max_el]:
+                    vec = vecs[j]
+                    temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
+                    temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
+                    new_table = dataclasses.replace(
+                            table, rows=table.rows + [vec], ris=table.ris + [j]
+                        )
+                    search_aux(j + 1, new_table, unmatched ^ set(vec), temp_row_indices, temp_col_indices)
+            else:
+                # first set added must be followed by another set added with same max value, 
+                # if its max is greater than max_unmatched
+                for j1 in row_buckets[max_el]:
+                    for j2 in col_buckets[max_el]:
+                        if i == 0 and j1 > j2:
+                            continue
+                        if intersections[j1][j2] == 1:
+                            vec1 = vecs[j1]
+                            vec2 = vecs[j2]
+                            j = max(j1, j2)
+                            temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
+                            temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
+                            new_table = dataclasses.replace(
+                                    table, rows=table.rows + [vec1], ris=table.ris + [j1],
+                                        cols=table.cols + [vec2], cis=table.cis + [j2]
+                                )
+                            search_aux(j + 1, new_table, unmatched ^ set(vec1) ^ set(vec2), temp_row_indices, temp_col_indices)
+
+        if max_unmatched in col_buckets:
+            for j in col_buckets[max_unmatched]:
+                vec = vecs[j]
+                temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
+                temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
+                new_table = dataclasses.replace(
+                        table, cols=table.cols + [vec], cis=table.cis + [j]
+                    )
+                search_aux(j + 1, new_table, unmatched ^ set(vec), temp_row_indices, temp_col_indices)
 
     return search_aux
 
