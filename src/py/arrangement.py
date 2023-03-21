@@ -249,7 +249,7 @@ def searcher(
                         if intersections[j1][j2] == 1:
                             vec1 = vecs[j1]
                             vec2 = vecs[j2]
-                            j = min(j1, j2)
+                            j = max(j1, j2)
                             temp_row_indices = new_row_indices[bisect.bisect_right(new_row_indices, j):]
                             temp_col_indices = new_col_indices[bisect.bisect_right(new_col_indices, j):]
                             new_table = dataclasses.replace(
