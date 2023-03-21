@@ -164,6 +164,8 @@ def searcher(
             if unmatched and max(unmatched) > max_elt:
                 return
 
+        
+
         if record(table) != Judgment.NOTHING:
             return
 
@@ -196,11 +198,17 @@ def searcher(
             new_col_indices = new_row_indices
         new_row_indices = tuple(new_row_indices)
         new_col_indices = tuple(new_col_indices)
+
+
         temp_row_indices = new_row_indices
         temp_col_indices = new_col_indices
 
+        max_unmatched = max(unmatched, default = 0)
+
         for j in new_row_indices:
             vec = vecs[j]
+            if vec[0] < max_unmatched:
+                continue
             temp_row_indices = temp_row_indices[1:]
             temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
             new_table = dataclasses.replace(
@@ -212,6 +220,8 @@ def searcher(
         temp_col_indices = new_col_indices
         for j in new_col_indices:
             vec = vecs[j]
+            if vec[0] < max_unmatched:
+                continue
             temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
             temp_col_indices = temp_col_indices[1:]
             new_table = dataclasses.replace(
