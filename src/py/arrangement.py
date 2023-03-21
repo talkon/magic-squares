@@ -4,6 +4,7 @@ import time
 from collections import Counter
 from enum import Enum
 from typing import Callable
+import bisect
 
 
 Vec = tuple[int, int, int, int, int, int]
@@ -152,10 +153,11 @@ def searcher(
     Returns a backtracking search function.
     """
 
-    def search_aux(i: int, table: Table, unmatched: set[int]):
+    def search_aux(i: int, table: Table, unmatched: set[int], 
+                   row_indices: tuple[int], col_indices: tuple[int]):
         """
-        Backtracking: start searching from partial table, with vecs beginning
-        from index i.
+        Backtracking: start searching from partial table, 
+        with possible vec indices in row_indices and col_indices
         """
         if i < len(vecs):
             max_elt = vecs[i][0]
@@ -165,21 +167,21 @@ def searcher(
         if record(table) != Judgment.NOTHING:
             return
 
-        for j in range(i, len(vecs)):
+        new_row_indices = []
+        for j in row_indices:
             vec = vecs[j]
-
             is_valid_row = (
                 # can't overlap existing rows:
                 all(intersections[j][ri] == 0 for ri in table.ris)
                 # must overlap existing cols:
                 and all(intersections[j][ci] == 1 for ci in table.cis)
             )
-            if is_valid_row:
-                new_table = dataclasses.replace(
-                    table, rows=table.rows + [vec], ris=table.ris + [j]
-                )
-                search_aux(j + 1, new_table, unmatched ^ set(vec))
+            if(is_valid_row):
+                new_row_indices.append(j)
 
+        new_col_indices = []
+        for j in col_indices:
+            vec = vecs[j]
             is_valid_col = (
                 len(table.rows) > 0
                 # must overlap existing rows:
@@ -187,11 +189,35 @@ def searcher(
                 # can't overlap existing cols:
                 and all(intersections[j][ci] == 0 for ci in table.cis)
             )
-            if is_valid_col:
-                new_table = dataclasses.replace(
+            if(is_valid_col):
+                new_col_indices.append(j)
+
+        if i==0:
+            new_col_indices = new_row_indices
+        new_row_indices = tuple(new_row_indices)
+        new_col_indices = tuple(new_col_indices)
+        temp_row_indices = new_row_indices
+        temp_col_indices = new_col_indices
+
+        for j in new_row_indices:
+            vec = vecs[j]
+            temp_row_indices = temp_row_indices[1:]
+            temp_col_indices = temp_col_indices[bisect.bisect_right(temp_col_indices, j):]
+            new_table = dataclasses.replace(
+                    table, rows=table.rows + [vec], ris=table.ris + [j]
+                )
+            search_aux(j + 1, new_table, unmatched ^ set(vec), temp_row_indices, temp_col_indices)
+        
+        temp_row_indices = new_row_indices
+        temp_col_indices = new_col_indices
+        for j in new_col_indices:
+            vec = vecs[j]
+            temp_row_indices = temp_row_indices[bisect.bisect_right(temp_row_indices, j):]
+            temp_col_indices = temp_col_indices[1:]
+            new_table = dataclasses.replace(
                     table, cols=table.cols + [vec], cis=table.cis + [j]
                 )
-                search_aux(j + 1, new_table, unmatched ^ set(vec))
+            search_aux(j + 1, new_table, unmatched ^ set(vec), temp_row_indices, temp_col_indices)
 
     return search_aux
 
@@ -209,7 +235,7 @@ def process(input: tuple[int, list[Vec]]) -> tuple[int, list[Table], list[Table]
     search_aux = searcher(vecs, intersections, record)
 
     # log("Searching", "")
-    search_aux(0, Table([], []), set())
+    search_aux(0, Table([], []), set(), tuple(i for i in range(len(vecs))), tuple(i for i in range(len(vecs))))
     log(
         f"Completed in {elapsed(stats)} seconds",
         f"explored {stats.count} configs, {len(stats.near_misses)} near misses, {len(stats.solutions)} solutions",
