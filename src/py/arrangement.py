@@ -148,7 +148,7 @@ def searcher(
     vecs: list[Vec],
     intersections: dict[int, dict[int, int]],
     record: Callable[[Table], Judgment],
-) -> Callable[[int, Table, set[int]], None]:
+) -> Callable[[int, Table, set[int], tuple[int], tuple[int]], None]:
     """
     Returns a backtracking search function.
     """
@@ -271,9 +271,8 @@ def searcher(
     return search_aux
 
 
-def process(input: tuple[int, list[Vec]]) -> tuple[int, list[Table], list[Table]]:
+def process(S: int, vecs: list[Vec]) -> SearchStats:
     global PROCESS_ID
-    S, vecs = input
     PROCESS_ID = S
     stats = SearchStats(0, time.time(), [], [])
 
@@ -290,4 +289,4 @@ def process(input: tuple[int, list[Vec]]) -> tuple[int, list[Table], list[Table]
         f"explored {stats.count} configs, {len(stats.near_misses)} near misses, {len(stats.solutions)} solutions",
     )
 
-    return stats.count, stats.solutions, stats.near_misses
+    return stats
