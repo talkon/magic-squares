@@ -1,4 +1,5 @@
 from collections import Counter
+import argparse
 
 Vec = tuple[int, int, int, int, int, int]
 
@@ -84,3 +85,31 @@ def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
     row_dict = {S: vecs for S, vecs in row_dict.items() if vecs}
 
     return row_dict
+
+
+
+def write_enums(row_dict: dict[int, list[Vec]], file: str):
+    # rows are guaranteed to written be in ascending order of sum
+    file_str = ""
+    n_rows = 0
+    for s in sorted(row_dict.keys()):
+        for row in row_dict[s]:
+            file_str += " ".join(str(i) for i in row)
+            file_str += "\n"
+            n_rows += 1
+    with open(file, "w") as f:
+        f.write(file_str)
+    print(f">>> wrote {n_rows} rows to {file} in ascending order of sum")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", metavar="file", type=str)
+    parser.add_argument("exponents", metavar="P", type=int, nargs="+")
+    args = parser.parse_args()
+    P = tuple(args.exponents)
+    N = 6
+    all_rows = gen_rows(P, N)
+    row_dict = rows_to_rowdict(all_rows)
+    write_enums(row_dict, args.file)
+    
