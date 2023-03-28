@@ -1,55 +1,72 @@
 import argparse
 import multiprocessing
 import random
-import sys
 import time
+from typing import Union
 
 from arrangement import process
 from enumeration import gen_rows, rows_to_rowdict
 
+
+def log(type: str, message: str) -> None:
+    print(f">>> ({type}) {message}", flush=True)
+
+
+def run(
+    N: int,
+    P: tuple[int, ...],
+    SS: Union[list[int], None] = None,
+    *,
+    deterministic: bool = False,
+    serial: bool = False,
+) -> None:
+    log("enum", "Generating and simplifying rows")
+    enum_start = time.time()
+    all_rows = gen_rows(P, N)
+    row_dict = rows_to_rowdict(all_rows)
+    sp_sets = []
+    for S, vecs in row_dict.items():
+        if (not SS) or (S in SS):
+            sp_sets.append((S, vecs))
+    if deterministic:
+        sp_sets.sort()
+    else:
+        random.shuffle(sp_sets)
+    log("enum", f"number of S to consider: {len(sp_sets)}")
+    log("enum", f"finished in {time.time()-enum_start} seconds")
+
+    arrange_start = time.time()
+    try:
+        if serial:
+            log("arrange", "Starting serial search")
+            results = [process(S, vecs) for S, vecs in sp_sets]
+        else:
+            log("arrange", "Starting parallel search")
+            with multiprocessing.Pool(50) as p:
+                results = p.starmap(process, sp_sets)
+    finally:
+        log("arrange", f"finished in {time.time()-arrange_start} seconds")
+        log("stats", f"total time: {time.time()-enum_start} seconds")
+
+    configurations = sum(result.count for result in results)
+    solutions = [sol for result in results for sol in result.solutions]
+    near_misses = [nm for result in results for nm in result.near_misses]
+    log("stats", f"total configurations: {configurations}")
+    log("stats", f"solutions found: {len(solutions)}")
+    log("stats", f"solutions: {solutions}")
+    log("stats", f"near misses found: {len(near_misses)}")
+    log("stats", f"near misses: {near_misses}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sum", metavar="S", type=int, nargs="?")
+    parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--serial", action="store_true")
+    parser.add_argument("--sum", metavar="S", type=int, nargs="*")
     parser.add_argument("exponents", metavar="P", type=int, nargs="+")
     args = parser.parse_args()
 
-    P = tuple(args.exponents)
     N = 6
-
-    print(">>> Generating and simplifying rows")
-    start = time.time()
-
-    all_rows = gen_rows(P, N)
-    row_dict = rows_to_rowdict(all_rows)
-    if args.sum is not None:
-        row_dict = {S: vecs for S, vecs in row_dict.items() if S == args.sum}
-
-    print(f">>> number of S to consider: {len(row_dict)}")
-    print(f">>> finished in {time.time()-start} seconds", flush=True)
-
-    print(">>> Starting parallel search", flush=True)
-    l = list(row_dict.items())
-    random.shuffle(l)
-    search_start = time.time()
-    with multiprocessing.Pool(50) as p:
-        solss = p.map(process, l)
-        # solss = [process((327, row_dict[327]))]
-        sols = []
-        nms = []
-        count = 0
-        for c, ss, ns in solss:
-            count += c
-            if ss:
-                sols += ss
-            if ns:
-                nms += ns
-        print(
-            f">>> finished search for P = {P} in {time.time()-search_start} seconds",
-            flush=True,
-        )
-        print(f">>> total time: {time.time()-start} seconds", flush=True)
-        print(f">>> total configurations: {count}", flush=True)
-        print(f">>> solutions found: {len(sols)}", flush=True)
-        print(f">>> solutions: {sols}", flush=True)
-        print(f">>> near misses found: {len(nms)}", flush=True)
-        print(f">>> near misses: {nms}", flush=True)
+    P = tuple(args.exponents)
+    SS = args.sum
+    run(N, P, SS, deterministic=args.deterministic, serial=args.serial)

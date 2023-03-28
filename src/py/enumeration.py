@@ -65,7 +65,7 @@ def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
     S_set = {S for S, c in ucs if c >= 12}
     row_dict = {S: [] for S in S_set}
 
-    print(f">>> total possible 6-vecs: {sum(u[1] for u in ucs)}")
+    print(f">>> (enum) total possible 6-vecs: {sum(u[1] for u in ucs)}")
     for row in all_rows:
         if len(set(row)) == len(row) and sum(row) in S_set:
             row_dict[sum(row)].append(row)
