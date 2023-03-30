@@ -1,7 +1,7 @@
 #define VEC_SIZE 6
 
 typedef struct vec {
-    int elts[vec_SIZE];
+    int elts[VEC_SIZE];
 } vec;
 
 typedef struct vecgroupinfo {
