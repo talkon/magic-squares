@@ -1,5 +1,11 @@
 #define VEC_SIZE 6
 
+#define ROW 0
+#define COL 1
+#define ROWCOL 2
+#define NONE 3
+
+
 typedef struct vec {
     int elts[VEC_SIZE];
 } vec;
@@ -18,18 +24,22 @@ typedef struct vecgroup {
 
 typedef struct relabeling {
     vec* vecs;
+    int num_vecs;
     int* label_to_elt;
 } relabeling;
 
 typedef struct search_table {
-    vec rows[6];
-    vec cols[6];
+    int rows[6];
+    int cols[6];
     int numrows;
     int numcols;
     int* valid_rows;
     int num_valid_rows;
     int* valid_cols;
     int num_valid_cols;
+    int* unmatched;
+    int num_unmatched;
+    int* num_searched;
 } search_table;
 
 typedef struct indexed_int {
