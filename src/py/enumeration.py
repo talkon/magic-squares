@@ -87,7 +87,6 @@ def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
     return row_dict
 
 
-
 def write_enums(row_dict: dict[int, list[Vec]], file: str):
     # rows are guaranteed to written be in ascending order of sum
     file_str = ""
@@ -112,4 +111,3 @@ if __name__ == "__main__":
     all_rows = gen_rows(P, N)
     row_dict = rows_to_rowdict(all_rows)
     write_enums(row_dict, args.file)
-    
