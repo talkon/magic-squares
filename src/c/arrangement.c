@@ -338,18 +338,17 @@ void search_sum(vecgroup group, int sum){
 
 void test_print_vecs(char *filename){
     vecgroup group = read_vecs(filename);
+    int min_sum = sum(group.vecs[0]);
     printf("read\n");
     clock_t before = clock();
-    for(int i = 320; i< 330; i++)
+    for (int i = min_sum; i < group.numsums + 1; i++)
         search_sum(group, i);
     clock_t difference = clock() - before;
-    printf("completed in %d msecs\n", difference);
+    printf("completed in %lu msecs\n", difference);
     int msec = difference / CLOCKS_PER_SEC;
     free(group.vecs);
     free(group.infos);
 }
-
-
 
 int main(int argc, char *argv[]){
     int opt;
