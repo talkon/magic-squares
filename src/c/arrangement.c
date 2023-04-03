@@ -4,8 +4,9 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include "arrangement.h"
 #include <time.h>
+
+#include "arrangement.h"
 
 
 int sum(vec r){
@@ -99,17 +100,16 @@ relabeling elt_relabeling(vecgroup group, int sum){
     }
     qsort(new_vecs, total_vecs, sizeof(vec), vec_reverse);
     int max_elt = new_vecs[0].elts[0];
-    r.bitarrays = malloc(sizeof(uint64_t*) * total_vecs);
+    r.bitarrays = malloc(sizeof(bitset_t*) * total_vecs);
     for(int i = 0; i < total_vecs; i++){
-        r.bitarrays[i] = calloc((max_elt / 64) + 1, sizeof(uint64_t));
+        r.bitarrays[i] = bitset_create(max_elt);
         for(int j = 0; j < VEC_SIZE; j++){
-            *((r.bitarrays[i]) + (new_vecs[i].elts[j] / 64)) |= (uint64_t)1 << (new_vecs[i].elts[j] % 64);
+            bitset_set(r.bitarrays[i], new_vecs[i].elts[j]);
         }
     }
     r.vecs = new_vecs;
     r.num_vecs = total_vecs;
     r.label_to_elt = label_to_elt;
-    r.bitarray_size = (max_elt / 64) + 1;
     free(elt_to_label);
     free(elt_freqs);
     return r;
@@ -143,16 +143,6 @@ unsigned char** intersections(vec *vecs, int numvecs){
         }
     }
     return inters;
-}
-
-int max_unmatched(search_table table){
-    int m = 0;
-    for(int i = 0; i < table.num_unmatched; i++){
-        if(m < table.unmatched[i]){
-            m = table.unmatched[i];
-        }
-    }
-    return m;
 }
 
 int unmatched_max(uint64_t *unmatched, int num_64s){
@@ -194,15 +184,6 @@ int fill_valids(int *valid_rows, int last_row, int inter_val, unsigned char** in
 
 void search_aux(relabeling r, search_table table, unsigned char** inters, int last_appended, int minvec){
     search_table prev_table = table;
-    int max_row_elt = 0;
-    if(table.num_valid_rows > 0){
-        max_row_elt = r.vecs[table.valid_rows[0]].elts[0];
-    }
-    int max_col_elt = 0;
-    if(table.num_valid_cols > 0){
-        max_col_elt = r.vecs[table.valid_cols[0]].elts[0];
-    }
-    int max_elt = (max_row_elt > max_col_elt) ? max_row_elt : max_col_elt;
 
     if(!((table.numrows + table.num_valid_rows >= 6) && (table.numcols + table.num_valid_cols >= 6))){
         return;
@@ -237,7 +218,7 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
         table.valid_cols = valid_cols;
     }
 
-    int max_unmatched = unmatched_max(table.unmatched, r.bitarray_size);
+    int max_unmatched = bitset_maximum(table.unmatched);
 
 
     for(int i = 0; i < table.num_valid_rows; i++){
@@ -252,13 +233,9 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             table.numrows++;
             
             int roww = table.valid_rows[i];
-            for(int j = 0; j < r.bitarray_size; j++){
-                table.unmatched[j] ^= r.bitarrays[roww][j];
-            }
+            bitset_inplace_xor(table.unmatched, r.bitarrays[roww]);
             search_aux(r, table, inters, ROW, table.valid_rows[i]);
-            for(int j = 0; j < r.bitarray_size; j++){
-                table.unmatched[j] ^= r.bitarrays[roww][j];
-            }
+            bitset_inplace_xor(table.unmatched, r.bitarrays[roww]);
             
             table.numrows--;
         }
@@ -279,13 +256,9 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             table.numcols++;
          
             int coll = table.valid_cols[i];
-            for(int j = 0; j < r.bitarray_size; j++){
-                table.unmatched[j] ^= r.bitarrays[coll][j];
-            }
+            bitset_inplace_xor(table.unmatched, r.bitarrays[coll]);
             search_aux(r, table, inters, COL, table.valid_cols[i]);
-            for(int j = 0; j < r.bitarray_size; j++){
-                table.unmatched[j] ^= r.bitarrays[coll][j];
-            }
+            bitset_inplace_xor(table.unmatched, r.bitarrays[coll]);
             table.numcols--;
 
         }
@@ -320,7 +293,7 @@ void search_sum(vecgroup group, int sum){
     table.num_unmatched = 0;
     int num_searched = 0;
     table.num_searched = &num_searched;
-    table.unmatched = calloc(r.bitarray_size, sizeof(uint64_t));
+    table.unmatched = bitset_create(r.bitarrays[0]->size);
     
     search_aux(r, table, inters, NONE, 0);
     printf("num searched: %d\n", *table.num_searched);
