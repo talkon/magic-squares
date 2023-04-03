@@ -91,13 +91,11 @@ def write_enums(row_dict: dict[int, list[Vec]], file: str):
     # rows are guaranteed to written be in ascending order of sum
     file_str = ""
     n_rows = 0
-    for s in sorted(row_dict.keys()):
-        for row in row_dict[s]:
-            file_str += " ".join(str(i) for i in row)
-            file_str += "\n"
-            n_rows += 1
     with open(file, "w") as f:
-        f.write(file_str)
+        for s in sorted(row_dict.keys()):
+            for row in row_dict[s]:
+                print(" ".join(str(i) for i in row), file=f)
+                n_rows += 1
     print(f">>> wrote {n_rows} rows to {file} in ascending order of sum")
 
 
