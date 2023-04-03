@@ -90,7 +90,6 @@ def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
 
 def write_enums(row_dict: dict[int, list[Vec]], file: str, SS: Union[list[int], None] = None):
     # rows are guaranteed to written be in ascending order of sum
-    file_str = ""
     n_rows = 0
     with open(file, "w") as f:
         for s in sorted(row_dict.keys()):
@@ -100,11 +99,21 @@ def write_enums(row_dict: dict[int, list[Vec]], file: str, SS: Union[list[int], 
                     n_rows += 1
     print(f">>> wrote {n_rows} rows to {file} in ascending order of sum")
 
+def write_counts(row_dict: dict[int, list[Vec]], file: str, SS: Union[list[int], None] = None):
+    counts = {}
+    for s in sorted(row_dict.keys()):
+        if (not SS) or (s in SS):
+            counts[s] = len(row_dict[s])
+    with open(file, "w") as f:
+        for s, c in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+            print(f"{s} {c}", file=f)
+    print(f">>> wrote counts to {file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", metavar="file", type=str)
     parser.add_argument("--sum", metavar="S", type=int, nargs="*")
+    parser.add_argument("-c", action="store_true")
     parser.add_argument("exponents", metavar="P", type=int, nargs="+")
     args = parser.parse_args()
 
@@ -113,4 +122,7 @@ if __name__ == "__main__":
     SS = args.sum
     all_rows = gen_rows(P, N)
     row_dict = rows_to_rowdict(all_rows)
-    write_enums(row_dict, args.file, SS)
+    if args.c:
+        write_counts(row_dict, args.file, SS)
+    else:
+        write_enums(row_dict, args.file, SS)
