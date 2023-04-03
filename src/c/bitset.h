@@ -1,6 +1,7 @@
 #ifndef BITSET_H
 #define BITSET_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
