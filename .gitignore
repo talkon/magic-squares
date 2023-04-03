@@ -163,6 +163,7 @@ cython_debug/
 .vscode
 
 # CMake
+bin/
 CMakeFiles
 CMakeLists.txt.user
 CMakeCache.txt
