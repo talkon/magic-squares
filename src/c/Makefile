@@ -7,11 +7,11 @@ DEP := $(OBJ:%.o=%.d)
 
 UNAME := $(shell uname)
 LOCAL := 1
-DEBUG := 1
+DEBUG := 0
 FLTO := 0
 
 COMMONFLAGS := #-Wall -Werror -Wextra
-CFLAGS := $(COMMONFLAGS) -std=gnu99 -mavx2 -gdwarf-3
+CFLAGS := $(COMMONFLAGS) -std=gnu99  -gdwarf-3 -fopt-info-vec-optimized #-ftree-vectorize #-mavx2
 LDFLAGS := $(COMMONFLAGS) -lm
 
 ifeq ($(PARALLEL),1)

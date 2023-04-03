@@ -1,3 +1,5 @@
+#include <stdint.h>
+
 #define VEC_SIZE 6
 
 #define ROW 0
@@ -26,6 +28,8 @@ typedef struct relabeling {
     vec* vecs;
     int num_vecs;
     int* label_to_elt;
+    uint64_t** bitarrays;
+    unsigned char bitarray_size;
 } relabeling;
 
 typedef struct search_table {
@@ -37,7 +41,7 @@ typedef struct search_table {
     int num_valid_rows;
     int* valid_cols;
     int num_valid_cols;
-    int* unmatched;
+    uint64_t* unmatched;
     int num_unmatched;
     int* num_searched;
 } search_table;
