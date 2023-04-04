@@ -220,7 +220,6 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
 
     int max_unmatched = bitset_maximum(table.unmatched);
 
-
     for(int i = 0; i < table.num_valid_rows; i++){
         if(table.numrows == VEC_SIZE) break;
         int max_elt = r.vecs[table.valid_rows[i]].elts[0];
@@ -293,7 +292,7 @@ void search_sum(vecgroup group, int sum){
     table.num_unmatched = 0;
     int num_searched = 0;
     table.num_searched = &num_searched;
-    table.unmatched = bitset_create(r.bitarrays[0]->size);
+    table.unmatched = bitset_create(64 * r.bitarrays[0]->size);
     
     search_aux(r, table, inters, NONE, 0);
     printf("num searched: %d\n", *table.num_searched);
