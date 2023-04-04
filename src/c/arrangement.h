@@ -53,6 +53,8 @@ typedef struct search_table {
   int num_unmatched;
   // number of tables tested
   int *num_searched;
+  int *row_idx_slots[64];
+  int *col_idx_slots[64];
 } search_table;
 
 typedef struct indexed_int {

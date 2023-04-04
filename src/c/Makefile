@@ -8,7 +8,7 @@ DEP := $(OBJ:%.o=%.d)
 UNAME := $(shell uname)
 LOCAL := 1
 DEBUG := 0
-FLTO := 0
+FLTO := 1
 
 COMMONFLAGS := #-Wall -Werror -Wextra
 CFLAGS := $(COMMONFLAGS) -std=gnu99  -gdwarf-3 -fopt-info-vec-optimized -ftree-vectorize -mavx2
@@ -33,7 +33,7 @@ else ifeq ($(CILKSCALE),1)
 endif
 
 ifeq ($(DEBUG),1)
-	CFLAGS += -O0 -DDEBUG
+	CFLAGS += -O0 -DDEBUG -fno-inline
 else
 	CFLAGS += -O3 -DNDEBUG
 endif
