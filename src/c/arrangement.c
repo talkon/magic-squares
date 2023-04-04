@@ -100,7 +100,7 @@ relabeling elt_relabeling(vecgroup group, int sum){
     }
     qsort(new_vecs, total_vecs, sizeof(vec), vec_reverse);
     int max_elt = new_vecs[0].elts[0];
-    r.bitarrays = malloc(sizeof(bitset_t*) * total_vecs);
+    r.bitarrays = malloc(sizeof(bitset_t) * total_vecs);
     for(int i = 0; i < total_vecs; i++){
         r.bitarrays[i] = bitset_create(max_elt);
         for(int j = 0; j < VEC_SIZE; j++){
@@ -217,7 +217,7 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
         table.valid_rows = valid_rows;
         table.valid_cols = valid_cols;
     }
-
+    int *orig_valid_rows = table.valid_rows;
     int max_unmatched = bitset_maximum(table.unmatched);
 
     for(int i = 0; i < table.num_valid_rows; i++){
@@ -255,6 +255,7 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             table.numcols++;
          
             int coll = table.valid_cols[i];
+            
             bitset_inplace_xor(table.unmatched, r.bitarrays[coll]);
             search_aux(r, table, inters, COL, table.valid_cols[i]);
             bitset_inplace_xor(table.unmatched, r.bitarrays[coll]);
@@ -292,7 +293,7 @@ void search_sum(vecgroup group, int sum){
     table.num_unmatched = 0;
     int num_searched = 0;
     table.num_searched = &num_searched;
-    table.unmatched = bitset_create(64 * r.bitarrays[0]->size);
+    table.unmatched = bitset_create(64 * r.bitarrays[0].size);
     
     search_aux(r, table, inters, NONE, 0);
     printf("num searched: %d\n", *table.num_searched);
@@ -300,12 +301,12 @@ void search_sum(vecgroup group, int sum){
     free(r.vecs);
     free(r.label_to_elt);
     for(int i = 0; i < r.num_vecs; i++){
-        free(r.bitarrays[i]);
+        bitset_free(r.bitarrays[i]);
     }
     free(r.bitarrays);
     free(valid_row_indices);
     free(valid_col_indices);
-    free(table.unmatched);
+    bitset_free(table.unmatched);
 }
 
 void test_print_vecs(char *filename){
@@ -313,8 +314,9 @@ void test_print_vecs(char *filename){
     int min_sum = sum(group.vecs[0]);
     printf("read\n");
     clock_t before = clock();
-    for (int i = min_sum; i < group.numsums + 1; i++)
-        search_sum(group, i);
+    search_sum(group,327);
+    //for (int i = min_sum; i < group.numsums + 1; i++)
+    //    search_sum(group, i);
     clock_t difference = clock() - before;
     printf("completed in %lu msecs\n", difference);
     int msec = difference / CLOCKS_PER_SEC;

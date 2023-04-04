@@ -32,7 +32,7 @@ typedef struct relabeling {
   vec *vecs;
   int num_vecs;
   int *label_to_elt;
-  bitset_t **bitarrays;
+  bitset_t *bitarrays;
 } relabeling;
 
 // backtracking state
@@ -49,7 +49,7 @@ typedef struct search_table {
   int *valid_cols;
   int num_valid_cols;
   // table elements that aren't in both a row and a col
-  bitset_t *unmatched;
+  bitset_t unmatched;
   int num_unmatched;
   // number of tables tested
   int *num_searched;
