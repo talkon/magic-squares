@@ -1,5 +1,6 @@
-# usage: ./run.sh 10 4 3 2 --sum 327
+# usage: ./run.sh 10 4 3 2 [--sum 327] [-p]
 # supported arrangement options: --min-sum, --max-sum, --sum
+# use -p for perf
 
 POSITIONAL_ARGS=()
 ARRANGEMENT_OPTIONS=()
