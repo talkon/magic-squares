@@ -5,6 +5,8 @@
 
 #include "bitset.h"
 
+#define max(a,b) (a>b ? a : b)
+
 #define VEC_SIZE 6
 
 #define ROW 0
