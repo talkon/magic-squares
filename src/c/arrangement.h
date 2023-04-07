@@ -5,7 +5,7 @@
 
 #include "bitset.h"
 
-#define max(a,b) (a>b ? a : b)
+#define max(a, b) (a > b ? a : b)
 
 #define VEC_SIZE 6
 
@@ -69,7 +69,5 @@ int sum(vec r);
 vecgroup read_vecs(char *filename);
 
 void search_sum(vecgroup group, int sum);
-
-void test_print_vecs(char *filename);
 
 #endif // !ARRANGEMENT_H

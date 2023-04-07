@@ -11,7 +11,15 @@ magic-squares
     |-- low-level/ -> future low-level code
 ```
 
-## CMake commands
+## usage
+
+Release: `./build.sh`. Debug: `./build.sh d`.
+
+After building, you can do `./run.sh` to run the whole pipeline.
+
+Individual usage is in README.md of each directory.
+
+---
 
 Requires CMake 3.13+
 

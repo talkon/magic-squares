@@ -1,9 +1,9 @@
-cmake_minimum_required (VERSION 3.13)
-project (MAGIC)
+cmake_minimum_required(VERSION 3.13)
+project(MAGIC)
 
-add_compile_options(-O3 -flto)
-add_link_options(-flto)
+set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -g -ggdb -DNDEBUG")
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-
-add_subdirectory (src)
+add_subdirectory(src)
