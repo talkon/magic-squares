@@ -4,8 +4,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "arrangement.h"
+
+double get_wall_time(){
+    struct timeval time;
+    if (gettimeofday(&time,NULL)){
+        //  Handle error
+        return 0;
+    }
+    return (double)time.tv_sec + (double)time.tv_usec * .000001;
+}
 
 
 int vec_sum(vec r){
@@ -182,6 +192,10 @@ int fill_valids(int *valid_rows, int last_row, int inter_val, unsigned char** in
     for(int i = 0; i < numvalids; i++){
         int test_row = oldrows[i];
         bool is_valid_row = (inters[last_row][test_row] == inter_val) && test_row >= minvec;
+        int is_valid = (int) is_valid_row;
+        valid_rows[row_ptr] = test_row * is_valid + valid_rows[row_ptr] * (1 - is_valid);
+        row_ptr += is_valid;
+        continue;
         if(is_valid_row){
             valid_rows[row_ptr] = test_row;
             row_ptr++;
@@ -433,6 +447,7 @@ void search_sum(vecgroup group, int sum){
 void search(char *filename, int sum, int min_sum, int max_sum) {
     vecgroup group = read_vecs(filename);
     printf("read\n");
+    double before = get_wall_time();
     if (sum != -1) {
         search_sum(group, sum);
     } else {
@@ -444,6 +459,8 @@ void search(char *filename, int sum, int min_sum, int max_sum) {
             search_sum(group, i);
         }
     }
+    double difference = get_wall_time() - before;
+    printf("completed in %.5f secs\n", (double)difference);
     free(group.vecs);
     free(group.infos);
 }
