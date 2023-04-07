@@ -157,8 +157,6 @@ int unmatched_max(uint64_t *unmatched, int num_64s){
 void record(search_table table, relabeling r){
     *table.num_searched += 1;
     if(table.numrows * table.numcols == VEC_SIZE * VEC_SIZE){
-        *table.num_searched += 1;
-        return;
         printf("solution found\n");
         for(int i = 0; i < VEC_SIZE; i++){
             printf("%d    ", table.rows[i]);
@@ -385,7 +383,7 @@ void search_sum(vecgroup group, int sum){
     }
     relabeling r = elt_relabeling(group, sum);
     unsigned char** inters = intersections(r.vecs, total_vecs);
-    //printf("inters calculated\n");
+    printf("inters calculated\n");
     
     int *valid_row_indices = malloc(total_vecs * sizeof(int));
     int *valid_col_indices = malloc(total_vecs * sizeof(int));
@@ -416,7 +414,7 @@ void search_sum(vecgroup group, int sum){
     table.unmatched = bitset_create(64 * r.bitarrays[0].size);
     
     search_aux(r, table, inters, NONE, 0);
-    //printf("num searched: %d\n", *table.num_searched);
+    printf("num searched: %d\n", *table.num_searched);
     free(inters);
     free(r.vecs);
     free(r.label_to_elt);
