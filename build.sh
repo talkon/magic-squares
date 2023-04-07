@@ -9,5 +9,6 @@ fi
 cmake -D CMAKE_BUILD_TYPE=Release -S . -B $CMAKE_DIR
 cmake --build $CMAKE_DIR
 
+mkdir -p bin
 ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement bin/arrangement
 ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py
