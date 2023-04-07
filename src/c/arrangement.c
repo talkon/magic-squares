@@ -267,8 +267,8 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             new_table.numrows++;
             new_table.valid_rows += (row_ptr + 1);
             new_table.num_valid_rows -= (row_ptr + 1);
-            //new_table.valid_cols += (col_start);
-            //new_table.num_valid_cols -= (col_start);
+            new_table.valid_cols += (col_start);
+            new_table.num_valid_cols -= (col_start);
 
             int *new_valid_rows = table.row_idx_slots[new_table.numrows+new_table.numcols+1];
             int *new_valid_cols = table.col_idx_slots[new_table.numrows+new_table.numcols+1];
@@ -319,8 +319,8 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             new_table.numrows++;
             new_table.valid_rows += (row_ptr + 1);
             new_table.num_valid_rows -= (row_ptr + 1);
-            //new_table.valid_cols += (col_start);
-            //new_table.num_valid_cols -= (col_start);
+            new_table.valid_cols += (col_start);
+            new_table.num_valid_cols -= (col_start);
 
 
             int *new_valid_rows = table.row_idx_slots[new_table.numrows+new_table.numcols+1];
