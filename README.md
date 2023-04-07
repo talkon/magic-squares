@@ -13,28 +13,10 @@ magic-squares
 
 ## usage
 
-Release: `./build.sh`. Debug: `./build.sh d`.
+Release: `./build.sh`.
+
+Debug: `./build.sh d`, useful for `perf` and `gdb` etc.
 
 After building, you can do `./run.sh` to run the whole pipeline.
 
 Individual usage is in README.md of each directory.
-
----
-
-Requires CMake 3.13+
-
-Build using CMake, using `build/` as the build directory.
-This generates the binary in `bin/arrangement`
-```
-cmake --build build
-```
-
-Build with debug info (i.e. `-g` compiler flag), useful for `perf` and the like:
-```
-cmake --build build --config RelWithDebInfo
-```
-
-Clean build directory:
-```
-cmake --build build --target clean
-```

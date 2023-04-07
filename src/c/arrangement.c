@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "arrangement.h"
 
@@ -452,7 +451,6 @@ void search_sum(vecgroup group, int sum) {
 void search(char *filename, int sum, int min_sum, int max_sum) {
   vecgroup group = read_vecs(filename);
   printf("read\n");
-  clock_t before = clock();
   if (sum != -1) {
     search_sum(group, sum);
   } else {
@@ -464,9 +462,6 @@ void search(char *filename, int sum, int min_sum, int max_sum) {
       search_sum(group, i);
     }
   }
-  clock_t difference = clock() - before;
-  printf("completed in %lu msecs\n", difference);
-  int msec = difference / CLOCKS_PER_SEC;
   free(group.vecs);
   free(group.infos);
 }
