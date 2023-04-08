@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "arrangement.h"
 
@@ -523,7 +524,7 @@ void search(char *filename, int sum, int min_sum, int max_sum) {
         if (min_sum == -1)
             min_sum = vec_sum(group.vecs[0]);
         if (max_sum == -1)
-            min_sum = group.numsums + 1;
+            max_sum = group.numsums + 1;
         for (int i = min_sum; i < max_sum; i++) {
             search_sum(group, i);
         }

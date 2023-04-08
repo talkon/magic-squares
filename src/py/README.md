@@ -17,3 +17,8 @@ dump enumerations to a file
 ```
 pypy3 enumeration.py 10 4 3 2 --file enumeration.txt
 ```
+
+parse and verify (TODO) arrangement.c output
+```
+pypy3 verifier.py cout.txt
+```
