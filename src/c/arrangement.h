@@ -37,21 +37,19 @@ typedef struct relabeling {
     bitset_t *bitarrays;
 } relabeling;
 
-// row state
-typedef struct row_table {
-    // current rows and cols taken
-    int vecs[6];
-    // number of rows and cols already taken
-    int numvecs;
-    // rows and columns that can feasibly go in
-    int *valid;
-    int num_valid;
-} row_table;
-
 // backtracking state
 typedef struct search_table {
-    row_table rows;
-    row_table cols;
+    // current rows and cols taken
+    int rows[6];
+    int cols[6];
+    // number of rows and cols already considered
+    int numrows;
+    int numcols;
+    // rows and columns that can feasibly go in
+    int *valid_rows;
+    int num_valid_rows;
+    int *valid_cols;
+    int num_valid_cols;
     // table elements that aren't in both a row and a col
     bitset_t unmatched;
     int num_unmatched;
