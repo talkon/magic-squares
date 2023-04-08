@@ -39,6 +39,9 @@ static inline bool bitset_get(const bitset_t bitset, size_t i) {
 /* index of last set bit, or zero if empty */
 size_t bitset_maximum(const bitset_t bitset);
 
+/* count b1 & b2 without making it */
+size_t bitset_and_count(const bitset_t b1, const bitset_t b2);
+
 /* inplace, b1 ^= b2; assumes b1.size == b2.size */
 void bitset_inplace_xor(bitset_t b1, const bitset_t b2);
 

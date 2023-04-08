@@ -125,31 +125,12 @@ relabeling elt_relabeling(vecgroup group, int sum){
     return r;
 }
 
-int num_inters(vec a, vec b){
-    int p1 = 0;
-    int p2 = 0;
-    int tot = 0;
-    while(p1 < VEC_SIZE && p2 < VEC_SIZE){
-        if(a.elts[p1] > b.elts[p2]){
-            p1++;
-        }
-        else{
-            if(a.elts[p1] == b.elts[p2]){
-                p1++;
-                tot++;
-            }
-            p2++;
-        }
-    }
-    return tot;
-}
-
-unsigned char** intersections(vec *vecs, int numvecs){
+unsigned char** intersections(relabeling r, int numvecs){
     unsigned char** inters = malloc(numvecs * sizeof(char*));
     for(int i = 0; i < numvecs; i++){
         inters[i] = malloc(numvecs * sizeof(char));
         for(int j = 0; j < numvecs; j++){
-            inters[i][j] = num_inters(vecs[i], vecs[j]);
+            inters[i][j] = bitset_and_count(r.bitarrays[i], r.bitarrays[j]);
         }
     }
     return inters;
@@ -465,7 +446,7 @@ void search_sum(vecgroup group, int sum){
         return;
     }
     relabeling r = elt_relabeling(group, sum);
-    unsigned char** inters = intersections(r.vecs, total_vecs);
+    unsigned char** inters = intersections(r, total_vecs);
     printf("inters calculated\n");
     
     int *valid_row_indices = malloc(total_vecs * sizeof(int));
