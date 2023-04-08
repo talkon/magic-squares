@@ -268,7 +268,7 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
     
     
     for(row_ptr = 0; row_ptr < table.num_valid_rows; row_ptr++){
-      //break;
+      break;
       if(table.numrows + table.numcols < 2)
         break;
         
