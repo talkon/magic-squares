@@ -34,6 +34,7 @@ groups: tuple[tuple[tuple[int]]] = (
 class DiagonalStats:
     S: int
     P: int
+    max_nb: int
     S_count: int
     P_count: int
     SP_count: int
@@ -41,12 +42,35 @@ class DiagonalStats:
     best_score: int
     best_square: tuple[tuple[int]]
 
-    def pretty_print(self, verbose: int) -> None:
-        print(f"{self.P:13} {self.S:4} {self.S_count:3} {self.P_count:3} {self.SP_count:3} {self.best_score:4}  {sorted(self.score_counts.items())}")
-        if verbose >= 2:
-            for row in self.best_square:
-                print('    ' + ' '.join([f"{i:4}" for i in row]))
-            
+    @classmethod
+    def pretty_print_header(cls) -> None:
+        print(f"{'P':>15} {'S':>4} {'max':>4} {'#S':>3} {'#P':>3} {'#SP':>3} {'best':>4}  {'score_counts'}")
+
+    def pretty_print(self) -> None:
+        print(f"{self.P:15} {self.S:4} {self.max_nb:4} {self.S_count:3} {self.P_count:3} {self.SP_count:3} {self.best_score:4}  {sorted(self.score_counts.items())}")
+    
+    def pretty_print_best_square(self) -> None:
+        print(f"  {'P':<7}={self.P:13}")
+        print(f"  {'S':<7}={self.S:13}")
+        print(f"  {'max_nb':<7}={self.max_nb:13}")
+        print(f"  {'score':<7}={self.best_score:13}")
+        print(f"  {'square':<7}=")
+        for row in self.best_square:
+            print('    ' + ' '.join([f"{i:4}" for i in row]))
+@dataclasses.dataclass
+class SStats:
+    S: int
+    nvecs: int
+    count: int
+    nsols: int
+    best_score: int   
+
+    @classmethod
+    def pretty_print_header(cls) -> None:
+        print(f"{'S':>7} {'nvecs':>5} {'count':>9} {'nsols':>5} {'best':>4}")
+
+    def pretty_print(self) -> None:  
+        print(f"{self.S:7} {self.nvecs:5} {self.count:9} {(self.nsols if self.nsols > 0 else ''):5} {(self.best_score if self.best_score >= 0 else ''):4}")
 
 @dataclasses.dataclass
 class Solution:
@@ -132,8 +156,10 @@ class Solution:
             )
             for i in range(6)
         )
+        
+        max_nb = max(max(row) for row in rows)
 
-        return DiagonalStats(self.S, self.P, S_count, P_count, SP_count, score_counts, best_score, best_square)
+        return DiagonalStats(self.S, self.P, max_nb, S_count, P_count, SP_count, score_counts, best_score, best_square)
 
 @dataclasses.dataclass
 class CSearchStats:
@@ -145,6 +171,7 @@ class CSearchStats:
     nsols: int
     solutions: list[Solution]
     diagonal_stats: list[DiagonalStats]
+    S_stats: list[SStats]
 
     def assert_nsols(self, expected_nsols: int) -> None:
         assert self.nsols == expected_nsols, f"Expected {expected_nsols} solutions, found {self.nsols}"
@@ -158,19 +185,29 @@ class CSearchStats:
         print(f"  {'max_nvecs':<10}={self.max_nvecs:12}")
         print(f"  {'nsols':<10}={self.nsols:12}")
         if self.nsols:
+            print("Best overall square:")
+            best_dstat = max(self.diagonal_stats, key=lambda x: x.best_score)
+            best_dstat.pretty_print_best_square()
             if verbose >= 1:
                 print("Diagonal statistics for each solution:")
-                print(f"{'P':>13} {'S':>4} {'#S':>3} {'#P':>3} {'#SP':>3} {'best':>4}  {'score_counts'}")
+                DiagonalStats.pretty_print_header()
                 for diagonal_stat in self.diagonal_stats:
-                    diagonal_stat.pretty_print(verbose)
-            best_dstat = max(self.diagonal_stats, key=lambda x: x.best_score)
-            print("Best found square:")
-            print(f"  {'P':<7}={best_dstat.P:13}")
-            print(f"  {'S':<7}={best_dstat.S:13}")
-            print(f"  {'score':<7}={best_dstat.best_score:13}")
-            print(f"  {'square':<7}=")
-            for row in best_dstat.best_square:
-                print('    ' + ' '.join([f"{i:4}" for i in row]))
+                    diagonal_stat.pretty_print()
+            if verbose >= 2:
+                print("Best diagonals for each solution:")
+                for diagonal_stat in self.diagonal_stats:
+                    diagonal_stat.pretty_print_best_square()
+        if verbose >= 3:
+            print("Statistics for each S with a solution:")
+            SStats.pretty_print_header()
+            for S_stat in self.S_stats:
+                if S_stat.nsols > 0:
+                    S_stat.pretty_print()
+        if verbose >= 4:
+            print("Statistics for each S:")
+            SStats.pretty_print_header()
+            for S_stat in self.S_stats:
+                S_stat.pretty_print()
 
 
 
@@ -184,7 +221,8 @@ def other_diagonals(permutation: Vec) -> list[Vec]:
     return out
 
 def parse_arrangement_output(file: str) -> CSearchStats:
-    stats = CSearchStats(0, 0, 0, 0, 0, 0, [], [])
+    stats = CSearchStats(0, 0, 0, 0, 0, 0, [], [], [])
+    cur_sum = 0
     with open(file, "r") as f:
         while line := f.readline():
             split = line.split()
@@ -203,17 +241,25 @@ def parse_arrangement_output(file: str) -> CSearchStats:
                     table.cols += [tuple(col)]
                     table.cis += [ci]
                 solution = Solution(table)
+                diagonal_stats = solution.diagonal_stats()
                 stats.solutions += [solution]
-                stats.diagonal_stats += [solution.diagonal_stats()]
+                stats.diagonal_stats += [diagonal_stats]
                 stats.nsols += 1
+                stats.S_stats[-1].nsols += 1
+                if diagonal_stats.best_score > stats.S_stats[-1].best_score:
+                    stats.S_stats[-1].best_score = diagonal_stats.best_score
             elif split[0] == "sum":
+                cur_sum = int(split[1])
                 nvecs = int(split[3])
                 stats.nvecs += nvecs
                 stats.nsums += 1
                 if nvecs > stats.max_nvecs:
                     stats.max_nvecs = nvecs
+                stats.S_stats += [SStats(cur_sum, nvecs, 0, 0, -1)]
             elif split[:2] == ["num", "searched:"]:
-                stats.count += int(split[2])
+                count = int(split[2])
+                stats.count += count
+                stats.S_stats[-1].count = count
             elif split[:2] == ["completed", "in"]:
                 stats.time += float(split[2])
     return stats
@@ -221,7 +267,7 @@ def parse_arrangement_output(file: str) -> CSearchStats:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("file", type=str)
-    parser.add_argument("--verbose", "-v", action="count", default=0)
+    parser.add_argument("--verbose", metavar="V", type=int, default=1)
     parser.add_argument("--expect-nsols", type=int, nargs=1)
     args = parser.parse_args()
 
