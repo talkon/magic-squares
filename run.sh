@@ -1,11 +1,13 @@
-# usage: ./run.sh 10 4 3 2 [--sum 327] [-p]
-# supported arrangement options: --min-sum, --max-sum, --sum
-# use -p for perf, -s to summarize results with verifier.py
+# usage: ./run.sh 10 4 3 2 [arrangement.c options] [-p] [-l]
+# options:
+#   -p: run `perf` for arrangement step
+#   -l: lazy run: only do post-processing step if arrangement output already exists
+# supported arrangement.c options: --min-sum, --max-sum, --sum
 
 POSITIONAL_ARGS=()
 ARRANGEMENT_OPTIONS=()
 PERF=false
-SUMMARIZE=false
+LAZY=false
 
 # allows setting environment variable for pypy3 installation
 : "${PYPY3:=pypy3}"
@@ -31,8 +33,8 @@ while [[ $# -gt 0 ]]; do
       PERF=true
       shift # past argument
       ;;
-    -s)
-      SUMMARIZE=true
+    -l)
+      LAZY=true
       shift # past argument
       ;;
     -*|--*)
@@ -56,7 +58,6 @@ fi
 
 # make enumeration file
 ENUM_FILE_NAME="data/enumerations_${PRODUCT// /_}.txt"
-OUTPUT_FILE_NAME="data/output_${PRODUCT// /_}.txt"
 if [ -e $ENUM_FILE_NAME ]; then
   echo "file ${ENUM_FILE_NAME} exists, not remaking it..."
 else
@@ -71,10 +72,14 @@ else
   RUN_COMMAND="bin/arrangement --file $ENUM_FILE_NAME $ARRANGEMENT_OPTIONS"
 fi
 
-# process results
-if [ "$SUMMARIZE" = true ]; then
-  $RUN_COMMAND > $OUTPUT_FILE_NAME
-  $PYPY3 bin/verifier.py $OUTPUT_FILE_NAME
+# make output file
+OUTPUT_FILE_NAME="data/output_${PRODUCT// /_}.txt"
+if [ "$LAZY" = true ] && [ -e $OUTPUT_FILE_NAME ]; then
+  echo "file ${OUTPUT_FILE_NAME} exists, not remaking it..."
 else
-  $RUN_COMMAND
+  echo "making ${OUTPUT_FILE_NAME}..."
+  $RUN_COMMAND > $OUTPUT_FILE_NAME
 fi
+
+# process output
+$PYPY3 bin/postprocess.py $OUTPUT_FILE_NAME -v
