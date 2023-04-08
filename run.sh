@@ -1,10 +1,11 @@
 # usage: ./run.sh 10 4 3 2 [--sum 327] [-p]
 # supported arrangement options: --min-sum, --max-sum, --sum
-# use -p for perf
+# use -p for perf, -s to summarize results with verifier.py
 
 POSITIONAL_ARGS=()
 ARRANGEMENT_OPTIONS=()
 PERF=false
+SUMMARIZE=false
 
 # allows setting environment variable for pypy3 installation
 : "${PYPY3:=pypy3}"
@@ -30,6 +31,10 @@ while [[ $# -gt 0 ]]; do
       PERF=true
       shift # past argument
       ;;
+    -s)
+      SUMMARIZE=true
+      shift # past argument
+      ;;
     -*|--*)
       echo "Unknown option $1"
       exit 1
@@ -51,6 +56,7 @@ fi
 
 # make enumeration file
 ENUM_FILE_NAME="data/enumerations_${PRODUCT// /_}.txt"
+OUTPUT_FILE_NAME="data/output_${PRODUCT// /_}.txt"
 if [ -e $ENUM_FILE_NAME ]; then
   echo "file ${ENUM_FILE_NAME} exists, not remaking it..."
 else
@@ -60,7 +66,15 @@ fi
 
 # run arrangement
 if [ "$PERF" = true ]; then
-  time perf record bin/arrangement --file $ENUM_FILE_NAME $ARRANGEMENT_OPTIONS
+  RUN_COMMAND="time perf record bin/arrangement --file $ENUM_FILE_NAME $ARRANGEMENT_OPTIONS"
 else
-  bin/arrangement --file $ENUM_FILE_NAME $ARRANGEMENT_OPTIONS
+  RUN_COMMAND="bin/arrangement --file $ENUM_FILE_NAME $ARRANGEMENT_OPTIONS"
+fi
+
+# process results
+if [ "$SUMMARIZE" = true ]; then
+  $RUN_COMMAND > $OUTPUT_FILE_NAME
+  $PYPY3 bin/verifier.py $OUTPUT_FILE_NAME
+else
+  $RUN_COMMAND
 fi

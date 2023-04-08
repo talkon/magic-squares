@@ -6,10 +6,12 @@ from arrangement import Table
 class CSearchStats:
     count: int
     time: float
+    nvecs: int
+    max_nvecs: int
     solutions: list[Table]
 
 def parse_arrangement_output(file: str) -> CSearchStats:
-    stats = CSearchStats(0, 0, [])
+    stats = CSearchStats(0, 0, 0, 0, [])
     with open(file, "r") as f:
         while line := f.readline():
             split = line.split()
@@ -28,10 +30,15 @@ def parse_arrangement_output(file: str) -> CSearchStats:
                     solution.cols += [tuple(col)]
                     solution.cis += [ci]
                 stats.solutions += [solution]
+            elif split[0] == "sum":
+                nvecs = int(split[3])
+                stats.nvecs += nvecs
+                if nvecs > stats.max_nvecs:
+                    stats.max_nvecs = nvecs
             elif split[:2] == ["num", "searched:"]:
-                stats.count = int(split[2])
+                stats.count += int(split[2])
             elif split[:2] == ["completed", "in"]:
-                stats.time = float(split[2])
+                stats.time += float(split[2])
     return stats
 
 #TODO: verify correctness of found solutions

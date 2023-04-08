@@ -21,3 +21,4 @@ fi
 mkdir -p bin
 ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement bin/arrangement
 ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py
+ln -sf $(realpath src/py/verifier.py) bin/verifier.py

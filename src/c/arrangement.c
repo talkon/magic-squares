@@ -445,9 +445,10 @@ void search_sum(vecgroup group, int sum){
     if(total_vecs == 0){
         return;
     }
+    printf("sum %d nvecs %d\n", sum, total_vecs);
     relabeling r = elt_relabeling(group, sum);
     unsigned char** inters = intersections(r, total_vecs);
-    printf("inters calculated\n");
+    //printf("inters calculated\n");
     
     int *valid_row_indices = malloc(total_vecs * sizeof(int));
     int *valid_col_indices = malloc(total_vecs * sizeof(int));
