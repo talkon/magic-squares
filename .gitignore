@@ -33,6 +33,8 @@ perf.data*
 perf.hist*
 perf.data.old
 
-# trash data files
-data/enumerations*
-data/output*
+# data files
+data/
+
+# test files
+tests/
