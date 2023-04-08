@@ -35,3 +35,4 @@ perf.data.old
 
 # trash data files
 data/enumerations*
+data/output*

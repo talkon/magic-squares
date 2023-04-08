@@ -8,10 +8,11 @@ class CSearchStats:
     time: float
     nvecs: int
     max_nvecs: int
+    nsols: int
     solutions: list[Table]
 
 def parse_arrangement_output(file: str) -> CSearchStats:
-    stats = CSearchStats(0, 0, 0, 0, [])
+    stats = CSearchStats(0, 0, 0, 0, 0, [])
     with open(file, "r") as f:
         while line := f.readline():
             split = line.split()
@@ -30,6 +31,7 @@ def parse_arrangement_output(file: str) -> CSearchStats:
                     solution.cols += [tuple(col)]
                     solution.cis += [ci]
                 stats.solutions += [solution]
+                stats.nsols += 1
             elif split[0] == "sum":
                 nvecs = int(split[3])
                 stats.nvecs += nvecs
