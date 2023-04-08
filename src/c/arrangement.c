@@ -154,6 +154,15 @@ unsigned char** intersections(vec *vecs, int numvecs){
     return inters;
 }
 
+bool any_match(vec v, int target){
+  for(int i = 0; i < VEC_SIZE; i++){
+    if(v.elts[i] == target){
+      return true;
+    }
+  }
+  return false;
+}
+
 int unmatched_max(uint64_t *unmatched, int num_64s){
     for(int i = num_64s - 1; i >= 0; i--){
         if(unmatched[i] != 0){
@@ -166,6 +175,7 @@ int unmatched_max(uint64_t *unmatched, int num_64s){
 void record(search_table table, relabeling r){
     *table.num_searched += 1;
     if(table.numrows * table.numcols == VEC_SIZE * VEC_SIZE){
+      //return;
         printf("solution found\n");
         for(int i = 0; i < VEC_SIZE; i++){
             printf("%d    ", table.rows[i]);
@@ -207,7 +217,6 @@ int fill_valids(int *valid_rows, int last_row, int inter_val, unsigned char** in
 
 void search_aux(relabeling r, search_table table, unsigned char** inters, int last_appended, int minvec){
     search_table prev_table = table;
-
     if(!((table.numrows + table.num_valid_rows >= 6) && (table.numcols + table.num_valid_cols >= 6))){
         return;
     }
@@ -223,6 +232,9 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
     int *valid_rows = table.row_idx_slots[table.numrows+table.numcols+1];//malloc(sizeof(int) * table.num_valid_rows);
     int *valid_cols = table.col_idx_slots[table.numrows+table.numcols+1];//malloc(sizeof(int) * table.num_valid_cols);
 
+    if(table.numrows > 1 || table.numcols > 1){
+      minvec = 0;
+    }
     if(last_appended == ROW || last_appended == ROWCOL){
 
       
@@ -246,6 +258,7 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
 
 
     int max_unmatched = bitset_maximum(table.unmatched);
+   
 
     int row_ptr = 0;
     int col_ptr = 0;
@@ -254,7 +267,9 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
     
     
     for(row_ptr = 0; row_ptr < table.num_valid_rows; row_ptr++){
-        //break;
+      //break;
+      if(table.numrows + table.numcols < 2)
+        break;
         
         int max_elt = r.vecs[table.valid_rows[row_ptr]].elts[0];
         if(max_elt <= max_unmatched){
@@ -275,19 +290,29 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             }
 
         }
+        int roww = table.valid_rows[row_ptr];
 
+        
         if(col_ptr == col_start){
             continue;
         }
+
+        int z = 0;
+        if(!any_match(r.vecs[roww], max_unmatched)){
+          for(int col_idx = col_start; col_idx < col_ptr; col_idx++){
+            int coll = table.valid_cols[col_idx];
+            if(any_match(r.vecs[coll], max_unmatched)) z++;
+          }
+          if(z==0) continue;
+        }
         search_table new_table = table;
 
-        int roww = new_table.valid_rows[row_ptr];
         new_table.rows[table.numrows] = roww;
         new_table.numrows++;
-        new_table.valid_rows += (row_ptr + 1);
+        /*new_table.valid_rows += (row_ptr + 1);
         new_table.num_valid_rows -= (row_ptr + 1);
         new_table.valid_cols += (col_start);
-        new_table.num_valid_cols -= (col_start);
+        new_table.num_valid_cols -= (col_start);*/
 
 
         int *new_valid_rows = table.row_idx_slots[new_table.numrows+new_table.numcols+1];
@@ -300,17 +325,22 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
         if(!((new_table.numrows + new_table.num_valid_rows >= 6) && (new_table.numcols + new_table.num_valid_cols >= 6))){
             continue;
         }
+        
 
         bitset_inplace_xor(new_table.unmatched, r.bitarrays[roww]);
+        
+        
         for(int col_idx = col_start; col_idx < col_ptr; col_idx++){
             int coll = table.valid_cols[col_idx];
 
             if(table.numrows == 0 && table.numcols == 0 && coll < roww){
                 continue;
             }
-            if(inters[roww][coll] != 1){
+            if(any_match(r.vecs[coll], max_unmatched)) z++;
+            if((!any_match(r.vecs[roww], max_unmatched) && !any_match(r.vecs[coll], max_unmatched)) || inters[roww][coll] != 1){
                 continue;
             }
+            
             search_table new_table_2 = new_table;
             new_table_2.cols[table.numcols] = coll;
             new_table_2.numcols++;
@@ -320,31 +350,55 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             bitset_inplace_xor(new_table_2.unmatched, r.bitarrays[coll]);
 
         }
+        //if(!any_match(r.vecs[roww], max_unmatched)) 
+        //  printf("%d\n", z);
         bitset_inplace_xor(new_table.unmatched, r.bitarrays[roww]);
 
         
     }
 
     int smallest_col = 0;
+    int d = 0;
+    int e = 0;
     for(int i = row_ptr; i < table.num_valid_rows; i++){
         if(table.numrows == VEC_SIZE) break;
         int max_elt = r.vecs[table.valid_rows[i]].elts[0];
         if(max_elt < max_unmatched){
             break;
         }
+        
         else{
+         /* e++;
+          int z = 0;
+        for(int j = 0; j < 6; j++){
+          if(r.vecs[table.valid_rows[i]].elts[j]==max_unmatched){
+            d++;
+            z++;
+            
+          }
+        }*/
+            if(!any_match(r.vecs[table.valid_rows[i]], max_unmatched) && table.numrows > 0){
+              continue;
+            }
+            /*if(max_elt == max_unmatched){
+              printf("y\n");
+            }
+            else{
+              printf("n\n");
+            }*/
+            e++;
             search_table new_table = table;
             new_table.rows[table.numrows] = table.valid_rows[i];
             new_table.numrows++;
             
             int roww = table.valid_rows[i];
-            new_table.valid_rows += (i + 1);
+            /*new_table.valid_rows += (i + 1);
             new_table.num_valid_rows -= (i + 1);
             while(smallest_col < table.num_valid_cols && table.valid_cols[smallest_col] <= roww){
                 smallest_col++;
             }
             new_table.valid_cols += smallest_col;
-            new_table.num_valid_cols -= smallest_col;
+            new_table.num_valid_cols -= smallest_col;*/
             bitset_inplace_xor(new_table.unmatched, r.bitarrays[roww]);
             search_aux(r, new_table, inters, ROW, table.valid_rows[i]);
             bitset_inplace_xor(new_table.unmatched, r.bitarrays[roww]);
@@ -358,23 +412,35 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
             break;
         }
         int max_elt = r.vecs[table.valid_cols[i]].elts[0];
-        if(max_elt > max_unmatched) continue;
+        //if(max_elt > max_unmatched) continue;
         if(max_elt < max_unmatched){
             break;
         }
         else{
+        
+
+            if(!any_match(r.vecs[table.valid_cols[i]], max_unmatched)){
+              continue;
+            }
+            /*if(max_elt == max_unmatched){
+              printf("y\n");
+            }
+            else{
+              printf("n\n");
+            }*/
+            e++;
             search_table new_table = table;
             new_table.cols[table.numcols] = table.valid_cols[i];
             new_table.numcols++;
             
             int coll = table.valid_cols[i];
-            new_table.valid_cols += (i + 1);
+            /*new_table.valid_cols += (i + 1);
             new_table.num_valid_cols -= (i + 1);
             while(smallest_row < table.num_valid_rows && table.valid_rows[smallest_row] <= coll){
                 smallest_row++;
             }
             new_table.valid_rows += smallest_row;
-            new_table.num_valid_rows -= smallest_row;
+            new_table.num_valid_rows -= smallest_row;*/
             
             bitset_inplace_xor(new_table.unmatched, r.bitarrays[coll]);
             search_aux(r, new_table, inters, COL, table.valid_cols[i]);
@@ -385,6 +451,9 @@ void search_aux(relabeling r, search_table table, unsigned char** inters, int la
     }
     //free(valid_rows);
     //free(valid_cols);
+     /*if(table.numrows>=1 || table.numcols >= 1){
+      printf("%d\n", e);
+    }*/
     return;
 }
 
@@ -480,7 +549,7 @@ int main(int argc, char *argv[]) {
                 {"max-sum", required_argument, 0, 'x'},
                 {0, 0, 0, 0}};
 
-        opt = getopt_long(argc, argv, "f:s:", long_options, NULL);
+        opt = getopt_long(argc, argv, "f:s:n:x:", long_options, NULL);
         if (opt == -1)
             break;
 
