@@ -18,7 +18,12 @@ dump enumerations to a file
 pypy3 enumeration.py 10 4 3 2 --file enumeration.txt
 ```
 
-parse and verify (TODO) arrangement.c output
+post-process arrangement.c output, normal verbosity
 ```
-pypy3 verifier.py cout.txt
+pypy3 postprocess.py out.txt -v
+```
+
+post-process arrangement.c output, extra verbosity, assert that there are 17 solutions
+```
+pypy3 postprocess.py out.txt  -vv --expected-nsols 17
 ```

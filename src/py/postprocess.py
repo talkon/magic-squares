@@ -146,6 +146,9 @@ class CSearchStats:
     solutions: list[Solution]
     diagonal_stats: list[DiagonalStats]
 
+    def assert_nsols(self, expected_nsols: int) -> None:
+        assert self.nsols == expected_nsols, f"Expected {expected_nsols} solutions, found {self.nsols}"
+
     def pretty_print(self, verbose: int) -> None:
         print("Overall statistics:")
         print(f"  {'count':<10}={self.count:12}")
@@ -219,9 +222,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("file", type=str)
     parser.add_argument("--verbose", "-v", action="count", default=0)
+    parser.add_argument("--expect-nsols", type=int, nargs=1)
     args = parser.parse_args()
 
     parsed = parse_arrangement_output(args.file)
+    if args.expect_nsols:
+        parsed.assert_nsols(args.expect_nsols[0])
     parsed.pretty_print(args.verbose)
 
 

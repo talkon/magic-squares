@@ -1,31 +1,43 @@
-# usage: ./run.sh 10 4 3 2 [arrangement.c options] [-p] [-l]
+# usage: ./run.sh 10 4 3 2 [-p] [-e | -a | -l] [--output] [arrangement.c options] [postprocess.py options]
+# runs enumeration, arrangement, and post-processing for a given P
 # options:
-#   -p: run `perf` for arrangement step
-#   -l: lazy run: only do post-processing step if arrangement output already exists
+#   -e: only run "e"numeration step
+#   -a: run up to "a"rrangement step (i.e. no post-processing)
+#   -l: "l"azy, only do post-processing step if arrangement output already exists
+#   -p: run "p"erf for arrangement step
+#   --output: override output file name
 # supported arrangement.c options: --min-sum, --max-sum, --sum
+# supported postprocess.py options: --expect-nsols
 
 POSITIONAL_ARGS=()
-ARRANGEMENT_OPTIONS=()
+ARRANGE_OPTIONS=()
+POSTPROC_OPTIONS=()
+
+ENUM=true
+FORCE_ENUM=false
+ARRANGE=true
+FORCE_ARRANGE=true
+POSTPROC=true
+
 PERF=false
-LAZY=false
 
 # allows setting environment variable for pypy3 installation
 : "${PYPY3:=pypy3}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --min-sum)
-      ARRANGEMENT_OPTIONS+=("$1" "$2")
+    --min-sum|--max-sum|--sum)
+      ARRANGE_OPTIONS+=("$1" "$2")
       shift # past argument
       shift # past value
       ;;
-    --max-sum)
-      ARRANGEMENT_OPTIONS+=("$1" "$2")
+    --expect-nsols)
+      POSTPROC_OPTIONS+=("$1" "$2")
       shift # past argument
       shift # past value
       ;;
-    --sum)
-      ARRANGEMENT_OPTIONS+=("$1" "$2")
+    --output)
+      OUTPUT_FILE_NAME="$2"
       shift # past argument
       shift # past value
       ;;
@@ -33,8 +45,17 @@ while [[ $# -gt 0 ]]; do
       PERF=true
       shift # past argument
       ;;
+    -e)
+      ARRANGE=false
+      POSTPROC=false
+      shift # past argument
+      ;;
+    -a)
+      POSTPROC=false
+      shift # past argument
+      ;;
     -l)
-      LAZY=true
+      FORCE_ARRANGE=false
       shift # past argument
       ;;
     -*|--*)
@@ -49,7 +70,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 PRODUCT="${POSITIONAL_ARGS[@]}"
-ARRANGEMENT_OPTIONS="${ARRANGEMENT_OPTIONS[@]}"
+ARRANGE_OPTIONS="${ARRANGE_OPTIONS[@]}"
+POSTPROC_OPTIONS="${POSTPROC_OPTIONS[@]}"
 
 if [ ! -f bin/enumeration.py ]; then
   echo "run ./build.sh first!"
@@ -57,29 +79,33 @@ if [ ! -f bin/enumeration.py ]; then
 fi
 
 # make enumeration file
-ENUM_FILE_NAME="data/enumerations_${PRODUCT// /_}.txt"
-if [ -e $ENUM_FILE_NAME ]; then
-  echo "file ${ENUM_FILE_NAME} exists, not remaking it..."
-else
-  echo "making ${ENUM_FILE_NAME}..."
-  $PYPY3 bin/enumeration.py $PRODUCT --file $ENUM_FILE_NAME
+if [ "$ENUM" = true ]; then
+  ENUM_FILE_NAME="data/enumerations_${PRODUCT// /_}.txt"
+  if [ "$FORCE_ENUM" = false ] && [ -e $ENUM_FILE_NAME ]; then
+    echo "file ${ENUM_FILE_NAME} exists, not remaking it..."
+  else
+    echo "making ${ENUM_FILE_NAME}..."
+    $PYPY3 bin/enumeration.py $PRODUCT --file $ENUM_FILE_NAME
+  fi
 fi
 
 # run arrangement
-if [ "$PERF" = true ]; then
-  RUN_COMMAND="time perf record bin/arrangement --file $ENUM_FILE_NAME $ARRANGEMENT_OPTIONS"
-else
-  RUN_COMMAND="bin/arrangement --file $ENUM_FILE_NAME $ARRANGEMENT_OPTIONS"
-fi
-
-# make output file
-OUTPUT_FILE_NAME="data/output_${PRODUCT// /_}.txt"
-if [ "$LAZY" = true ] && [ -e $OUTPUT_FILE_NAME ]; then
-  echo "file ${OUTPUT_FILE_NAME} exists, not remaking it..."
-else
-  echo "making ${OUTPUT_FILE_NAME}..."
-  $RUN_COMMAND > $OUTPUT_FILE_NAME
+if [ "$ARRANGE" = true ]; then
+  if [ "$PERF" = true ]; then
+    RUN_COMMAND="time perf record bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
+  else
+    RUN_COMMAND="bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
+  fi
+  : ${OUTPUT_FILE_NAME:="data/output_${PRODUCT// /_}.txt"}
+  if [ "$FORCE_ARRANGE" = false ] && [ -e $OUTPUT_FILE_NAME ]; then
+    echo "file ${OUTPUT_FILE_NAME} exists, not remaking it..."
+  else
+    echo "making ${OUTPUT_FILE_NAME}..."
+    $RUN_COMMAND > $OUTPUT_FILE_NAME
+  fi
 fi
 
 # process output
-$PYPY3 bin/postprocess.py $OUTPUT_FILE_NAME -v
+if [ "$POSTPROC" = true ]; then
+  $PYPY3 bin/postprocess.py $OUTPUT_FILE_NAME -v $POSTPROC_OPTIONS
+fi
