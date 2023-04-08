@@ -10,9 +10,7 @@ bitset_t bitset_create(size_t size) {
   return bitset;
 }
 
-void bitset_free(bitset_t bitset) {
-  free(bitset.array);
-}
+void bitset_free(bitset_t bitset) { free(bitset.array); }
 
 size_t bitset_maximum(const bitset_t bitset) {
   for (size_t k = bitset.size; k > 0; k--) {
@@ -24,8 +22,16 @@ size_t bitset_maximum(const bitset_t bitset) {
   return 0;
 }
 
+size_t bitset_and_count(const bitset_t b1, const bitset_t b2) {
+  size_t answer = 0;
+  for (size_t k = 0; k < b1.size; k++) {
+    answer += __builtin_popcountll(b1.array[k] & b2.array[k]);
+  }
+  return answer;
+}
+
 void bitset_inplace_xor(bitset_t b1, const bitset_t b2) {
-  for (size_t k = 0; k < b1.size; ++k) {
+  for (size_t k = 0; k < b1.size; k++) {
     b1.array[k] ^= b2.array[k];
   }
 }
