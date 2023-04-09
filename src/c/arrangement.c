@@ -36,6 +36,7 @@ vecgroup read_vecs(char *filename){
         numvecs++;
     }
     vec *vec_arr = malloc(sizeof(vec) * numvecs);
+    fclose(fp);
     fp = fopen(filename,"r");
     int veccount = 0;
     int maxsum;
@@ -62,6 +63,7 @@ vecgroup read_vecs(char *filename){
     r.infos = infos;
     r.numvecs = numvecs;
     r.numsums = maxsum + 1;
+    fclose(fp);
     return r;
 
 }
@@ -295,8 +297,8 @@ void search_sum(vecgroup group, int sum){
     }
     search_table table;
     for(int i = 0; i < 3*VEC_SIZE; i++){
-        table.row_idx_slots[i] = malloc(total_vecs * sizeof(int));
-        table.col_idx_slots[i] = malloc(total_vecs * sizeof(int));
+        table.row_idx_slots[i] = calloc(total_vecs, sizeof(int));
+        table.col_idx_slots[i] = calloc(total_vecs, sizeof(int));
     }
     /*int *valid_row_indices = table.row_idx_slots[0];
     int *valid_col_indices = table.col_idx_slots[0];
@@ -317,6 +319,9 @@ void search_sum(vecgroup group, int sum){
     
     search_aux(r, table, inters, NONE, 0);
     printf("num searched: %d\n", *table.num_searched);
+    for(int i = 0; i < r.num_vecs; i++) {
+        free(inters[i]);
+    }
     free(inters);
     free(r.vecs);
     free(r.label_to_elt);
