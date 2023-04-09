@@ -53,7 +53,7 @@ global_t elt_relabeling(vecs_t vecs, size_t sum) {
   int max_elt = new_vecs[0][0];
   g.bitarrays = malloc(sizeof(bitset_t) * num_vecs);
   for (size_t i = 0; i < num_vecs; i++) {
-    g.bitarrays[i] = bitset_create(max_elt);
+    g.bitarrays[i] = bitset_create(max_elt + 1);
     for (size_t j = 0; j < VEC_SIZE; j++) {
       bitset_set(g.bitarrays[i], new_vecs[i][j]);
     }

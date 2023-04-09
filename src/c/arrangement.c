@@ -66,7 +66,7 @@ void search_sum(vecs_t vecs, int sum) {
   printf("sum %d nvecs %ld\n", sum, total_vecs);
 
   global_t g = elt_relabeling(vecs, sum);
-  printf("inters calculated\n");
+  // printf("inters calculated\n");
 
   search_table table;
   row_table rows;
@@ -125,7 +125,7 @@ void search(char *filename, int sum, int min_sum, int max_sum) {
     if (min_sum == -1)
       min_sum = vec_sum(vecs.vecs[0]);
     if (max_sum == -1)
-      max_sum = vecs.num_sums + 1;
+      max_sum = vecs.num_sums;
     for (int i = min_sum; i < max_sum; i++) {
       search_sum(vecs, i);
     }
