@@ -16,9 +16,12 @@ void fill_valids(row_table *old_rows, row_table *new_rows,
                  unsigned char *inters, unsigned char inter_val,
                  size_t minvec) {
   new_rows->num_valid = 0;
-  for (size_t i = 0; i < old_rows->num_valid; i++) {
+  size_t i = 0;
+  while (old_rows->valid[i] < minvec)
+    i++;
+  for (; i < old_rows->num_valid; i++) {
     size_t old_row = old_rows->valid[i];
-    int is_valid = (inters[old_row] == inter_val) && (old_row >= minvec);
+    int is_valid = inters[old_row] == inter_val;
     // if is_valid, add old_row, else not
     new_rows->valid[new_rows->num_valid] =
         old_row * is_valid +
