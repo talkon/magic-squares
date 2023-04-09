@@ -11,4 +11,4 @@
 void search_aux(global_t g, row_table rows, row_table cols, search_table table,
                 size_t minvec);
 
-#endif // !LABELLING_H
+#endif // !SEARCH_H

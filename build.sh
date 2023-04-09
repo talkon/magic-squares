@@ -30,6 +30,6 @@ ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py
 ln -sf $(realpath src/py/postprocess.py) bin/postprocess.py
 
 if [[ $* == *t* ]]; then
-  mkdir tests
+  mkdir -p tests
   ctest --test-dir $CMAKE_DIR
 fi
