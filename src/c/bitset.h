@@ -27,7 +27,7 @@ static inline void bitset_set(bitset_t bitset, size_t i) {
 /* set ith bit to 0; no bounds checking */
 static inline void bitset_unset(bitset_t bitset, size_t i) {
   size_t shiftedi = i / 64;
-  bitset.array[shiftedi] |= ~(((uint64_t)1) << (i % 64));
+  bitset.array[shiftedi] &= ~(((uint64_t)1) << (i % 64));
 }
 
 /* get ith bit; no bounds checking */
