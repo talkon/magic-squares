@@ -1,13 +1,17 @@
 # usage:
-#   ./build.sh: build release version
-#   ./build.sh d: build debug version
-#   ./build.sh c: clean release build
-#   ./build.sh cd: clean debug build
-#   ./build.sh t: (build and) run tests
+#   ./build.sh [d|D] [c] [t]
+#   release build by default
+#   d: debug build (-O3)
+#   D: debug build (-O0)
+#   c: clean after building
+#   t: test after building
 # Note that the first run of the test cases might be slow, as enumeration files will be generated
 
-if [[ $* == *d* ]]; then
+if [[ $* == *D* ]]; then
   : ${CMAKE_DIR:=cmake-build-debug}
+  cmake -D CMAKE_BUILD_TYPE=Debug -S . -B $CMAKE_DIR
+elif [[ $* == *d* ]]; then
+  : ${CMAKE_DIR:=cmake-build-relwithdebinfo}
   cmake -D CMAKE_BUILD_TYPE=RelWithDebInfo -S . -B $CMAKE_DIR
 else
   : ${CMAKE_DIR:=cmake-build-release}
