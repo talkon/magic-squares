@@ -1,25 +1,37 @@
-# usage: ./run.sh 10 4 3 2 [-p] [-e | -a | -l] [--output] [arrangement.c options] [postprocess.py options]
+# usage: ./run.sh 10 4 3 2 [-e[f]] [-a[f]] [-p[f]] [--perf] [--efile fname] [--afile fname] [--pfile fname] [arrangement.c options] [postprocess.py options]
 # runs enumeration, arrangement, and post-processing for a given P
 # options:
-#   -e: only run "e"numeration step
-#   -a: run up to "a"rrangement step (i.e. no post-processing)
-#   -l: "l"azy, only do post-processing step if arrangement output already exists
-#   -p: run "p"erf for arrangement step
-#   --output: override output file name
+#   -e: run "e"numeration step
+#   -a: run "a"rrangement step
+#   -p: run "p"ostprocessing step
+#   -ef, -af, -pf: same as -e, -a, -p, but force rerunning if cached files exist
+#   --perf: run perf for arrangement step
+#   --output-dir [dir]: override output directory (default is data/)
+#   --efile [fname]: override enumeration file name (default is data/enumerations_[P].txt)
+#   --afile [fname]: override arrangement file name (default is data/output_[P].txt or data/output_[P]_[arrangement.c options].txt if arrangement options are used)
+#   --pfile [fname]: override postprocess file name (default is data/summary_[P].txt or data/summary_[P]_[arrangement.c options].txt if arrangement options are used)
+# when no -e/a/p flags are used, defaults to -e -a -p
 # supported arrangement.c options: --min-sum, --max-sum, --sum
-# supported postprocess.py options: --expect-nsols
+# supported postprocess.py options: --verbose (default 1)
 
 POSITIONAL_ARGS=()
 ARRANGE_OPTIONS=()
 POSTPROC_OPTIONS=()
+FNAME_SUFFIX=()
 
-ENUM=true
+ENUM=false
+ARRANGE=false
+POSTPROC=false
+
+DEFAULT=true
+PARTIAL=false
+
 FORCE_ENUM=false
-ARRANGE=true
-FORCE_ARRANGE=true
-POSTPROC=true
+FORCE_ARRANGE=false
+FORCE_POSTPROC=false
 
 PERF=false
+OUTPUT_DIR="data"
 
 # allows setting environment variable for pypy3 installation
 : "${PYPY3:=pypy3}"
@@ -28,6 +40,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --min-sum|--max-sum|--sum)
       ARRANGE_OPTIONS+=("$1" "$2")
+      FNAME_SUFFIX+=("$1" "$2")
       shift # past argument
       shift # past value
       ;;
@@ -36,26 +49,66 @@ while [[ $# -gt 0 ]]; do
       shift # past argument
       shift # past value
       ;;
-    --output)
-      OUTPUT_FILE_NAME="$2"
+    --efile)
+      ENUM_FILE_NAME="$2"
       shift # past argument
       shift # past value
       ;;
-    -p)
-      PERF=true
+    --afile)
+      ARRANGE_FILE_NAME="$2"
       shift # past argument
+      shift # past value
+      ;;
+    --pfile)
+      POSTPROC_FILE_NAME="$2"
+      shift # past argument
+      shift # past value
+      ;;
+    --output-dir)
+      OUTPUT_DIR="$2"
+      shift
+      shift
+      ;;
+    --perf)
+      PERF=true
+      shift
+      ;;
+    --verbose)
+      POSTPROC_OPTIONS+=("$1" "$2")
+      shift # past argument
+      shift # past value
       ;;
     -e)
-      ARRANGE=false
-      POSTPROC=false
+      ENUM=true
+      DEFAULT=false
       shift # past argument
       ;;
     -a)
-      POSTPROC=false
+      ARRANGE=true
+      DEFAULT=false
       shift # past argument
       ;;
-    -l)
-      FORCE_ARRANGE=false
+    -p)
+      POSTPROC=true
+      DEFAULT=false
+      shift # past argument
+      ;;
+    -ef)
+      ENUM=true
+      FORCE_ENUM=true
+      DEFAULT=false
+      shift # past argument
+      ;;
+    -af)
+      ARRANGE=true
+      FORCE_ARRANGE=true
+      DEFAULT=false
+      shift # past argument
+      ;;
+    -pf)
+      POSTPROC=true
+      FORCE_POSTPROC=true
+      DEFAULT=false
       shift # past argument
       ;;
     -*|--*)
@@ -64,23 +117,35 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       POSITIONAL_ARGS+=("$1") # save positional arg
+      FNAME_SUFFIX+=("$1")
       shift # past argument
       ;;
   esac
 done
 
+if [ "$DEFAULT" = true ]; then
+  ENUM=true
+  ARRANGE=true
+  POSTPROC=true
+fi
+
 PRODUCT="${POSITIONAL_ARGS[@]}"
 ARRANGE_OPTIONS="${ARRANGE_OPTIONS[@]}"
 POSTPROC_OPTIONS="${POSTPROC_OPTIONS[@]}"
+FNAME_SUFFIX="${FNAME_SUFFIX[@]}"
 
 if [ ! -f bin/enumeration.py ]; then
   echo "run ./build.sh first!"
   exit
 fi
 
+: ${ENUM_FILE_NAME:="${OUTPUT_DIR}/enumerations_${PRODUCT// /_}.txt"}
+: ${ARRANGE_FILE_NAME:="${OUTPUT_DIR}/output_${FNAME_SUFFIX// /_}.txt"}
+: ${POSTPROC_FILE_NAME:="${OUTPUT_DIR}/summary_${FNAME_SUFFIX// /_}.txt"}
+
 # make enumeration file
 if [ "$ENUM" = true ]; then
-  ENUM_FILE_NAME="data/enumerations_${PRODUCT// /_}.txt"
+  echo "running enumeration"
   if [ "$FORCE_ENUM" = false ] && [ -e $ENUM_FILE_NAME ]; then
     echo "file ${ENUM_FILE_NAME} exists, not remaking it..."
   else
@@ -91,21 +156,28 @@ fi
 
 # run arrangement
 if [ "$ARRANGE" = true ]; then
+  echo "running arrangement"
   if [ "$PERF" = true ]; then
     RUN_COMMAND="time perf record bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
   else
     RUN_COMMAND="bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
   fi
-  : ${OUTPUT_FILE_NAME:="data/output_${PRODUCT// /_}.txt"}
-  if [ "$FORCE_ARRANGE" = false ] && [ -e $OUTPUT_FILE_NAME ]; then
-    echo "file ${OUTPUT_FILE_NAME} exists, not remaking it..."
+  if [ "$FORCE_ARRANGE" = false ] && [ -e $ARRANGE_FILE_NAME ]; then
+    echo "file ${ARRANGE_FILE_NAME} exists, not remaking it..."
   else
-    echo "making ${OUTPUT_FILE_NAME}..."
-    $RUN_COMMAND > $OUTPUT_FILE_NAME
+    echo "making ${ARRANGE_FILE_NAME}..."
+    $RUN_COMMAND > $ARRANGE_FILE_NAME
   fi
 fi
 
 # process output
 if [ "$POSTPROC" = true ]; then
-  $PYPY3 bin/postprocess.py $OUTPUT_FILE_NAME -v $POSTPROC_OPTIONS
+  echo "running postprocessing"
+  if [ "$FORCE_POSTPROC" = false ] && [ -e $POSTPROC_FILE_NAME ]; then
+    echo "file ${POSTPROC_FILE_NAME} exists, not remaking it..."
+  else
+    echo "making ${POSTPROC_FILE_NAME}..."
+    $PYPY3 bin/postprocess.py $ARRANGE_FILE_NAME $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME
+  fi
+  cat $POSTPROC_FILE_NAME
 fi
