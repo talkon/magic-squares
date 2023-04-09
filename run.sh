@@ -12,7 +12,7 @@
 #   --pfile [fname]: override postprocess file name (default is data/summary_[P].txt or data/summary_[P]_[arrangement.c options].txt if arrangement options are used)
 # when no -e/a/p flags are used, defaults to -e -a -p
 # supported arrangement.c options: --min-sum, --max-sum, --sum
-# supported postprocess.py options: --verbose (default 1)
+# supported postprocess.py options: --verbose (default 1), --sort-score
 
 POSITIONAL_ARGS=()
 ARRANGE_OPTIONS=()
@@ -74,6 +74,11 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --verbose)
+      POSTPROC_OPTIONS+=("$1" "$2")
+      shift # past argument
+      shift # past value
+      ;;
+    --sort-score)
       POSTPROC_OPTIONS+=("$1" "$2")
       shift # past argument
       shift # past value

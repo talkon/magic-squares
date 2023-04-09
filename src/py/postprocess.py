@@ -178,12 +178,12 @@ class CSearchStats:
 
     def pretty_print(self, verbose: int) -> None:
         print("Overall statistics:")
-        print(f"  {'count':<10}={self.count:12}")
-        print(f"  {'time':<10}={self.time:12}")
-        print(f"  {'nsums':<10}={self.nsums:12}")
-        print(f"  {'nvecs':<10}={self.nvecs:12}")
-        print(f"  {'max_nvecs':<10}={self.max_nvecs:12}")
-        print(f"  {'nsols':<10}={self.nsols:12}")
+        print(f"  {'count':<10}={self.count:13}")
+        print(f"  {'time':<10}={self.time:13.4f}")
+        print(f"  {'nsums':<10}={self.nsums:13}")
+        print(f"  {'nvecs':<10}={self.nvecs:13}")
+        print(f"  {'max_nvecs':<10}={self.max_nvecs:13}")
+        print(f"  {'nsols':<10}={self.nsols:13}")
         if self.nsols:
             print("Best overall square:")
             best_dstat = max(self.diagonal_stats, key=lambda x: x.best_score)
@@ -220,7 +220,7 @@ def other_diagonals(permutation: Vec) -> list[Vec]:
         out += [tuple(permutation[gmap[i]] for i in range(6))]
     return out
 
-def parse_arrangement_output(file: str) -> CSearchStats:
+def parse_arrangement_output(file: str, sort_score: bool) -> CSearchStats:
     stats = CSearchStats(0, 0, 0, 0, 0, 0, [], [], [])
     cur_sum = 0
     with open(file, "r") as f:
@@ -262,6 +262,8 @@ def parse_arrangement_output(file: str) -> CSearchStats:
                 stats.S_stats[-1].count = count
             elif split[:2] == ["completed", "in"]:
                 stats.time += float(split[2])
+    if sort_score:
+        stats.diagonal_stats=sorted(stats.diagonal_stats, key=lambda x: (-x.best_score, x.P, x.S, x.max_nb))
     return stats
 
 if __name__ == "__main__":
@@ -269,9 +271,10 @@ if __name__ == "__main__":
     parser.add_argument("file", type=str)
     parser.add_argument("--verbose", metavar="V", type=int, default=1)
     parser.add_argument("--expect-nsols", type=int, nargs=1)
+    parser.add_argument("--sort-score", action="store_true")
     args = parser.parse_args()
 
-    parsed = parse_arrangement_output(args.file)
+    parsed = parse_arrangement_output(args.file, args.sort_score)
     if args.expect_nsols:
         parsed.assert_nsols(args.expect_nsols[0])
     parsed.pretty_print(args.verbose)
