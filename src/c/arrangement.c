@@ -114,7 +114,7 @@ relabeling elt_relabeling(vecgroup group, int sum){
     int max_elt = new_vecs[0].elts[0];
     r.bitarrays = malloc(sizeof(bitset_t) * total_vecs);
     for(int i = 0; i < total_vecs; i++){
-        r.bitarrays[i] = bitset_create(max_elt);
+        r.bitarrays[i] = bitset_create(max_elt + 1);
         for(int j = 0; j < VEC_SIZE; j++){
             bitset_set(r.bitarrays[i], new_vecs[i].elts[j]);
         }
@@ -348,7 +348,7 @@ void search(char *filename, int sum, int min_sum, int max_sum) {
         if (min_sum == -1)
             min_sum = vec_sum(group.vecs[0]);
         if (max_sum == -1)
-            max_sum = group.numsums + 1;
+            max_sum = group.numsums;
         for (int i = min_sum; i < max_sum; i++) {
             search_sum(group, i);
         }
