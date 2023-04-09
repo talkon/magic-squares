@@ -32,7 +32,7 @@ void record(search_table table, row_table rows, row_table cols, global_t g) {
   if (rows.num_vecs * cols.num_vecs == VEC_SIZE * VEC_SIZE) {
     // return;
     printf("solution found\n");
-    for (int i = 0; i < VEC_SIZE; i++) {
+    for (int i = 0; i < rows.num_vecs; i++) {
       printf("%ld    ", rows.vecs[i]);
       for (int j = 0; j < VEC_SIZE; j++) {
         printf("%ld ", g.label_to_elt[g.vecs[rows.vecs[i]][j]]);
@@ -40,7 +40,7 @@ void record(search_table table, row_table rows, row_table cols, global_t g) {
       printf("\n");
     }
     printf("\n");
-    for (int i = 0; i < VEC_SIZE; i++) {
+    for (int i = 0; i < cols.num_vecs; i++) {
       printf("%ld    ", cols.vecs[i]);
       for (int j = 0; j < VEC_SIZE; j++) {
         printf("%ld ", g.label_to_elt[g.vecs[cols.vecs[i]][j]]);
@@ -89,7 +89,7 @@ void search_aux(global_t g, row_table rows, row_table cols, search_table table,
       new_active->num_vecs++;
 
       size_t new_minvec = new_row;
-      if (rows.num_vecs > 1 || cols.num_vecs > 1) {
+      if (new_rows.num_vecs > 1 || new_cols.num_vecs > 1) {
         new_minvec = 0;
       }
       new_rows.valid = g.row_idx_slots[rows.num_vecs + cols.num_vecs + 1];
@@ -98,7 +98,7 @@ void search_aux(global_t g, row_table rows, row_table cols, search_table table,
       fill_valids(&cols, &new_cols, g.inters[new_row], 1 - to_add, new_minvec);
 
       bitset_inplace_xor(table.unmatched, g.bitarrays[new_row]);
-      search_aux(g, rows, cols, table, new_row);
+      search_aux(g, new_rows, new_cols, table, new_row);
       bitset_inplace_xor(table.unmatched, g.bitarrays[new_row]);
     }
   }

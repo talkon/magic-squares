@@ -30,21 +30,21 @@ vecs_t read_vecs(char *filename) {
   while (fgets(buf, 1024, fp) != NULL)
     vecs.num_vecs++;
 
-  vecs.vecs = malloc(sizeof(vec_t) * vecs.num_vecs);
+  vecs.vecs = calloc(vecs.num_vecs, sizeof(vec_t));
   fp = fopen(filename, "r");
 
   vecs.num_vecs = 0;
   while (fgets(buf, 1024, fp) != NULL) {
-    vec_t *slot = &vecs.vecs[vecs.num_vecs];
-    sscanf(buf, "%ld %ld %ld %ld %ld %ld", slot[0], slot[1], slot[2], slot[3],
-           slot[4], slot[5]);
+    size_t *vec = vecs.vecs[vecs.num_vecs];
+    sscanf(buf, "%ld %ld %ld %ld %ld %ld", &vec[0], &vec[1], &vec[2], &vec[3],
+           &vec[4], &vec[5]);
     vecs.num_vecs++;
   }
   vecs.num_sums = vec_sum(vecs.vecs[vecs.num_vecs - 1]);
   size_t cursum = 0;
 
   // all infos are initialized to 0 length and null starts
-  vecs.sums = calloc(vecs.num_sums + 1, sizeof(vecs.sums));
+  vecs.sums = calloc(vecs.num_sums + 1, sizeof(*vecs.sums));
   for (size_t i = 0; i < vecs.num_vecs; i++) {
     vec_t *vec = &vecs.vecs[i];
     size_t vecsum = vec_sum(*vec);
@@ -61,6 +61,7 @@ void search_sum(vecs_t vecs, int sum) {
   size_t total_vecs = vecs.sums[sum].length;
   if (total_vecs == 0)
     return;
+  printf("sum %d nvecs %ld\n", sum, total_vecs);
 
   global_t g = elt_relabeling(vecs, sum);
   printf("inters calculated\n");
