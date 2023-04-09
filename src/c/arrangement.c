@@ -31,6 +31,7 @@ vecs_t read_vecs(char *filename) {
     vecs.num_vecs++;
 
   vecs.vecs = calloc(vecs.num_vecs, sizeof(vec_t));
+  fclose(fp);
   fp = fopen(filename, "r");
 
   vecs.num_vecs = 0;
@@ -54,6 +55,7 @@ vecs_t read_vecs(char *filename) {
     cursum = vecsum;
   }
 
+  fclose(fp);
   return vecs;
 }
 
@@ -82,8 +84,8 @@ void search_sum(vecs_t vecs, int sum) {
   cols.num_valid = total_vecs;
 
   for (size_t i = 0; i < 3 * VEC_SIZE; i++) {
-    g.row_idx_slots[i] = malloc(total_vecs * sizeof(size_t));
-    g.col_idx_slots[i] = malloc(total_vecs * sizeof(size_t));
+    g.row_idx_slots[i] = calloc(total_vecs, sizeof(size_t));
+    g.col_idx_slots[i] = calloc(total_vecs, sizeof(size_t));
   }
 
   size_t num_searched = 0;
@@ -94,6 +96,9 @@ void search_sum(vecs_t vecs, int sum) {
   printf("num searched: %ld\n", *table.num_searched);
 
   // freeing
+  for (int i = 0; i < g.num_vecs; i++) {
+    free(g.inters[i]);
+  }
   free(g.inters);
   free(g.vecs);
   free(g.label_to_elt);
