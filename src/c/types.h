@@ -49,14 +49,14 @@ typedef struct {
   /* inters[i][j] = size of vecs[i] & vecs[j] */
   unsigned char **inters;
   /* arena-allocated valid_rows and valid_cols slots */
-  size_t *row_idx_slots[64];
-  size_t *col_idx_slots[64];
+  size_t *row_idx_slots[NUM_VALID_SLOTS];
+  size_t *col_idx_slots[NUM_VALID_SLOTS];
 } global_t;
 
 /* search state for rows/cols */
 typedef struct row_table {
   /* vecs taken */
-  size_t vecs[6];
+  size_t vecs[VEC_SIZE];
   /* number of vecs taken */
   size_t num_vecs;
   /* vecs that could go in */

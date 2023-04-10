@@ -63,8 +63,8 @@ void search_aux(global_t g, row_table rows, row_table cols,
   record(table, rows, cols, g);
 
   // if we're done, return
-  if (!((rows.num_vecs + rows.num_valid >= 6) &&
-        (cols.num_vecs + cols.num_valid >= 6))) {
+  if (!((rows.num_vecs + rows.num_valid >= VEC_SIZE) &&
+        (cols.num_vecs + cols.num_valid >= VEC_SIZE))) {
     return;
   }
 
