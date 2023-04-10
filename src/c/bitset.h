@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* type of bitset */
 typedef struct bitset_t {
@@ -17,6 +18,9 @@ bitset_t bitset_create(size_t size);
 
 /* free memory */
 void bitset_free(bitset_t bitset);
+
+/* copy a bitset */
+bitset_t bitset_copy(const bitset_t bitset);
 
 /* set ith bit to 1; no bounds checking */
 static inline void bitset_set(bitset_t bitset, size_t i) {

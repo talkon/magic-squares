@@ -4,13 +4,18 @@ bitset_t bitset_create(size_t size) {
   bitset_t bitset;
   bitset.size = (size + sizeof(uint64_t) * 8 - 1) / (sizeof(uint64_t) * 8);
   bitset.array = calloc(bitset.size, sizeof(uint64_t));
-  if (bitset.array == NULL) {
-    return bitset;
-  }
   return bitset;
 }
 
 void bitset_free(bitset_t bitset) { free(bitset.array); }
+
+bitset_t bitset_copy(const bitset_t bitset) {
+  bitset_t copy;
+  copy.size = bitset.size;
+  copy.array = malloc(copy.size * sizeof(uint64_t));
+  memcpy(copy.array, bitset.array, copy.size * sizeof(uint64_t));
+  return copy;
+}
 
 size_t bitset_maximum(const bitset_t bitset) {
   for (size_t k = bitset.size; k > 0; k--) {

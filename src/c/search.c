@@ -35,11 +35,24 @@ bool any_match(vec_t vec, size_t target) {
   return false;
 }
 
+size_t count_valids_with(const global_t g, const row_table *old_vecs,
+                         unsigned char inter_val, size_t new_vec, size_t i,
+                         size_t max_i, size_t unmatched) {
+  size_t res = 0;
+  for (; i < max_i; i++) {
+    size_t vec = old_vecs->valid[i];
+    int is_valid = g.inters[new_vec][vec] == inter_val &&
+                   any_match(g.vecs[vec], unmatched);
+    res += is_valid;
+  }
+  return res;
+}
+
 // new_vecs = vec in old_vecs such that:
 //   0. ensure g.inters[new_vec][vec] == inter_val
 //   1. ensure vec >= min_vec
 //   2. ensure max(vec) >= max_unmatched
-//   2. ensure max_unmatched in vec
+//   3. ensure max_unmatched in vec
 void fill_valids(const global_t g, const row_table *old_vecs,
                  row_table *new_vecs, const search_table table,
                  unsigned char inter_val, size_t new_vec, size_t min_vec) {
@@ -55,13 +68,34 @@ void fill_valids(const global_t g, const row_table *old_vecs,
   while (g.vecs[old_vecs->valid[max_i]][0] >= max_unmatched) {
     max_i++;
   }
+
+  // check second and third maximums
+  size_t best_unmatched = max_unmatched;
+  size_t best = count_valids_with(g, old_vecs, inter_val, new_vec, i, max_i,
+                                  max_unmatched);
+  bitset_t tmp = bitset_copy(table.unmatched);
+  size_t last_unmatched = max_unmatched;
+  for (size_t j = 1; j < 3; j++) {
+    bitset_unset(tmp, last_unmatched);
+    last_unmatched = bitset_maximum(tmp);
+    if (last_unmatched == 0) {
+      break;
+    }
+    size_t valids = count_valids_with(g, old_vecs, inter_val, new_vec, i, max_i,
+                                      last_unmatched);
+    if (valids < best) {
+      best_unmatched = last_unmatched;
+    }
+  }
+  bitset_free(tmp);
+
   // for each vec in old_vecs...
   for (; i < max_i; i++) {
     size_t vec = old_vecs->valid[i];
     // requirement 0: ensure g.inters[new_vec][vec] == inter_val
     // optimization 3: max_unmatched in vec
     int is_valid = g.inters[new_vec][vec] == inter_val &&
-                   any_match(g.vecs[vec], max_unmatched);
+                   any_match(g.vecs[vec], best_unmatched);
     // if is_valid, add old_row, else nothing (but branchfree)
     new_vecs->valid[new_vecs->num_valid] =
         vec * is_valid + new_vecs->valid[new_vecs->num_valid] * (1 - is_valid);
