@@ -180,9 +180,9 @@ if [ "$POSTPROC" = true ]; then
   echo "running postprocessing"
   if [ "$FORCE_POSTPROC" = false ] && [ -e $POSTPROC_FILE_NAME ]; then
     echo "file ${POSTPROC_FILE_NAME} exists, not remaking it..."
+    cat $POSTPROC_FILE_NAME
   else
     echo "making ${POSTPROC_FILE_NAME}..."
-    $PYPY3 bin/postprocess.py $ARRANGE_FILE_NAME $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME
+    $PYPY3 bin/postprocess.py $ARRANGE_FILE_NAME $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
   fi
-  cat $POSTPROC_FILE_NAME
 fi

@@ -174,6 +174,7 @@ class CSearchStats:
     S_stats: list[SStats]
 
     def assert_nsols(self, expected_nsols: int) -> None:
+        assert self.count > 0, f"Expected positive search count"
         assert self.nsols == expected_nsols, f"Expected {expected_nsols} solutions, found {self.nsols}"
 
     def pretty_print(self, verbose: int) -> None:
