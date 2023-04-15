@@ -1,10 +1,14 @@
 import dataclasses
 import argparse
-from arrangement import Table, Vec
 from operator import mul
 from functools import reduce
 from itertools import permutations
 from enum import IntEnum
+from typing import Union, Callable, Any
+from glob import glob, escape
+
+from arrangement import Table, Vec
+from enumeration import primes
 
 class DiagonalType(IntEnum):
     NONE = 0
@@ -60,17 +64,71 @@ class DiagonalStats:
 @dataclasses.dataclass
 class SStats:
     S: int
-    nvecs: int
+    num_vecs: int
     count: int
-    nsols: int
+    num_sols: int
     best_score: int   
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"{'S':>7} {'nvecs':>5} {'count':>9} {'nsols':>5} {'best':>4}")
+        print(f"{'S':>9} {'num_vecs':>5} {'count':>9} {'num_sols':>5} {'best':>4}")
 
     def pretty_print(self) -> None:  
-        print(f"{self.S:7} {self.nvecs:5} {self.count:9} {(self.nsols if self.nsols > 0 else ''):5} {(self.best_score if self.best_score >= 0 else ''):4}")
+        print(f"{self.S:>9} {self.num_vecs:5} {self.count:9} {(self.num_sols if self.num_sols > 0 else ''):5} {(self.best_score if self.best_score >= 0 else ''):4}")
+
+@dataclasses.dataclass
+class PStats:
+    P: Union[tuple[int], None]
+    P_val: Union[int, None]
+    count: int
+    time: float
+    num_vecs: int
+    max_num_vecs: int
+    num_sols: int
+    best_score: int
+    num_S: int
+    S_stats: list[SStats]
+
+    @classmethod
+    def pretty_print_header(cls) -> None:
+        print(f"  {'P':14} {'P_val':>12} {'num_vecs':>8} {'max':>5} {'num_S':>6} {'count':>13} {'time':>10} {'sols':>5} {'best':>4}")
+
+    def pretty_print(self) -> None:
+        P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
+        P_val = self.P_val if self.P_val else "None"
+        print(f"  {P_str:14} {P_val:>12} {self.num_vecs:8} {self.max_num_vecs:5} {self.num_S:6} {self.count:13} {self.time:>10.2f} {self.num_sols:5} {(self.best_score if self.best_score >= 0 else ''):4}")
+
+    def pretty_print_SStats(self, verbose: int) -> None:
+        if verbose >= 5:
+            print("  Statistics for each S with a solution:")
+            SStats.pretty_print_header()
+            for S_stat in self.S_stats:
+                if S_stat.num_sols > 0:
+                    S_stat.pretty_print()
+        if verbose >= 6:
+            print("  Statistics for each S:")
+            SStats.pretty_print_header()
+            for S_stat in self.S_stats:
+                S_stat.pretty_print()
+
+@dataclasses.dataclass
+class OverallStats:
+    count: int
+    time: float
+    num_P: int
+    num_S: int
+    num_vecs: int
+    max_num_vecs: int
+    num_sols: int
+
+    def pretty_print(self) -> None:
+        print("Overall statistics:")
+        print(f"  {'count':<12}={self.count:13}")
+        print(f"  {'time':<12}={self.time:13.4f}")
+        print(f"  {'num_S':<12}={self.num_S:13}")
+        print(f"  {'num_vecs':<12}={self.num_vecs:13}")
+        print(f"  {'max_num_vecs':<12}={self.max_num_vecs:13}")
+        print(f"  {'num_sols':<12}={self.num_sols:13}")
 
 @dataclasses.dataclass
 class Solution:
@@ -163,54 +221,84 @@ class Solution:
 
 @dataclasses.dataclass
 class CSearchStats:
-    count: int
-    time: float
-    nsums: int
-    nvecs: int
-    max_nvecs: int
-    nsols: int
+    overall_stats: Union[OverallStats, None]
     solutions: list[Solution]
     diagonal_stats: list[DiagonalStats]
-    S_stats: list[SStats]
+    P_stats: dict[Union[tuple[int], None], PStats]
 
-    def assert_nsols(self, expected_nsols: int) -> None:
+    def assert_num_sols(self, expected_num_sols: int) -> None:
         assert self.count > 0, f"Expected positive search count"
-        assert self.nsols == expected_nsols, f"Expected {expected_nsols} solutions, found {self.nsols}"
+        assert self.num_sols == expected_num_sols, f"Expected {expected_num_sols} solutions, found {self.num_sols}"
 
-    def pretty_print(self, verbose: int) -> None:
-        print("Overall statistics:")
-        print(f"  {'count':<10}={self.count:13}")
-        print(f"  {'time':<10}={self.time:13.4f}")
-        print(f"  {'nsums':<10}={self.nsums:13}")
-        print(f"  {'nvecs':<10}={self.nvecs:13}")
-        print(f"  {'max_nvecs':<10}={self.max_nvecs:13}")
-        print(f"  {'nsols':<10}={self.nsols:13}")
-        if self.nsols:
+    def compute_overall_stats(self) -> None:
+        overall_stats = OverallStats(0, 0, 0, 0, 0, 0, 0)
+        overall_stats.num_P = len(self.P_stats)
+        for P_stat in self.P_stats.values():
+            overall_stats.count += P_stat.count
+            overall_stats.time += P_stat.time
+            overall_stats.num_S += P_stat.num_S
+            overall_stats.num_vecs += P_stat.num_vecs
+            overall_stats.max_num_vecs = max(overall_stats.max_num_vecs, P_stat.max_num_vecs)
+            overall_stats.num_sols += P_stat.num_sols
+        self.overall_stats = overall_stats
+
+    def pretty_print(self, sort: str, verbose: int) -> None:
+        # print overall stats
+        if self.overall_stats:
+            self.overall_stats.pretty_print()
+        else:
+            print(">> overall stats have not been computed")
+        if self.solutions:
             print("Best overall square:")
             best_dstat = max(self.diagonal_stats, key=lambda x: x.best_score)
             best_dstat.pretty_print_best_square()
-            if verbose >= 1:
-                print("Diagonal statistics for each solution:")
+
+        # print P stats
+        print("Statistics for each P:")
+        sorted_P_stats = sorted(self.P_stats.values(), key=lambda x: x.count)
+        PStats.pretty_print_header()
+        for P_stat in sorted_P_stats:
+            P_stat.pretty_print()
+
+        # print solutions and diagonal stats
+        if self.solutions:
+            # sorted by score
+            if (verbose >= 1 and sort == "score") or (verbose >= 2):
+                sorted_dstats_by_score = sorted(
+                    self.diagonal_stats, 
+                    key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P, -x.S, -x.max_nb),
+                    reverse=True
+                )
+                print("Diagonal statistics for each solution, sorted by score:")
                 DiagonalStats.pretty_print_header()
-                for diagonal_stat in self.diagonal_stats:
+                for diagonal_stat in sorted_dstats_by_score:
                     diagonal_stat.pretty_print()
-            if verbose >= 2:
-                print("Best diagonals for each solution:")
-                for diagonal_stat in self.diagonal_stats:
-                    diagonal_stat.pretty_print_best_square()
-        if verbose >= 3:
-            print("Statistics for each S with a solution:")
-            SStats.pretty_print_header()
-            for S_stat in self.S_stats:
-                if S_stat.nsols > 0:
-                    S_stat.pretty_print()
-        if verbose >= 4:
-            print("Statistics for each S:")
-            SStats.pretty_print_header()
-            for S_stat in self.S_stats:
-                S_stat.pretty_print()
+                if (verbose >= 3 and sort == "score") or (verbose >= 4):
+                    print("Best diagonals for each solution, sorted by score:")
+                    for diagonal_stat in sorted_dstats_by_score:
+                        diagonal_stat.pretty_print_best_square()
+            # sorted by P
+            if (verbose >= 1 and sort == "P") or (verbose >= 2):
+                sorted_dstats_by_P = sorted(
+                    self.diagonal_stats, 
+                    key=lambda x: (x.P, x.S, x.max_nb)
+                )
+                print("Diagonal statistics for each solution, sorted by P:")
+                DiagonalStats.pretty_print_header()
+                for diagonal_stat in sorted_dstats_by_P:
+                    diagonal_stat.pretty_print()
+                if (verbose >= 3 and sort == "P") or (verbose >= 4):
+                    print("Best diagonals for each solution, sorted by P:")
+                    for diagonal_stat in sorted_dstats_by_P:
+                        diagonal_stat.pretty_print_best_square()
 
-
+        # print S stats (very long!!)
+        if verbose >= 5:
+            print("Detailed statistics for each P:")
+            for P_stat in sorted_P_stats:
+                PStats.pretty_print_header()
+                P_stat.pretty_print()
+                P_stat.pretty_print_SStats(verbose)
 
 # given the permutation for the first diagonal, returns possible permutations for the second diagonal
 def other_diagonals(permutation: Vec) -> list[Vec]:
@@ -221,9 +309,26 @@ def other_diagonals(permutation: Vec) -> list[Vec]:
         out += [tuple(permutation[gmap[i]] for i in range(6))]
     return out
 
-def parse_arrangement_output(file: str, sort_score: bool) -> CSearchStats:
-    stats = CSearchStats(0, 0, 0, 0, 0, 0, [], [], [])
+def parse_arrangement_output(
+    file: str, 
+    stats: CSearchStats = CSearchStats(None, [], [], {})
+) -> CSearchStats:
     cur_sum = 0
+    P: Union[tuple[int], None] = None    
+    P_val: Union[int, None] = None   
+    try:
+        P = tuple()
+        for x in file.split('.')[-2].split('/')[-1].split('_')[1:]:
+            if x.isdigit():
+                P += (int(x),)
+            else:
+                break
+        #  print("inferred value of P:", P)
+        P_val = reduce(mul, (p ** r for p, r in zip(primes, P)), 1)
+        #  print("P_val:", P_val)
+    except:
+        pass
+    P_stat: PStats = stats.P_stats.get(P, default=PStats(P, P_val, 0, 0, 0, 0, 0, -1, 0, []))
     with open(file, "r") as f:
         while line := f.readline():
             split = line.split()
@@ -241,44 +346,60 @@ def parse_arrangement_output(file: str, sort_score: bool) -> CSearchStats:
                     ci, *col = (int(n) for n in f.readline().split())
                     table.cols += [tuple(col)]
                     table.cis += [ci]
+                # compute diagonal stats
                 solution = Solution(table)
                 diagonal_stats = solution.diagonal_stats()
+                # record solution and diagonal stats
                 stats.solutions += [solution]
                 stats.diagonal_stats += [diagonal_stats]
-                stats.nsols += 1
-                stats.S_stats[-1].nsols += 1
-                if diagonal_stats.best_score > stats.S_stats[-1].best_score:
-                    stats.S_stats[-1].best_score = diagonal_stats.best_score
+                # update stats
+                P_stat.num_sols += 1
+                if diagonal_stats.best_score > P_stat.best_score:
+                    P_stat.best_score = diagonal_stats.best_score
+                P_stat.S_stats[-1].num_sols += 1
+                if diagonal_stats.best_score > P_stat.S_stats[-1].best_score:
+                    P_stat.S_stats[-1].best_score = diagonal_stats.best_score
             elif split[0] == "sum":
                 cur_sum = int(split[1])
-                nvecs = int(split[3])
-                stats.nvecs += nvecs
-                stats.nsums += 1
-                if nvecs > stats.max_nvecs:
-                    stats.max_nvecs = nvecs
-                stats.S_stats += [SStats(cur_sum, nvecs, 0, 0, -1)]
+                num_vecs = int(split[3])
+                P_stat.num_vecs += num_vecs
+                P_stat.num_S += 1
+                if num_vecs > P_stat.max_num_vecs:
+                    P_stat.max_num_vecs = num_vecs
+                P_stat.S_stats += [SStats(cur_sum, num_vecs, 0, 0, -1)]
             elif split[:2] == ["num", "searched:"]:
                 count = int(split[2])
-                stats.count += count
-                stats.S_stats[-1].count = count
+                P_stat.count += count
+                P_stat.S_stats[-1].count = count
             elif split[:2] == ["completed", "in"]:
-                stats.time += float(split[2])
-    if sort_score:
-        stats.diagonal_stats=sorted(stats.diagonal_stats, key=lambda x: (-x.best_score, x.P, x.S, x.max_nb))
+                P_stat.time += float(split[2])
+    stats.P_stats[P] = P_stat
+    return stats
+
+def parse_directory(glob_str: str) -> CSearchStats:
+    stats = CSearchStats(None, [], [], {})
+    # print(glob_str)
+    for file in glob(glob_str):
+        # print(file)
+        stats = parse_arrangement_output(file, stats)
     return stats
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("file", type=str)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--file', type=str)
+    group.add_argument('--glob', type=str)
     parser.add_argument("--verbose", metavar="V", type=int, default=1)
-    parser.add_argument("--expect-nsols", type=int, nargs=1)
-    parser.add_argument("--sort-score", action="store_true")
+    parser.add_argument("--expect-num_sols", type=int, nargs=1)
+    parser.add_argument("--sort", choices=['P', 'score'], nargs=1)
     args = parser.parse_args()
 
-    parsed = parse_arrangement_output(args.file, args.sort_score)
-    if args.expect_nsols:
-        parsed.assert_nsols(args.expect_nsols[0])
-    parsed.pretty_print(args.verbose)
+    sort = args.sort if args.sort else ("score" if args.glob else "P") 
+    stats = parse_directory(args.glob) if args.glob else parse_arrangement_output(args.file) 
+    if args.expect_num_sols:
+        stats.assert_num_sols(args.expect_num_sols[0])
+    stats.compute_overall_stats()
+    stats.pretty_print(sort, args.verbose)
 
 
 

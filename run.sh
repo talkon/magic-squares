@@ -4,6 +4,8 @@
 #   -e: run "e"numeration step
 #   -a: run "a"rrangement step
 #   -p: run "p"ostprocessing step
+#   --glob [pattern]: run aggregated postprocessing step on all files matching specified pattern
+#                     use like this: 
 #   -ef, -af, -pf: same as -e, -a, -p, but force rerunning if cached files exist
 #   --perf: run perf for arrangement step
 #   --output-dir [dir]: override output directory (default is data/)
@@ -12,7 +14,7 @@
 #   --pfile [fname]: override postprocess file name (default is data/summary_[P].txt or data/summary_[P]_[arrangement.c options].txt if arrangement options are used)
 # when no -e/a/p flags are used, defaults to -e -a -p
 # supported arrangement.c options: --min-sum, --max-sum, --sum
-# supported postprocess.py options: --verbose (default 1), --sort-score
+# supported postprocess.py options: --verbose (default 1), --sort
 
 POSITIONAL_ARGS=()
 ARRANGE_OPTIONS=()
@@ -29,6 +31,8 @@ PARTIAL=false
 FORCE_ENUM=false
 FORCE_ARRANGE=false
 FORCE_POSTPROC=false
+
+GLOB=false
 
 PERF=false
 OUTPUT_DIR="data"
@@ -78,8 +82,14 @@ while [[ $# -gt 0 ]]; do
       shift # past argument
       shift # past value
       ;;
-    --sort-score)
+    --sort)
       POSTPROC_OPTIONS+=("$1" "$2")
+      shift # past argument
+      shift # past value
+      ;;
+    --glob)
+      GLOB=true
+      GLOB_STR="$2"
       shift # past argument
       shift # past value
       ;;
@@ -183,6 +193,10 @@ if [ "$POSTPROC" = true ]; then
     cat $POSTPROC_FILE_NAME
   else
     echo "making ${POSTPROC_FILE_NAME}..."
-    $PYPY3 bin/postprocess.py $ARRANGE_FILE_NAME $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
+    if [ "$GLOB" = true ]; then
+      $PYPY3 bin/postprocess.py --glob "$GLOB_STR" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
+    else
+      $PYPY3 bin/postprocess.py --file $ARRANGE_FILE_NAME $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
+    fi
   fi
 fi
