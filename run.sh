@@ -89,6 +89,8 @@ while [[ $# -gt 0 ]]; do
       ;;
     --glob)
       GLOB=true
+      POSTPROC=true
+      DEFAULT=false
       GLOB_STR="$2"
       shift # past argument
       shift # past value

@@ -6,6 +6,7 @@ from itertools import permutations
 from enum import IntEnum
 from typing import Union, Callable, Any
 from glob import glob, escape
+from sys import stderr
 
 from arrangement import Table, Vec
 from enumeration import primes
@@ -123,12 +124,13 @@ class OverallStats:
 
     def pretty_print(self) -> None:
         print("Overall statistics:")
-        print(f"  {'count':<12}={self.count:13}")
-        print(f"  {'time':<12}={self.time:13.4f}")
-        print(f"  {'num_S':<12}={self.num_S:13}")
-        print(f"  {'num_vecs':<12}={self.num_vecs:13}")
-        print(f"  {'max_num_vecs':<12}={self.max_num_vecs:13}")
-        print(f"  {'num_sols':<12}={self.num_sols:13}")
+        print(f"  {'count':<13}={self.count:14}")
+        print(f"  {'time':<13}={self.time:14.2f}")
+        print(f"  {'num_P':<13}={self.num_P:14}")
+        print(f"  {'num_S':<13}={self.num_S:14}")
+        print(f"  {'num_vecs':<13}={self.num_vecs:14}")
+        print(f"  {'max_num_vecs':<13}={self.max_num_vecs:14}")
+        print(f"  {'num_sols':<13}={self.num_sols:14}")
 
 @dataclasses.dataclass
 class Solution:
@@ -262,35 +264,38 @@ class CSearchStats:
 
         # print solutions and diagonal stats
         if self.solutions:
-            # sorted by score
+            sorted_dstats_by_score = sorted(
+                self.diagonal_stats, 
+                key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P, -x.S, -x.max_nb),
+                reverse=True
+            )
+            sorted_dstats_by_P = sorted(
+                self.diagonal_stats, 
+                key=lambda x: (x.P, x.S, x.max_nb)
+            )
+            if verbose == 0:
+                print("Diagonal statistics for top 100 solutions, sorted by score:")
+                DiagonalStats.pretty_print_header()
+                for diagonal_stat in sorted_dstats_by_score[:100]:
+                    diagonal_stat.pretty_print()
             if (verbose >= 1 and sort == "score") or (verbose >= 2):
-                sorted_dstats_by_score = sorted(
-                    self.diagonal_stats, 
-                    key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P, -x.S, -x.max_nb),
-                    reverse=True
-                )
                 print("Diagonal statistics for each solution, sorted by score:")
                 DiagonalStats.pretty_print_header()
                 for diagonal_stat in sorted_dstats_by_score:
                     diagonal_stat.pretty_print()
-                if (verbose >= 3 and sort == "score") or (verbose >= 4):
-                    print("Best diagonals for each solution, sorted by score:")
-                    for diagonal_stat in sorted_dstats_by_score:
-                        diagonal_stat.pretty_print_best_square()
-            # sorted by P
             if (verbose >= 1 and sort == "P") or (verbose >= 2):
-                sorted_dstats_by_P = sorted(
-                    self.diagonal_stats, 
-                    key=lambda x: (x.P, x.S, x.max_nb)
-                )
                 print("Diagonal statistics for each solution, sorted by P:")
                 DiagonalStats.pretty_print_header()
                 for diagonal_stat in sorted_dstats_by_P:
                     diagonal_stat.pretty_print()
-                if (verbose >= 3 and sort == "P") or (verbose >= 4):
-                    print("Best diagonals for each solution, sorted by P:")
-                    for diagonal_stat in sorted_dstats_by_P:
-                        diagonal_stat.pretty_print_best_square()
+            if (verbose >= 3 and sort == "score") or (verbose >= 4):
+                print("Best diagonals for each solution, sorted by score:")
+                for diagonal_stat in sorted_dstats_by_score:
+                    diagonal_stat.pretty_print_best_square()
+            if (verbose >= 3 and sort == "P") or (verbose >= 4):
+                print("Best diagonals for each solution, sorted by P:")
+                for diagonal_stat in sorted_dstats_by_P:
+                    diagonal_stat.pretty_print_best_square()
 
         # print S stats (very long!!)
         if verbose >= 5:
@@ -378,9 +383,9 @@ def parse_arrangement_output(
 
 def parse_directory(glob_str: str) -> CSearchStats:
     stats = CSearchStats(None, [], [], {})
-    # print(glob_str)
+    print("Looking for files matching pattern", glob_str, file=stderr)
     for file in glob(glob_str):
-        # print(file)
+        print("Processing", file, file=stderr)
         stats = parse_arrangement_output(file, stats)
     return stats
 
