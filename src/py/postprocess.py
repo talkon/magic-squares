@@ -229,8 +229,9 @@ class CSearchStats:
     P_stats: dict[Union[tuple[int], None], PStats]
 
     def assert_num_sols(self, expected_num_sols: int) -> None:
-        assert self.count > 0, f"Expected positive search count"
-        assert self.num_sols == expected_num_sols, f"Expected {expected_num_sols} solutions, found {self.num_sols}"
+        self.compute_overall_stats()
+        assert self.overall_stats.count > 0, f"Expected positive search count"
+        assert self.overall_stats.num_sols == expected_num_sols, f"Expected {expected_num_sols} solutions, found {self.overall_stats.num_sols}"
 
     def compute_overall_stats(self) -> None:
         overall_stats = OverallStats(0, 0, 0, 0, 0, 0, 0)
@@ -395,14 +396,14 @@ if __name__ == "__main__":
     group.add_argument('--file', type=str)
     group.add_argument('--glob', type=str)
     parser.add_argument("--verbose", metavar="V", type=int, default=1)
-    parser.add_argument("--expect-num_sols", type=int, nargs=1)
+    parser.add_argument("--expect-nsols", type=int, nargs=1)
     parser.add_argument("--sort", choices=['P', 'score'], nargs=1)
     args = parser.parse_args()
 
     sort = args.sort if args.sort else ("score" if args.glob else "P") 
     stats = parse_directory(args.glob) if args.glob else parse_arrangement_output(args.file) 
-    if args.expect_num_sols:
-        stats.assert_num_sols(args.expect_num_sols[0])
+    if args.expect_nsols:
+        stats.assert_num_sols(args.expect_nsols[0])
     stats.compute_overall_stats()
     stats.pretty_print(sort, args.verbose)
 
