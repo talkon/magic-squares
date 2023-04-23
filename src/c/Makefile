@@ -1,7 +1,7 @@
 CC := gcc
 TARGET := arrangement
 
-SRC := arrangement.c bitset.c
+SRC := arrangement.c bitset.c labelling.c search.c
 OBJ := $(SRC:.c=.o)
 DEP := $(OBJ:%.o=%.d)
 

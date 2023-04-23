@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "types.h"
+#include "new_inters.h"
 
 #define ROW 0
 #define COL 1

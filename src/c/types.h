@@ -62,6 +62,7 @@ typedef struct row_table {
   /* vecs that could go in */
   size_t *valid;
   size_t num_valid;
+  size_t filt_start;
 } row_table;
 
 /* backtracking state, what changes between search_aux calls */

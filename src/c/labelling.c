@@ -42,6 +42,7 @@ global_t elt_relabeling(vecs_t vecs, size_t sum) {
     elt_to_label[elt_freqs[i].elt] = i;
     label_to_elt[i] = elt_freqs[i].elt;
   }
+  g.num_labels = sum;
   vec_t *new_vecs = malloc(num_vecs * sizeof(vec_t));
   for (size_t i = 0; i < num_vecs; i++) {
     for (size_t j = 0; j < VEC_SIZE; j++) {
