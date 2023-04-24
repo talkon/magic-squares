@@ -5,7 +5,7 @@
 #   -a: run "a"rrangement step
 #   -p: run "p"ostprocessing step
 #   --glob [pattern]: run aggregated postprocessing step on all files matching specified pattern
-#                     use like this: 
+#                     use like this: ./run.sh --glob "data/output_*" --pfile stats/stats_long.txt --verbose 3 -pf
 #   -ef, -af, -pf: same as -e, -a, -p, but force rerunning if cached files exist
 #   --perf: run perf for arrangement step
 #   --output-dir [dir]: override output directory (default is data/)

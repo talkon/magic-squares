@@ -72,10 +72,10 @@ class SStats:
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"{'S':>9} {'num_vecs':>5} {'count':>9} {'num_sols':>5} {'best':>4}")
+        print(f"{'S':>9} {'nvecs':>5} {'count':>12} {'nsols':>5} {'best':>4}")
 
     def pretty_print(self) -> None:  
-        print(f"{self.S:>9} {self.num_vecs:5} {self.count:9} {(self.num_sols if self.num_sols > 0 else ''):5} {(self.best_score if self.best_score >= 0 else ''):4}")
+        print(f"{self.S:>9} {self.num_vecs:5} {self.count:12} {(self.num_sols if self.num_sols > 0 else ''):5} {(self.best_score if self.best_score >= 0 else ''):4}")
 
 @dataclasses.dataclass
 class PStats:
@@ -253,7 +253,7 @@ class CSearchStats:
             print(">> overall stats have not been computed")
         if self.solutions:
             print("Best overall square:")
-            best_dstat = max(self.diagonal_stats, key=lambda x: x.best_score)
+            best_dstat = max(self.diagonal_stats, key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P, -x.S, -x.max_nb))
             best_dstat.pretty_print_best_square()
 
         # print P stats
