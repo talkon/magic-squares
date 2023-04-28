@@ -66,10 +66,18 @@ typedef struct row_table {
 
 /* backtracking state, what changes between search_aux calls */
 typedef struct search_table {
-  /* table elements that aren't in both a row and a col */
+  /* elements that aren't in both a row and a col */
   bitset_t unmatched;
   /* number of tables tested */
   size_t *num_searched;
+  /* max unmatched in unmatched */
+  size_t max_unmatched;
 } search_table;
+
+/* toggle the elements in b as unmatched in table */
+static inline void toggle_unmatched(search_table *table, const bitset_t b) {
+  bitset_inplace_xor(table->unmatched, b);
+  table->max_unmatched = bitset_maximum(table->unmatched);
+}
 
 #endif // !TYPES_H
