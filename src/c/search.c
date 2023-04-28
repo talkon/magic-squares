@@ -48,8 +48,8 @@ bool in_any_row(global_t g, row_table *rows, size_t target) {
 //   - g.inters[new_vec][vec] == inter_val
 //   - vec >= min_vec
 void fill_valids(const global_t g, const row_table *old_vecs,
-                 row_table *new_vecs, const search_table table,
-                 unsigned char inter_val, size_t new_vec, size_t min_vec) {
+                 row_table *new_vecs, unsigned char inter_val, size_t new_vec,
+                 size_t min_vec) {
   new_vecs->num_valid = 0;
   // ensure everything is >= minvec
   size_t i = 0;
@@ -67,67 +67,94 @@ void fill_valids(const global_t g, const row_table *old_vecs,
 }
 
 // tries to fill in a row or col
-void search_aux(global_t g, row_table rows, row_table cols,
-                search_table table) {
-  record(table, rows, cols, g);
+void search_aux(global_t g, row_table rows_init, row_table cols_init,
+                search_table table, size_t to_add_init) {
+  typedef struct {
+    row_table rows;
+    row_table cols;
+    size_t to_add;
+    size_t *i;
+    size_t *max_i;
+  } frame;
 
-  // if we're done, return
-  if (!((rows.num_vecs + rows.num_valid >= VEC_SIZE) &&
-        (cols.num_vecs + cols.num_valid >= VEC_SIZE)) ||
-      (rows.num_vecs == VEC_SIZE && cols.num_vecs == VEC_SIZE)) {
-    return;
-  }
+  frame stack[NUM_VALID_SLOTS];
+  frame *s = stack;
 
-  // add to either ROW or COL
-  size_t to_add = ROW;
-  if (rows.num_vecs > 0) {
-    to_add = in_any_row(g, &rows, table.max_unmatched) ? COL : ROW;
-  }
-  row_table active = to_add == ROW ? rows : cols;
+  stack[0].rows = rows_init;
+  stack[0].cols = cols_init;
+  stack[0].to_add = to_add_init;
+  stack[0].i = NULL;
+  stack[0].max_i = NULL;
 
-  size_t *i = active.valid;
-  size_t *max_i = i + active.num_valid - 1;
+  while (s >= stack) {
+    row_table active = s->to_add == ROW ? s->rows : s->cols;
 
-  // don't add if we're done
-  if (active.num_vecs == VEC_SIZE) {
-    return;
-  }
+    // set i and max_i if not set
+    if (s->i == NULL) {
+      s->i = active.valid;
+      s->max_i = s->i + active.num_valid - 1;
+      while (s->max_i >= s->i && g.vecs[*s->max_i][0] < table.max_unmatched) {
+        s->max_i--;
+      }
+      s->max_i = s->max_i;
+    }
 
-  // for each valid vector, try adding it:
-  for (; i <= max_i; i++) {
+  loop_head:
+    // cleanup from last time
+    if (s->i > active.valid) {
+      toggle_unmatched(&table, g.bitarrays[*(s->i - 1)]);
+    }
+
     // want this vec to have max_unmatched
     // (unless we haven't added anything yet)
-    size_t max_elt = g.vecs[*i][0];
-    if (max_elt < table.max_unmatched) {
-      break;
+    if (s->rows.num_vecs > 0) {
+      while (s->i <= s->max_i &&
+             !any_match(g.vecs[*s->i], table.max_unmatched)) {
+        s->i++;
+      }
     }
-    if (!any_match(g.vecs[*i], table.max_unmatched) &&
-        (to_add == COL || rows.num_vecs > 0)) {
+    if (s->i > s->max_i) {
+      s--;
       continue;
     }
 
     // add the new vector to rows or cols, update table unmatched
-    row_table new_rows = rows;
-    row_table new_cols = cols;
-    size_t new_vec = *i;
-    row_table *new_active = to_add == ROW ? &new_rows : &new_cols;
-    new_active->vecs[active.num_vecs] = new_vec;
+    row_table new_rows = s->rows;
+    row_table new_cols = s->cols;
+    row_table *new_active = s->to_add == ROW ? &new_rows : &new_cols;
+    new_active->vecs[active.num_vecs] = *s->i;
     new_active->num_vecs++;
-    toggle_unmatched(&table, g.bitarrays[new_vec]);
+    toggle_unmatched(&table, g.bitarrays[*s->i]);
 
     // update new_rows.valid and new_cols.valid
-    size_t min_vec = new_vec;
-    if (new_rows.num_vecs > 1 || new_cols.num_vecs > 1) {
-      min_vec = 0;
-    }
-    new_rows.valid = g.row_idx_slots[rows.num_vecs + cols.num_vecs + 1];
-    new_cols.valid = g.col_idx_slots[rows.num_vecs + cols.num_vecs + 1];
-    fill_valids(g, &rows, &new_rows, table, to_add, new_vec, min_vec);
-    fill_valids(g, &cols, &new_cols, table, 1 - to_add, new_vec, min_vec);
+    size_t min_vec = new_rows.num_vecs > 1 || new_cols.num_vecs > 1 ? 0 : *s->i;
+    new_rows.valid = g.row_idx_slots[s->rows.num_vecs + s->cols.num_vecs + 1];
+    new_cols.valid = g.col_idx_slots[s->rows.num_vecs + s->cols.num_vecs + 1];
+    fill_valids(g, &s->rows, &new_rows, s->to_add, *s->i, min_vec);
+    fill_valids(g, &s->cols, &new_cols, 1 - s->to_add, *s->i, min_vec);
 
     // recurse and reset
-    search_aux(g, new_rows, new_cols, table);
-    toggle_unmatched(&table, g.bitarrays[new_vec]);
+    record(table, new_rows, new_cols, g);
+
+    if ((new_rows.num_vecs + new_rows.num_valid >= VEC_SIZE) &&
+        (new_cols.num_vecs + new_cols.num_valid >= VEC_SIZE) &&
+        !(new_rows.num_vecs == VEC_SIZE && new_cols.num_vecs == VEC_SIZE)) {
+      size_t new_to_add =
+          in_any_row(g, &new_rows, table.max_unmatched) ? COL : ROW;
+      // freeze current stack
+      s->i = s->i + 1;
+      // add stack call
+      s++;
+      s->rows = new_rows;
+      s->cols = new_cols;
+      s->to_add = new_to_add;
+      s->i = NULL;
+      s->max_i = NULL;
+      continue;
+    }
+
+    s->i++;
+    goto loop_head;
   }
 
   return;

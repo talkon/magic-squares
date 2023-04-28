@@ -8,6 +8,7 @@
 #define ROW 0
 #define COL 1
 
-void search_aux(global_t g, row_table rows, row_table cols, search_table table);
+void search_aux(global_t g, row_table rows, row_table cols, search_table table,
+                size_t to_add);
 
 #endif // !SEARCH_H

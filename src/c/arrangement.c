@@ -93,7 +93,7 @@ void search_sum(vecs_t vecs, int sum) {
   table.unmatched = bitset_create(64 * g.bitarrays[0].size);
   table.max_unmatched = bitset_maximum(table.unmatched);
 
-  search_aux(g, rows, cols, table);
+  search_aux(g, rows, cols, table, ROW);
   printf("num searched: %ld\n", *table.num_searched);
 
   // freeing
