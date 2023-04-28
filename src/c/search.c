@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <immintrin.h>
 
 #include "search.h"
 
@@ -35,6 +36,43 @@ bool any_match(vec_t vec, size_t target) {
   return false;
 }
 
+bool in_any_row(global_t g, row_table *rows, size_t target){
+  for (int i = 0; i < rows->num_vecs; i++) {
+    if (any_match(g.vecs[rows->vecs[i]], target)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+
+void fill_valids_vectorized(const global_t g, const row_table *old_vecs,
+                 row_table *new_vecs, const search_table table,
+                 unsigned char inter_val, size_t new_vec, size_t min_vec) {
+  int adjusted_num_valid = old_vecs->num_valid - old_vecs->num_valid % 16;
+  int offset = 0;
+  __m512i inter_vals = _mm512_set1_epi32(inter_val);
+  __m512i min_vecs = _mm512_set1_epi32((uint32_t)min_vec);
+  __m512i shift = _mm512_set1_epi32(16);
+  __m512i mask = _mm512_set1_epi32(255);
+  for(int i = 0; i < adjusted_num_valid / 16; i++){
+    __m512i vecs = _mm512_loadu_si512(old_vecs->valid + i * 16);
+    //_mm512_storeu_si512(new_vecs->valid + offset, vecs);
+    __m512i inters = _mm512_i32gather_epi32(vecs, (void*) g.inters[new_vec], sizeof(unsigned char));
+    inters &= mask;
+    __mmask16 size_mask = _mm512_cmpge_epi32_mask(vecs, min_vecs);
+    if(size_mask == 0){
+      continue;
+    }
+    __mmask16 inter_mask = _mm512_cmpeq_epi32_mask(inters, inter_vals);
+    _mm512_mask_compressstoreu_epi32(new_vecs->valid + offset, inter_mask & size_mask, vecs);
+    int num_vals = __popcntq((uint64_t)(inter_mask & size_mask));
+    offset += num_vals;
+    new_vecs->num_valid += num_vals;
+    
+  }
+}
+
 /// new_vecs = vec in old_vecs such that:
 //   - g.inters[new_vec][vec] == inter_val
 //   - vec >= min_vec
@@ -43,11 +81,12 @@ void fill_valids(const global_t g, const row_table *old_vecs,
                  unsigned char inter_val, size_t new_vec, size_t min_vec) {
   new_vecs->num_valid = 0;
   // ensure everything is >= minvec
-  size_t i = 0;
-  while (old_vecs->valid[i] < min_vec)
-    i++;
+  size_t i = old_vecs->num_valid - old_vecs->num_valid % 16;
+  fill_valids_vectorized(g, old_vecs, new_vecs, table, inter_val, new_vec, min_vec);
+  //while (old_vecs->valid[i] < min_vec)
+  //  i++;
   for (; i < old_vecs->num_valid; i++) {
-    size_t vec = old_vecs->valid[i];
+    uint32_t vec = old_vecs->valid[i];
     // keep only things that have inters == inter_val
     int is_valid = g.inters[new_vec][vec] == inter_val;
     // if is_valid, add old_row, else nothing (but branchfree)
@@ -55,13 +94,13 @@ void fill_valids(const global_t g, const row_table *old_vecs,
         vec * is_valid + new_vecs->valid[new_vecs->num_valid] * (1 - is_valid);
     new_vecs->num_valid += is_valid;
   }
+  //printf("%d\n", new_vecs->num_valid);
 }
 
 // tries to fill in a row or col
 void search_aux(global_t g, row_table rows, row_table cols,
                 search_table table) {
   record(table, rows, cols, g);
-
   // if we're done, return
   if (!((rows.num_vecs + rows.num_valid >= VEC_SIZE) &&
         (cols.num_vecs + cols.num_valid >= VEC_SIZE))) {
@@ -70,8 +109,16 @@ void search_aux(global_t g, row_table rows, row_table cols,
 
   size_t max_unmatched = bitset_maximum(table.unmatched);
 
+  int to_add1 = ROW;
+  if(rows.num_vecs > 0){
+    to_add1 = in_any_row(g, &rows, max_unmatched) ? COL : ROW;
+  }
+
   // add to either ROW or COL
   for (size_t to_add = ROW; to_add <= COL; to_add++) {
+    if(to_add != to_add1){
+      continue;
+    }
     row_table active = to_add == ROW ? rows : cols;
     // don't add a col if we don't have a row
     if (to_add == COL && rows.num_vecs == 0) {
@@ -81,6 +128,7 @@ void search_aux(global_t g, row_table rows, row_table cols,
     if (active.num_vecs == VEC_SIZE) {
       continue;
     }
+
 
     // for each valid vector, try adding it:
     for (size_t i = 0; i < active.num_valid; i++) {

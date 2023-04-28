@@ -1,7 +1,7 @@
 CC := gcc
 TARGET := arrangement
 
-SRC := arrangement.c bitset.c
+SRC := arrangement.c bitset.c search.c labelling.c
 OBJ := $(SRC:.c=.o)
 DEP := $(OBJ:%.o=%.d)
 
@@ -11,7 +11,7 @@ DEBUG := 0
 FLTO := 1
 
 COMMONFLAGS := #-Wall -Werror -Wextra
-CFLAGS := $(COMMONFLAGS) -std=gnu99  -gdwarf-3 -fopt-info-vec-optimized -ftree-vectorize -mavx2
+CFLAGS := $(COMMONFLAGS) -std=gnu99  -gdwarf-3 -fopt-info-vec-optimized -ftree-vectorize -mavx512f
 LDFLAGS := $(COMMONFLAGS) -lm
 
 ifeq ($(PARALLEL),1)
