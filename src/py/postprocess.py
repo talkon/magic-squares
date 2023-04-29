@@ -38,7 +38,9 @@ groups: tuple[tuple[tuple[int]]] = (
 @dataclasses.dataclass
 class DiagonalStats:
     S: int
-    P: int
+    P: Union[tuple[int], None]
+    P_val: int
+    count_so_far: int
     max_nb: int
     S_count: int
     P_count: int
@@ -49,16 +51,23 @@ class DiagonalStats:
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"{'P':>15} {'S':>4} {'max':>4} {'#S':>3} {'#P':>3} {'#SP':>3} {'best':>4}  {'score_counts'}")
+        print(f"  {'P_tup':14} {'count_so_far':>13} {'P_val':>12} {'S':>4} {'max':>4}" +
+              f" {'#S':>3} {'#P':>3} {'#SP':>3} {'best':>4}  {'score_counts'}")
 
     def pretty_print(self) -> None:
-        print(f"{self.P:15} {self.S:4} {self.max_nb:4} {self.S_count:3} {self.P_count:3} {self.SP_count:3} {self.best_score:4}  {sorted(self.score_counts.items())}")
+        P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
+        P_val = self.P_val if self.P_val else "None"
+        print(f"  {P_str:14} {self.count_so_far:>13} {P_val:12} {self.S:4} {self.max_nb:4}" + 
+              f" {self.S_count:3} {self.P_count:3} {self.SP_count:3} {self.best_score:4}  {sorted(self.score_counts.items())}")
     
     def pretty_print_best_square(self) -> None:
-        print(f"  {'P':<7}={self.P:13}")
-        print(f"  {'S':<7}={self.S:13}")
-        print(f"  {'max_nb':<7}={self.max_nb:13}")
-        print(f"  {'score':<7}={self.best_score:13}")
+        P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
+        P_val = self.P_val if self.P_val else "None"
+        print(f"  {'P_tup':<7}={P_str:>13}")
+        print(f"  {'P_val':<7}={P_val:>13}")
+        print(f"  {'S':<7}={self.S:>13}")
+        print(f"  {'max_nb':<7}={self.max_nb:>13}")
+        print(f"  {'score':<7}={self.best_score:>13}")
         print(f"  {'square':<7}=")
         for row in self.best_square:
             print('    ' + ' '.join([f"{i:4}" for i in row]))
@@ -81,23 +90,40 @@ class SStats:
 class PStats:
     P: Union[tuple[int], None]
     P_val: Union[int, None]
-    count: int
-    time: float
-    num_vecs: int
-    max_num_vecs: int
-    num_sols: int
-    best_score: int
-    num_S: int
     S_stats: list[SStats]
+    count: int = 0
+    time: float = 0
+    num_vecs: int = 0
+    max_num_vecs: int = 0
+    num_sols: int = 0
+    best_score: int = -1
+    num_S: int = 0
+    max_S: int = 0
+    total_S_count: int = 0
+    total_P_count: int = 0
+    total_SP_count: int = 0
+
+    def update(self, diagonal_stats: DiagonalStats):
+        self.num_sols += 1
+        self.best_score = max(self.best_score, diagonal_stats.best_score)
+        self.S_stats[-1].num_sols += 1
+        self.S_stats[-1].best_score = max(self.S_stats[-1].best_score, diagonal_stats.best_score)
+        self.total_S_count += diagonal_stats.S_count
+        self.total_P_count += diagonal_stats.P_count
+        self.total_SP_count += diagonal_stats.SP_count
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"  {'P':14} {'P_val':>12} {'num_vecs':>8} {'max':>5} {'num_S':>6} {'count':>13} {'time':>10} {'sols':>5} {'best':>4}")
+        print(f"  {'P':14} {'P_val':>12} {'num_vecs':>8} {'max':>5} {'max_S':>5} {'count':>13}" +
+              f" {'time':>10} {'sols':>5} {'#S':>4} {'#P':>4} {'#SP':>4} {'best':>4}")
 
     def pretty_print(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
-        print(f"  {P_str:14} {P_val:>12} {self.num_vecs:8} {self.max_num_vecs:5} {self.num_S:6} {self.count:13} {self.time:>10.2f} {self.num_sols:5} {(self.best_score if self.best_score >= 0 else ''):4}")
+        max_S = min(99999, self.max_S)
+        print(f"  {P_str:14} {P_val:>12} {self.num_vecs:8} {self.max_num_vecs:5} {max_S:5} {self.count:13}" +
+              f" {self.time:>10.2f} {self.num_sols:5} {self.total_S_count:4} {self.total_P_count:4} {self.total_SP_count:4}" + 
+              f" {(self.best_score if self.best_score >= 0 else ''):4}")
 
     def pretty_print_SStats(self, verbose: int) -> None:
         if verbose >= 5:
@@ -162,7 +188,7 @@ class Solution:
                 num_intersect = len(set(r).intersection(c))
                 assert num_intersect == 1, f"row {r} and col {c} has {num_intersect} elements in common, expected 1"
 
-    def diagonal_stats(self) -> DiagonalStats:
+    def diagonal_stats(self, P_tup: tuple[int], count_so_far: int) -> DiagonalStats:
         rows = self.table.rows
         cols = self.table.cols
 
@@ -219,7 +245,7 @@ class Solution:
         
         max_nb = max(max(row) for row in rows)
 
-        return DiagonalStats(self.S, self.P, max_nb, S_count, P_count, SP_count, score_counts, best_score, best_square)
+        return DiagonalStats(self.S, P_tup, self.P, count_so_far, max_nb, S_count, P_count, SP_count, score_counts, best_score, best_square)
 
 @dataclasses.dataclass
 class CSearchStats:
@@ -253,21 +279,34 @@ class CSearchStats:
             print(">> overall stats have not been computed")
         if self.solutions:
             print("Best overall square:")
-            best_dstat = max(self.diagonal_stats, key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P, -x.S, -x.max_nb))
+            best_dstat = max(self.diagonal_stats, key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P_val, -x.S, -x.max_nb))
             best_dstat.pretty_print_best_square()
 
         # print P stats
-        print("Statistics for each P:")
-        sorted_P_stats = sorted(self.P_stats.values(), key=lambda x: x.count)
+        print("Statistics for each P, sorted by factorization of P:")
+        sorted_P_stats_by_P = sorted(self.P_stats.values(), key=lambda x: (len(x.P), x.P[::-1]))
         PStats.pretty_print_header()
-        for P_stat in sorted_P_stats:
+        for P_stat in sorted_P_stats_by_P:
             P_stat.pretty_print()
+
+        if verbose >= 1 and len(self.P_stats) > 1:
+            print("Statistics for each P, sorted by count:")
+            sorted_P_stats = sorted(self.P_stats.values(), key=lambda x: x.count)
+            PStats.pretty_print_header()
+            for P_stat in sorted_P_stats:
+                P_stat.pretty_print()
+
+            print("Statistics for each P, sorted by P:")
+            sorted_P_stats_by_P = sorted(self.P_stats.values(), key=lambda x: x.P_val)
+            PStats.pretty_print_header()
+            for P_stat in sorted_P_stats_by_P:
+                P_stat.pretty_print()
 
         # print solutions and diagonal stats
         if self.solutions:
             sorted_dstats_by_score = sorted(
                 self.diagonal_stats, 
-                key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P, -x.S, -x.max_nb),
+                key=lambda x: (sorted(x.score_counts.items(), reverse=True), -x.P_val, -x.S, -x.max_nb),
                 reverse=True
             )
             sorted_dstats_by_P = sorted(
@@ -301,7 +340,7 @@ class CSearchStats:
         # print S stats (very long!!)
         if verbose >= 5:
             print("Detailed statistics for each P:")
-            for P_stat in sorted_P_stats:
+            for P_stat in sorted_P_stats_by_P:
                 PStats.pretty_print_header()
                 P_stat.pretty_print()
                 P_stat.pretty_print_SStats(verbose)
@@ -334,7 +373,7 @@ def parse_arrangement_output(
         #  print("P_val:", P_val)
     except:
         pass
-    P_stat: PStats = stats.P_stats.get(P, default=PStats(P, P_val, 0, 0, 0, 0, 0, -1, 0, []))
+    P_stat: PStats = stats.P_stats.get(P, default=PStats(P, P_val, []))
     with open(file, "r") as f:
         while line := f.readline():
             split = line.split()
@@ -354,24 +393,20 @@ def parse_arrangement_output(
                     table.cis += [ci]
                 # compute diagonal stats
                 solution = Solution(table)
-                diagonal_stats = solution.diagonal_stats()
+                diagonal_stats = solution.diagonal_stats(P, P_stat.count)
                 # record solution and diagonal stats
                 stats.solutions += [solution]
                 stats.diagonal_stats += [diagonal_stats]
-                # update stats
-                P_stat.num_sols += 1
-                if diagonal_stats.best_score > P_stat.best_score:
-                    P_stat.best_score = diagonal_stats.best_score
-                P_stat.S_stats[-1].num_sols += 1
-                if diagonal_stats.best_score > P_stat.S_stats[-1].best_score:
-                    P_stat.S_stats[-1].best_score = diagonal_stats.best_score
+                # update P stats
+                P_stat.update(diagonal_stats)
             elif split[0] == "sum":
                 cur_sum = int(split[1])
                 num_vecs = int(split[3])
+                # update P stats
                 P_stat.num_vecs += num_vecs
                 P_stat.num_S += 1
-                if num_vecs > P_stat.max_num_vecs:
-                    P_stat.max_num_vecs = num_vecs
+                P_stat.max_S = max(cur_sum, P_stat.max_S)
+                P_stat.max_num_vecs = max(num_vecs, P_stat.max_num_vecs)
                 P_stat.S_stats += [SStats(cur_sum, num_vecs, 0, 0, -1)]
             elif split[:2] == ["num", "searched:"]:
                 count = int(split[2])
