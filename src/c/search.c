@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <immintrin.h>
+#include <string.h>
 
 #include "search.h"
 
@@ -46,25 +47,33 @@ bool in_any_row(global_t g, row_table *rows, size_t target){
 }
 
 
-void fill_valids_vectorized(const global_t g, const row_table *old_vecs,
+
+void fill_valids_vectorized(bitset_t* inters, const row_table *old_vecs,
                  row_table *new_vecs, const search_table table,
-                 unsigned char inter_val, size_t new_vec, size_t min_vec) {
+                 size_t new_vec, size_t min_vec) {
   int adjusted_num_valid = old_vecs->num_valid - old_vecs->num_valid % 16;
   int offset = 0;
-  __m512i inter_vals = _mm512_set1_epi32(inter_val);
+  __m512i inter_vals = _mm512_set1_epi32(1);
   __m512i min_vecs = _mm512_set1_epi32((uint32_t)min_vec);
   __m512i shift = _mm512_set1_epi32(16);
   __m512i mask = _mm512_set1_epi32(255);
+  //printf("%d\n",old_vecs->valid[15]);
   for(int i = 0; i < adjusted_num_valid / 16; i++){
     __m512i vecs = _mm512_loadu_si512(old_vecs->valid + i * 16);
+    //printf("%d\n", vecs[15]);
+    __m512i idxs = _mm512_srai_epi32(vecs, 3);
+    __m512i offsets = _mm512_and_epi32(vecs, _mm512_set1_epi32(7));
     //_mm512_storeu_si512(new_vecs->valid + offset, vecs);
-    __m512i inters = _mm512_i32gather_epi32(vecs, (void*) g.inters[new_vec], sizeof(unsigned char));
-    inters &= mask;
+    
+    __m512i inters_vec = _mm512_i32gather_epi32(idxs, (void*) inters[new_vec].array, sizeof(unsigned char));
+    //printf("b");
+    inters_vec = _mm512_srav_epi32(inters_vec, offsets);
+    inters_vec = _mm512_and_epi32(inters_vec, _mm512_set1_epi32(1));
     __mmask16 size_mask = _mm512_cmpge_epi32_mask(vecs, min_vecs);
     if(size_mask == 0){
       continue;
     }
-    __mmask16 inter_mask = _mm512_cmpeq_epi32_mask(inters, inter_vals);
+    __mmask16 inter_mask = _mm512_cmpeq_epi32_mask(inters_vec, inter_vals);
     _mm512_mask_compressstoreu_epi32(new_vecs->valid + offset, inter_mask & size_mask, vecs);
     int num_vals = __popcntq((uint64_t)(inter_mask & size_mask));
     offset += num_vals;
@@ -79,22 +88,51 @@ void fill_valids_vectorized(const global_t g, const row_table *old_vecs,
 void fill_valids(const global_t g, const row_table *old_vecs,
                  row_table *new_vecs, const search_table table,
                  unsigned char inter_val, size_t new_vec, size_t min_vec) {
+
+  bitset_t* inters = (inter_val == 0) ? g.inters_0 : g.inters_1;
   new_vecs->num_valid = 0;
   // ensure everything is >= minvec
   size_t i = old_vecs->num_valid - old_vecs->num_valid % 16;
-  fill_valids_vectorized(g, old_vecs, new_vecs, table, inter_val, new_vec, min_vec);
+  fill_valids_vectorized(inters, old_vecs, new_vecs, table, new_vec, min_vec);
   //while (old_vecs->valid[i] < min_vec)
   //  i++;
-  for (; i < old_vecs->num_valid; i++) {
+
+
+  const __m512i ids = _mm512_setr_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);
+  __mmask16 included = _mm512_cmplt_epi32_mask(ids, _mm512_set1_epi32(old_vecs->num_valid % 16));
+  __m512i inter_vals = _mm512_set1_epi32(1);
+  __m512i min_vecs = _mm512_set1_epi32((uint32_t)min_vec);
+  __m512i shift = _mm512_set1_epi32(16);
+  __m512i mask = _mm512_set1_epi32(255);
+  //printf("%d\n",old_vecs->valid[15]);
+    __m512i vecs = _mm512_loadu_si512(old_vecs->valid + i);    //printf("%d\n", vecs[15]);
+    //printf("%d\n", old_vecs->num_valid % 16);
+    
+    vecs = _mm512_maskz_compress_epi32(included, vecs);
+    __m512i idxs = _mm512_srai_epi32(vecs, 3);
+    __m512i offsets = _mm512_and_epi32(vecs, _mm512_set1_epi32(7));
+    //_mm512_storeu_si512(new_vecs->valid + offset, vecs);
+    __m512i inters_vec = _mm512_i32gather_epi32(idxs, (void*) inters[new_vec].array, sizeof(unsigned char));
+    //printf("b");
+    inters_vec = _mm512_srav_epi32(inters_vec, offsets);
+    inters_vec = _mm512_and_epi32(inters_vec, _mm512_set1_epi32(1));
+    __mmask16 size_mask = _mm512_cmpge_epi32_mask(vecs, min_vecs);
+    size_mask &= (((uint32_t)1)<<(old_vecs->num_valid % 16))-1;
+    __mmask16 inter_mask = _mm512_cmpeq_epi32_mask(inters_vec, inter_vals);
+    _mm512_mask_compressstoreu_epi32(new_vecs->valid + new_vecs->num_valid, inter_mask & size_mask, vecs);
+    int num_vals = __popcntq((uint64_t)(inter_mask & size_mask));
+    new_vecs->num_valid += num_vals;
+     
+
+  /*for (; i < old_vecs->num_valid; i++) {
     uint32_t vec = old_vecs->valid[i];
     // keep only things that have inters == inter_val
-    int is_valid = g.inters[new_vec][vec] == inter_val;
+    int is_valid = bitset_get(inters[new_vec], vec) == 1;
     // if is_valid, add old_row, else nothing (but branchfree)
     new_vecs->valid[new_vecs->num_valid] =
         vec * is_valid + new_vecs->valid[new_vecs->num_valid] * (1 - is_valid);
     new_vecs->num_valid += is_valid;
-  }
-  //printf("%d\n", new_vecs->num_valid);
+  }*/
 }
 
 // tries to fill in a row or col

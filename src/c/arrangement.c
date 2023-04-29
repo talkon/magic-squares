@@ -97,9 +97,11 @@ void search_sum(vecs_t vecs, int sum) {
 
   // freeing
   for (int i = 0; i < g.num_vecs; i++) {
-    free(g.inters[i]);
+    bitset_free(g.inters_0[i]);
+    bitset_free(g.inters_1[i]);
   }
-  free(g.inters);
+  free(g.inters_0);
+  free(g.inters_1);
   free(g.vecs);
   free(g.label_to_elt);
   for (int i = 0; i < g.num_vecs; i++) {
