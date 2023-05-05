@@ -47,10 +47,11 @@ typedef struct {
   /* bitarrays of each vec */
   bitset_t *bitarrays;
   /* inters[i][j] = size of vecs[i] & vecs[j] */
-  unsigned char **inters;
+  bitset_t *inters_0;
+  bitset_t *inters_1;
   /* arena-allocated valid_rows and valid_cols slots */
-  size_t *row_idx_slots[NUM_VALID_SLOTS];
-  size_t *col_idx_slots[NUM_VALID_SLOTS];
+  uint32_t *row_idx_slots[NUM_VALID_SLOTS];
+  uint32_t *col_idx_slots[NUM_VALID_SLOTS];
 } global_t;
 
 /* search state for rows/cols */
@@ -60,7 +61,7 @@ typedef struct row_table {
   /* number of vecs taken */
   size_t num_vecs;
   /* vecs that could go in */
-  size_t *valid;
+  uint32_t *valid;
   size_t num_valid;
 } row_table;
 

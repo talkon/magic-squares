@@ -61,11 +61,20 @@ global_t elt_relabeling(vecs_t vecs, size_t sum) {
   g.vecs = new_vecs;
   g.num_vecs = num_vecs;
   g.label_to_elt = label_to_elt;
-  g.inters = malloc(num_vecs * sizeof(char *));
+  g.inters_0 = malloc(num_vecs * sizeof(bitset_t));
+  g.inters_1 = malloc(num_vecs * sizeof(bitset_t));
+
   for (int i = 0; i < num_vecs; i++) {
-    g.inters[i] = malloc(num_vecs * sizeof(char));
+    g.inters_0[i] = bitset_create(num_vecs+64);
+    g.inters_1[i] = bitset_create(num_vecs+64);
     for (int j = 0; j < num_vecs; j++) {
-      g.inters[i][j] = bitset_and_count(g.bitarrays[i], g.bitarrays[j]);
+      int num_inters = bitset_and_count(g.bitarrays[i], g.bitarrays[j]);
+      if(num_inters == 0){
+        bitset_set(g.inters_0[i], j);
+      }
+      if(num_inters == 1){
+        bitset_set(g.inters_1[i], j);
+      }
     }
   }
   free(elt_to_label);
