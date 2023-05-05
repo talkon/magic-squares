@@ -75,7 +75,7 @@ void fill_valids_vectorized(bitset_t* inters, const row_table *old_vecs,
     }
     __mmask16 inter_mask = _mm512_cmpeq_epi32_mask(inters_vec, inter_vals);
     _mm512_mask_compressstoreu_epi32(new_vecs->valid + offset, inter_mask & size_mask, vecs);
-    int num_vals = __popcntq((uint64_t)(inter_mask & size_mask));
+    int num_vals = __builtin_popcountll((uint64_t)(inter_mask & size_mask));
     offset += num_vals;
     new_vecs->num_valid += num_vals;
     
@@ -120,7 +120,7 @@ void fill_valids(const global_t g, const row_table *old_vecs,
     size_mask &= (((uint32_t)1)<<(old_vecs->num_valid % 16))-1;
     __mmask16 inter_mask = _mm512_cmpeq_epi32_mask(inters_vec, inter_vals);
     _mm512_mask_compressstoreu_epi32(new_vecs->valid + new_vecs->num_valid, inter_mask & size_mask, vecs);
-    int num_vals = __popcntq((uint64_t)(inter_mask & size_mask));
+    int num_vals = __builtin_popcountll((uint64_t)(inter_mask & size_mask));
     new_vecs->num_valid += num_vals;
      
 
