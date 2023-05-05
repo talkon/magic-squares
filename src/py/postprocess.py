@@ -373,7 +373,7 @@ def parse_arrangement_output(
         #  print("P_val:", P_val)
     except:
         pass
-    P_stat: PStats = stats.P_stats.get(P, default=PStats(P, P_val, []))
+    P_stat: PStats = stats.P_stats.get(P, PStats(P, P_val, []))
     with open(file, "r") as f:
         while line := f.readline():
             split = line.split()
