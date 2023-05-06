@@ -156,9 +156,9 @@ if [ ! -f bin/enumeration.py ]; then
   exit
 fi
 
-: ${ENUM_FILE_NAME:="${OUTPUT_DIR}/enumerations_${PRODUCT// /_}.txt"}
-: ${ARRANGE_FILE_NAME:="${OUTPUT_DIR}/output_${FNAME_SUFFIX// /_}.txt"}
-: ${POSTPROC_FILE_NAME:="${OUTPUT_DIR}/summary_${FNAME_SUFFIX// /_}.txt"}
+: ${ENUM_FILE_NAME:="${OUTPUT_DIR}/enumerations/enumerations_${PRODUCT// /_}.txt"}
+: ${ARRANGE_FILE_NAME:="${OUTPUT_DIR}/output/output_${FNAME_SUFFIX// /_}.txt"}
+: ${POSTPROC_FILE_NAME:="${OUTPUT_DIR}/stats/summary_${FNAME_SUFFIX// /_}.txt"}
 
 # make enumeration file
 if [ "$ENUM" = true ]; then
