@@ -123,7 +123,7 @@ uint64_t search_sum(vecs_t vecs, int sum) {
   return ret;
 }
 
-void search(char *filename, int sum, int min_sum, int max_sum, long count_cutoff) {
+void search(char *filename, int sum, int min_sum, int max_sum, uint64_t count_cutoff) {
   vecs_t vecs = read_vecs(filename);
   printf("read\n");
   double before = get_wall_time();
@@ -138,7 +138,7 @@ void search(char *filename, int sum, int min_sum, int max_sum, long count_cutoff
     for (int i = min_sum; i < max_sum; i++) {
       total_count += search_sum(vecs, i);
       if (count_cutoff >= 0 && total_count > count_cutoff) {
-        printf("terminated: total count %lld exceeds cutoff %ld\n", total_count, count_cutoff);
+        printf("terminated: total count %lld exceeds cutoff %lld\n", total_count, count_cutoff);
         break;
       }
     }
@@ -154,7 +154,7 @@ int main(int argc, char *argv[]) {
   int sum = -1;
   int min_sum = -1;
   int max_sum = -1;
-  int count_cutoff = -1;
+  uint64_t count_cutoff = -1;
   int opt;
 
   while (1) {
@@ -184,7 +184,7 @@ int main(int argc, char *argv[]) {
       max_sum = strtol(optarg, NULL, 10);
       break;
     case 'c':
-      count_cutoff = strtol(optarg, NULL, 10);
+      count_cutoff = (uint64_t) strtoll(optarg, NULL, 10);
     case '?':
       break;
     default:
