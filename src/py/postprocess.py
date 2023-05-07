@@ -356,6 +356,7 @@ def other_diagonals(permutation: Vec) -> list[Vec]:
 
 def parse_arrangement_output(
     file: str, 
+    cutoff: Union[int, None] = None,
     stats: CSearchStats = CSearchStats(None, [], [], {})
 ) -> CSearchStats:
     cur_sum = 0
@@ -412,17 +413,20 @@ def parse_arrangement_output(
                 count = int(split[2])
                 P_stat.count += count
                 P_stat.S_stats[-1].count = count
+                if cutoff and P_stat.count > cutoff:
+                    break
             elif split[:2] == ["completed", "in"]:
                 P_stat.time += float(split[2])
     stats.P_stats[P] = P_stat
     return stats
 
-def parse_directory(glob_str: str) -> CSearchStats:
+def parse_directory(glob_str: str, cutoff: Union[int, None] = None) -> CSearchStats:
     stats = CSearchStats(None, [], [], {})
     print("Looking for files matching pattern", glob_str, file=stderr)
+    print(cutoff)
     for file in glob(glob_str):
         print("Processing", file, file=stderr)
-        stats = parse_arrangement_output(file, stats)
+        stats = parse_arrangement_output(file, cutoff, stats)
     return stats
 
 if __name__ == "__main__":
@@ -432,11 +436,14 @@ if __name__ == "__main__":
     group.add_argument('--glob', type=str)
     parser.add_argument("--verbose", metavar="V", type=int, default=1)
     parser.add_argument("--expect-nsols", type=int, nargs=1)
+    parser.add_argument("--cutoff", type=int, nargs=1)
     parser.add_argument("--sort", choices=['P', 'score'], nargs=1)
     args = parser.parse_args()
 
     sort = args.sort if args.sort else ("score" if args.glob else "P") 
-    stats = parse_directory(args.glob) if args.glob else parse_arrangement_output(args.file) 
+    cutoff = args.cutoff[0] if args.cutoff else None
+
+    stats = parse_directory(args.glob, cutoff) if args.glob else parse_arrangement_output(args.file, cutoff) 
     if args.expect_nsols:
         stats.assert_num_sols(args.expect_nsols[0])
     stats.compute_overall_stats()
