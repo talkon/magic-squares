@@ -364,7 +364,7 @@ def parse_arrangement_output(
     P_val: Union[int, None] = None   
     try:
         P = tuple()
-        for x in file.split('.')[-2].split('/')[-1].split('_')[1:]:
+        for x in file.split('.')[0].split('/')[-1].split('_')[1:]:
             if x.isdigit():
                 P += (int(x),)
             else:
@@ -423,8 +423,7 @@ def parse_arrangement_output(
 def parse_directory(glob_str: str, cutoff: Union[int, None] = None) -> CSearchStats:
     stats = CSearchStats(None, [], [], {})
     print("Looking for files matching pattern", glob_str, file=stderr)
-    print(cutoff)
-    for file in glob(glob_str):
+    for file in sorted(glob(glob_str)):
         print("Processing", file, file=stderr)
         stats = parse_arrangement_output(file, cutoff, stats)
     return stats
@@ -440,7 +439,7 @@ if __name__ == "__main__":
     parser.add_argument("--sort", choices=['P', 'score'], nargs=1)
     args = parser.parse_args()
 
-    sort = args.sort if args.sort else ("score" if args.glob else "P") 
+    sort = args.sort[0] if args.sort else ("score" if args.glob else "P") 
     cutoff = args.cutoff[0] if args.cutoff else None
 
     stats = parse_directory(args.glob, cutoff) if args.glob else parse_arrangement_output(args.file, cutoff) 

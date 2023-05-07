@@ -161,7 +161,7 @@ int main(int argc, char *argv[]) {
         {"sum", required_argument, 0, 's'},
         {"min-sum", required_argument, 0, 'n'},
         {"max-sum", required_argument, 0, 'x'},
-        {"count-cutoff", required_argument, 0, 'c'},
+        {"count", required_argument, 0, 'c'},
         {0, 0, 0, 0}};
 
     opt = getopt_long(argc, argv, "f:s:n:x:", long_options, NULL);

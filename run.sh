@@ -7,19 +7,20 @@
 #   --glob [pattern]: run aggregated postprocessing step on all files matching specified pattern
 #                     use like this: ./run.sh --glob "data/output/output_*" --pfile stats/stats_long.txt --verbose 3 -pf
 #   -ef, -af, -pf: same as -e, -a, -p, but force rerunning if cached files exist
+#   -c: "c"ontinue previous run
 #   --perf: run perf for arrangement step
 #   --output-dir [dir]: override output directory (default is data/)
 #   --efile [fname]: override enumeration file name (default is data/enumerations_[P].txt)
 #   --afile [fname]: override arrangement file name (default is data/output_[P].txt or data/output_[P]_[arrangement.c options].txt if arrangement options are used)
 #   --pfile [fname]: override postprocess file name (default is data/summary_[P].txt or data/summary_[P]_[arrangement.c options].txt if arrangement options are used)
 # when no -e/a/p flags are used, defaults to -e -a -p
-# supported arrangement.c options: --min-sum, --max-sum, --sum, --count-cutoff
-# supported postprocess.py options: --verbose (default 1), --sort, --cutoff
+# supported arrangement.c options: --min-sum, --max-sum, --sum, --count
+# supported postprocess.py options: --verbose (default 1), --cutoff
 
 POSITIONAL_ARGS=()
 ARRANGE_OPTIONS=()
 POSTPROC_OPTIONS=()
-FNAME_SUFFIX=()
+MIN_SUM=0
 
 ENUM=false
 ARRANGE=false
@@ -32,6 +33,8 @@ FORCE_ENUM=false
 FORCE_ARRANGE=false
 FORCE_POSTPROC=false
 
+CONTINUE_ARRANGE=false
+
 GLOB=false
 
 PERF=false
@@ -40,11 +43,16 @@ OUTPUT_DIR="data"
 # allows setting environment variable for pypy3 installation
 : "${PYPY3:=pypy3}"
 
+# parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --min-sum|--max-sum|--sum|--count-cutoff)
+    --min-sum)
+      MIN_SUM=$2
+      shift # past argument
+      shift # past value
+      ;;
+    --max-sum|--sum|--count)
       ARRANGE_OPTIONS+=("$1" "$2")
-      FNAME_SUFFIX+=("$1" "$2")
       shift # past argument
       shift # past value
       ;;
@@ -78,11 +86,6 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --verbose)
-      POSTPROC_OPTIONS+=("$1" "$2")
-      shift # past argument
-      shift # past value
-      ;;
-    --sort)
       POSTPROC_OPTIONS+=("$1" "$2")
       shift # past argument
       shift # past value
@@ -128,13 +131,16 @@ while [[ $# -gt 0 ]]; do
       DEFAULT=false
       shift # past argument
       ;;
+    -c)
+      CONTINUE_ARRANGE=true
+      shift # past argument
+      ;;
     -*|--*)
       echo "Unknown option $1"
       exit 1
       ;;
     *)
       POSITIONAL_ARGS+=("$1") # save positional arg
-      FNAME_SUFFIX+=("$1")
       shift # past argument
       ;;
   esac
@@ -147,9 +153,25 @@ if [ "$DEFAULT" = true ]; then
 fi
 
 PRODUCT="${POSITIONAL_ARGS[@]}"
+ARRANGE_PATTERN="${OUTPUT_DIR}/output/output_${PRODUCT// /_}.*"
+
+if [ "$CONTINUE_ARRANGE" = true ]; then
+  echo "continuing arrangement"
+  # apologies for this bash one-liner
+  MAX_PREV_SUM=$(cat $ARRANGE_PATTERN | grep sum | awk '{print $2}' | sort -n | tail -1)
+  if [ ! "$MAX_PREV_SUM" = "" ]; then
+    MIN_SUM=$(($MAX_PREV_SUM + 1))
+  fi
+  echo "starting at sum ${MIN_SUM}"
+fi
+
+FNAME_SUFFIX=".${MIN_SUM}"
+if [ ! "$MIN_SUM" = "0" ]; then 
+  ARRANGE_OPTIONS+=("--min-sum" "$MIN_SUM")
+fi
+
 ARRANGE_OPTIONS="${ARRANGE_OPTIONS[@]}"
 POSTPROC_OPTIONS="${POSTPROC_OPTIONS[@]}"
-FNAME_SUFFIX="${FNAME_SUFFIX[@]}"
 
 if [ ! -f bin/enumeration.py ]; then
   echo "run ./build.sh first!"
@@ -157,8 +179,8 @@ if [ ! -f bin/enumeration.py ]; then
 fi
 
 : ${ENUM_FILE_NAME:="${OUTPUT_DIR}/enumerations/enumerations_${PRODUCT// /_}.txt"}
-: ${ARRANGE_FILE_NAME:="${OUTPUT_DIR}/output/output_${FNAME_SUFFIX// /_}.txt"}
-: ${POSTPROC_FILE_NAME:="${OUTPUT_DIR}/stats/summary_${FNAME_SUFFIX// /_}.txt"}
+: ${ARRANGE_FILE_NAME:="${OUTPUT_DIR}/output/output_${PRODUCT// /_}${FNAME_SUFFIX}.txt"}
+: ${POSTPROC_FILE_NAME:="${OUTPUT_DIR}/stats/summary_${PRODUCT// /_}${FNAME_SUFFIX}.txt"}
 
 # make enumeration file
 if [ "$ENUM" = true ]; then
@@ -196,9 +218,9 @@ if [ "$POSTPROC" = true ]; then
   else
     echo "making ${POSTPROC_FILE_NAME}..."
     if [ "$GLOB" = true ]; then
-      $PYPY3 bin/postprocess.py --glob "$GLOB_STR" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
+      $PYPY3 bin/postprocess.py --glob "$GLOB_STR" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME
     else
-      $PYPY3 bin/postprocess.py --file $ARRANGE_FILE_NAME $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
+      $PYPY3 bin/postprocess.py --glob "$ARRANGE_PATTERN" --sort "P" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
     fi
   fi
 fi
