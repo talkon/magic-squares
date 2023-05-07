@@ -59,10 +59,12 @@ vecs_t read_vecs(char *filename) {
   return vecs;
 }
 
-void search_sum(vecs_t vecs, int sum) {
+// Exhaustively search for magic squares with the given sum, 
+// and returns the total number of search nodes
+uint64_t search_sum(vecs_t vecs, int sum) {
   size_t total_vecs = vecs.sums[sum].length;
   if (total_vecs == 0)
-    return;
+    return 0;
   printf("sum %d nvecs %ld\n", sum, total_vecs);
 
   global_t g = elt_relabeling(vecs, sum);
@@ -95,6 +97,8 @@ void search_sum(vecs_t vecs, int sum) {
   search_aux(g, rows, cols, table);
   printf("num searched: %ld\n", *table.num_searched);
 
+  uint64_t ret = *table.num_searched;
+
   // freeing
   for (int i = 0; i < g.num_vecs; i++) {
     free(g.inters[i]);
@@ -113,9 +117,11 @@ void search_sum(vecs_t vecs, int sum) {
     free(g.row_idx_slots[i]);
     free(g.col_idx_slots[i]);
   }
+
+  return ret;
 }
 
-void search(char *filename, int sum, int min_sum, int max_sum) {
+void search(char *filename, int sum, int min_sum, int max_sum, long count_cutoff) {
   vecs_t vecs = read_vecs(filename);
   printf("read\n");
   double before = get_wall_time();
@@ -126,8 +132,13 @@ void search(char *filename, int sum, int min_sum, int max_sum) {
       min_sum = vec_sum(vecs.vecs[0]);
     if (max_sum == -1)
       max_sum = vecs.num_sums;
+    uint64_t total_count = 0;
     for (int i = min_sum; i < max_sum; i++) {
-      search_sum(vecs, i);
+      total_count += search_sum(vecs, i);
+      if (count_cutoff >= 0 && total_count > count_cutoff) {
+        printf("terminated: total count %lld exceeds cutoff %ld\n", total_count, count_cutoff);
+        break;
+      }
     }
   }
   double difference = get_wall_time() - before;
@@ -141,6 +152,7 @@ int main(int argc, char *argv[]) {
   int sum = -1;
   int min_sum = -1;
   int max_sum = -1;
+  int count_cutoff = -1;
   int opt;
 
   while (1) {
@@ -149,6 +161,7 @@ int main(int argc, char *argv[]) {
         {"sum", required_argument, 0, 's'},
         {"min-sum", required_argument, 0, 'n'},
         {"max-sum", required_argument, 0, 'x'},
+        {"count-cutoff", required_argument, 0, 'c'},
         {0, 0, 0, 0}};
 
     opt = getopt_long(argc, argv, "f:s:n:x:", long_options, NULL);
@@ -168,6 +181,8 @@ int main(int argc, char *argv[]) {
     case 'x':
       max_sum = strtol(optarg, NULL, 10);
       break;
+    case 'c':
+      count_cutoff = strtol(optarg, NULL, 10);
     case '?':
       break;
     default:
@@ -175,5 +190,5 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  search(filename, sum, min_sum, max_sum);
+  search(filename, sum, min_sum, max_sum, count_cutoff);
 }

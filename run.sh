@@ -5,7 +5,7 @@
 #   -a: run "a"rrangement step
 #   -p: run "p"ostprocessing step
 #   --glob [pattern]: run aggregated postprocessing step on all files matching specified pattern
-#                     use like this: ./run.sh --glob "data/output_*" --pfile stats/stats_long.txt --verbose 3 -pf
+#                     use like this: ./run.sh --glob "data/output/output_*" --pfile stats/stats_long.txt --verbose 3 -pf
 #   -ef, -af, -pf: same as -e, -a, -p, but force rerunning if cached files exist
 #   --perf: run perf for arrangement step
 #   --output-dir [dir]: override output directory (default is data/)
@@ -13,8 +13,8 @@
 #   --afile [fname]: override arrangement file name (default is data/output_[P].txt or data/output_[P]_[arrangement.c options].txt if arrangement options are used)
 #   --pfile [fname]: override postprocess file name (default is data/summary_[P].txt or data/summary_[P]_[arrangement.c options].txt if arrangement options are used)
 # when no -e/a/p flags are used, defaults to -e -a -p
-# supported arrangement.c options: --min-sum, --max-sum, --sum
-# supported postprocess.py options: --verbose (default 1), --sort
+# supported arrangement.c options: --min-sum, --max-sum, --sum, --count-cutoff
+# supported postprocess.py options: --verbose (default 1), --sort, --cutoff
 
 POSITIONAL_ARGS=()
 ARRANGE_OPTIONS=()
@@ -42,13 +42,13 @@ OUTPUT_DIR="data"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --min-sum|--max-sum|--sum)
+    --min-sum|--max-sum|--sum|--count-cutoff)
       ARRANGE_OPTIONS+=("$1" "$2")
       FNAME_SUFFIX+=("$1" "$2")
       shift # past argument
       shift # past value
       ;;
-    --expect-nsols)
+    --expect-nsols|--cutoff)
       POSTPROC_OPTIONS+=("$1" "$2")
       shift # past argument
       shift # past value
