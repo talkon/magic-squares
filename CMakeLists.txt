@@ -1,8 +1,9 @@
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.10)
 project(MAGIC)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+set(CMAKE_C_FLAGS "-march=native")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -g -ggdb")
 set(CMAKE_C_FLAGS_DEBUG "-Og -g -fsanitize=address -fno-omit-frame-pointer")
