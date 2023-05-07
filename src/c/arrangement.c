@@ -138,7 +138,7 @@ void search(char *filename, int sum, int min_sum, int max_sum, uint64_t count_cu
     for (int i = min_sum; i < max_sum; i++) {
       total_count += search_sum(vecs, i);
       if (count_cutoff >= 0 && total_count > count_cutoff) {
-        printf("terminated: total count %lld exceeds cutoff %lld\n", total_count, count_cutoff);
+        printf("terminated: total count %ld exceeds cutoff %ld\n", total_count, count_cutoff);
         break;
       }
     }

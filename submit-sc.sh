@@ -5,8 +5,8 @@
 source /etc/profile
 module add anaconda/2023a
 
-PYPY3=python
-P_TUPLE=$(head "-$LLSUB_RANK" $INPUT | tail -1)
+export PYPY3=python
+P_TUPLE=$(head "-$((1 + $LLSUB_RANK))" $INPUT | tail -1)
 
-echo ./run.sh "$P_TUPLE" -c --count $COUNT
-./run.sh "$P_TUPLE" -c --count $COUNT
+echo ./run.sh "$P_TUPLE" -c -e -af -pf --count $COUNT
+./run.sh "$P_TUPLE" -c -e -af -pf --count $COUNT
