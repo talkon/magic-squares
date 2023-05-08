@@ -51,23 +51,23 @@ class DiagonalStats:
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"  {'P_tup':14} {'count_so_far':>13} {'P_val':>12} {'S':>4} {'max':>4}" +
+        print(f"  {'P_tup':14} {'count_so_far':>13} {'P_val':>13} {'S':>4} {'max':>4}" +
               f" {'#S':>3} {'#P':>3} {'#SP':>3} {'best':>4}  {'score_counts'}")
 
     def pretty_print(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
-        print(f"  {P_str:14} {self.count_so_far:>13} {P_val:12} {self.S:4} {self.max_nb:4}" + 
+        print(f"  {P_str:14} {self.count_so_far:>13} {P_val:13} {self.S:4} {self.max_nb:4}" + 
               f" {self.S_count:3} {self.P_count:3} {self.SP_count:3} {self.best_score:4}  {sorted(self.score_counts.items())}")
     
     def pretty_print_best_square(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
-        print(f"  {'P_tup':<7}={P_str:>13}")
-        print(f"  {'P_val':<7}={P_val:>13}")
-        print(f"  {'S':<7}={self.S:>13}")
-        print(f"  {'max_nb':<7}={self.max_nb:>13}")
-        print(f"  {'score':<7}={self.best_score:>13}")
+        print(f"  {'P_tup':<7}={P_str:>14}")
+        print(f"  {'P_val':<7}={P_val:>14}")
+        print(f"  {'S':<7}={self.S:>14}")
+        print(f"  {'max_nb':<7}={self.max_nb:>14}")
+        print(f"  {'score':<7}={self.best_score:>14}")
         print(f"  {'square':<7}=")
         for row in self.best_square:
             print('    ' + ' '.join([f"{i:4}" for i in row]))
@@ -99,30 +99,40 @@ class PStats:
     best_score: int = -1
     num_S: int = 0
     max_S: int = 0
-    total_S_count: int = 0
-    total_P_count: int = 0
-    total_SP_count: int = 0
+    total_S_count: int = 0 # total number of S-diagonals
+    total_P_count: int = 0 # total number of P-diagonals
+    total_SP_count: int = 0 # total number of SP-diagonals
+    sum_SS: int = 0 # sum of (#S choose 2) over solutions
+    sum_SP: int = 0 # sum of (#S * #P) over solutions
+    sum_PP: int = 0 # sum of (#P choose 2) over solutions
+    sum_SSPP: int = 0 # sum of (#S choose 2) * (#P choose 2) over solutions
 
     def update(self, diagonal_stats: DiagonalStats):
         self.num_sols += 1
         self.best_score = max(self.best_score, diagonal_stats.best_score)
         self.S_stats[-1].num_sols += 1
         self.S_stats[-1].best_score = max(self.S_stats[-1].best_score, diagonal_stats.best_score)
-        self.total_S_count += diagonal_stats.S_count
-        self.total_P_count += diagonal_stats.P_count
-        self.total_SP_count += diagonal_stats.SP_count
+        S_count, P_count, SP_count = diagonal_stats.S_count, diagonal_stats.P_count, diagonal_stats.SP_count
+        self.total_S_count += S_count
+        self.total_P_count += P_count
+        self.total_SP_count += SP_count
+        self.sum_SS += (S_count * (S_count - 1) // 2)
+        self.sum_SP += (S_count * P_count)
+        self.sum_PP += (P_count * (P_count - 1) // 2)
+        self.sum_SSPP += (S_count * (S_count - 1) // 2) * (P_count * (P_count - 1) // 2)
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"  {'P':14} {'P_val':>12} {'num_vecs':>8} {'max':>5} {'max_S':>5} {'count':>13}" +
-              f" {'time':>10} {'sols':>5} {'#S':>4} {'#P':>4} {'#SP':>4} {'best':>4}")
+        print(f"  {'P':14} {'P_val':>13} {'num_vecs':>8} {'max':>5} {'max_S':>5} {'count':>13}" +
+              f" {'time':>10} {'sols':>5} {'#S':>4} {'#P':>4} {'#SP':>4} {'hSS':>4} {'hSP':>4} {'hPP':>4} {'hM':>4} {'best':>4}")
 
     def pretty_print(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
         max_S = min(99999, self.max_S)
-        print(f"  {P_str:14} {P_val:>12} {self.num_vecs:8} {self.max_num_vecs:5} {max_S:5} {self.count:13}" +
+        print(f"  {P_str:14} {P_val:>13} {self.num_vecs:8} {self.max_num_vecs:5} {max_S:5} {self.count:13}" +
               f" {self.time:>10.2f} {self.num_sols:5} {self.total_S_count:4} {self.total_P_count:4} {self.total_SP_count:4}" + 
+              f" {self.sum_SS:4} {self.sum_SP:4} {self.sum_PP:4} {self.sum_SSPP:4}" +
               f" {(self.best_score if self.best_score >= 0 else ''):4}")
 
     def pretty_print_SStats(self, verbose: int) -> None:
@@ -150,13 +160,13 @@ class OverallStats:
 
     def pretty_print(self) -> None:
         print("Overall statistics:")
-        print(f"  {'count':<13}={self.count:14}")
-        print(f"  {'time':<13}={self.time:14.2f}")
-        print(f"  {'num_P':<13}={self.num_P:14}")
-        print(f"  {'num_S':<13}={self.num_S:14}")
-        print(f"  {'num_vecs':<13}={self.num_vecs:14}")
-        print(f"  {'max_num_vecs':<13}={self.max_num_vecs:14}")
-        print(f"  {'num_sols':<13}={self.num_sols:14}")
+        print(f"  {'count':<13}={self.count:15}")
+        print(f"  {'time':<13}={self.time:15.2f}")
+        print(f"  {'num_P':<13}={self.num_P:15}")
+        print(f"  {'num_S':<13}={self.num_S:15}")
+        print(f"  {'num_vecs':<13}={self.num_vecs:15}")
+        print(f"  {'max_num_vecs':<13}={self.max_num_vecs:15}")
+        print(f"  {'num_sols':<13}={self.num_sols:15}")
 
 @dataclasses.dataclass
 class Solution:
@@ -209,9 +219,9 @@ class Solution:
             correct_product = (reduce(mul, diag, 1) == self.P)
             if correct_sum and correct_product:
                 scores[perm] = int(DiagonalType.SP)
-                SP_count += 1
                 S_count += 1
                 P_count += 1
+                SP_count += 1
             elif correct_product:
                 scores[perm] = int(DiagonalType.P)
                 P_count += 1
