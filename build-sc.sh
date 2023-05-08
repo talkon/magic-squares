@@ -33,6 +33,7 @@ else
   cd ..
   mkdir -p bin
   ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement bin/arrangement
+  ln -sf $(realpath $CMAKE_DIR)/src/c/enumeration bin/enumeration
   ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py
   ln -sf $(realpath src/py/postprocess.py) bin/postprocess.py
 fi

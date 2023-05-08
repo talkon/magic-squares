@@ -173,7 +173,10 @@ int main(int argc, char *argv[]) {
   std::ofstream file;
   file.open(filename);
 
+  uint64_t nrows = 0;
+
   for (auto vv : rows) {
+    nrows += vv.second.size();
     for (auto v : vv.second) {
       auto it = v.rbegin();
       file << *it++;
@@ -184,6 +187,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  std::cout << ">>> (enum) wrote " << rows.size() << " rows to " << filename
+  std::cout << ">>> (enum) wrote " << nrows << " rows to " << filename
             << " in ascending order of sum\n";
 }
