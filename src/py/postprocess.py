@@ -17,23 +17,42 @@ class DiagonalType(IntEnum):
     P = 3
     SP = 7
 
-groups: tuple[tuple[tuple[int]]] = (
-    ((0, 1), (2, 3), (4, 5)),
-    ((0, 1), (2, 4), (3, 5)),
-    ((0, 1), (2, 5), (3, 4)),
-    ((0, 2), (1, 3), (4, 5)),
-    ((0, 2), (1, 4), (3, 5)),
-    ((0, 2), (1, 5), (3, 4)),
-    ((0, 3), (1, 2), (4, 5)),
-    ((0, 3), (1, 4), (2, 5)),
-    ((0, 3), (1, 5), (2, 4)),
-    ((0, 4), (1, 2), (3, 5)),
-    ((0, 4), (1, 3), (2, 5)),
-    ((0, 4), (1, 5), (2, 3)),
-    ((0, 5), (1, 2), (3, 4)),
-    ((0, 5), (1, 3), (2, 4)),
-    ((0, 5), (1, 4), (2, 3))
-)
+groups: dict[int, tuple[tuple[tuple[int]]]] = { 
+    5: (
+        ((0, 0), (1, 2), (3, 4)),
+        ((0, 0), (1, 3), (2, 4)),
+        ((0, 0), (1, 4), (2, 3)),
+        ((1, 1), (0, 2), (3, 4)),
+        ((1, 1), (0, 3), (2, 4)),
+        ((1, 1), (0, 4), (2, 3)),
+        ((2, 2), (0, 1), (3, 4)),
+        ((2, 2), (0, 3), (1, 4)),
+        ((2, 2), (0, 4), (1, 3)),
+        ((3, 3), (0, 1), (2, 4)),
+        ((3, 3), (0, 2), (1, 4)),
+        ((3, 3), (0, 4), (1, 2)),
+        ((4, 4), (0, 1), (2, 3)),
+        ((4, 4), (0, 2), (1, 3)),
+        ((4, 4), (0, 3), (1, 2))
+    ),
+    6: (
+        ((0, 1), (2, 3), (4, 5)),
+        ((0, 1), (2, 4), (3, 5)),
+        ((0, 1), (2, 5), (3, 4)),
+        ((0, 2), (1, 3), (4, 5)),
+        ((0, 2), (1, 4), (3, 5)),
+        ((0, 2), (1, 5), (3, 4)),
+        ((0, 3), (1, 2), (4, 5)),
+        ((0, 3), (1, 4), (2, 5)),
+        ((0, 3), (1, 5), (2, 4)),
+        ((0, 4), (1, 2), (3, 5)),
+        ((0, 4), (1, 3), (2, 5)),
+        ((0, 4), (1, 5), (2, 3)),
+        ((0, 5), (1, 2), (3, 4)),
+        ((0, 5), (1, 3), (2, 4)),
+        ((0, 5), (1, 4), (2, 3))
+    )
+}
 
 @dataclasses.dataclass
 class DiagonalStats:
@@ -173,16 +192,18 @@ class Solution:
     S: int
     P: int
     table: Table
+    vec_size: int
 
-    def __init__(self, table: Table):
+    def __init__(self, vec_size: int, table: Table):
         self.table = table
+        self.vec_size = vec_size
         self.S = sum(table.rows[0])
         self.P = reduce(mul, table.rows[0], 1)
         self.assert_consistent()
 
     def assert_consistent(self) -> None:
-        assert len(self.table.rows) == 6, f"expected 6 rows in solution, found {len(self.table.rows)}"
-        assert len(self.table.cols) == 6, f"expected 6 cols in solution, found {len(self.table.rows)}"
+        assert len(self.table.rows) == self.vec_size, f"expected 6 rows in solution, found {len(self.table.rows)}"
+        assert len(self.table.cols) == self.vec_size, f"expected 6 cols in solution, found {len(self.table.rows)}"
 
         for rc in self.table.rows + self.table.cols:
             assert sum(rc) == self.S, f"expected S={self.S}, but sum of {rc} is {sum(rc)}"
@@ -191,7 +212,7 @@ class Solution:
         elts = set()
         for r in self.table.rows:
             elts.update(r)
-        assert len(elts) == 36, f"expected 36 distinct numbers in table, found {len(elts)}"
+        assert len(elts) == (self.vec_size * self.vec_size), f"expected 36 distinct numbers in table, found {len(elts)}"
         
         for r in self.table.rows:
             for c in self.table.cols:
@@ -213,7 +234,7 @@ class Solution:
         SP_count = 0
 
         # score all diagonals
-        for perm in permutations(range(6)):
+        for perm in permutations(range(self.vec_size)):
             diag = tuple(list(set(rows[i]).intersection(cols[j]))[0] for i, j in enumerate(perm))
             correct_sum = (sum(diag) == self.S)
             correct_product = (reduce(mul, diag, 1) == self.P)
@@ -232,8 +253,8 @@ class Solution:
                 scores[perm] = int(DiagonalType.NONE)
       
         # count scores of diagonal pairs
-        for p1 in permutations(range(6)):
-            for g, p2 in zip(groups, other_diagonals(p1)):
+        for p1 in permutations(range(self.vec_size)):
+            for g, p2 in zip(groups[self.vec_size], other_diagonals(p1, self.vec_size)):
                 score = scores[p1] + scores[p2]
                 score_counts[score] = score_counts.get(score, 0) + 1
                 if score > best_score:
@@ -241,17 +262,31 @@ class Solution:
                     best_perm_group = (p1, g)
         
         # compute best square
+        best_square = None
         p, g = best_perm_group
-        rc_to_perm_row = [g[0][0], g[1][0], g[2][0], g[2][1], g[1][1], g[0][1]]
-        # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
-        # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
-        best_square = tuple(
-            tuple(
-                list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
-                for j in range(6)
+        if self.vec_size == 6:
+            rc_to_perm_row = [g[0][0], g[1][0], g[2][0], g[2][1], g[1][1], g[0][1]]
+            # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
+            # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
+            best_square = tuple(
+                tuple(
+                    list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
+                    for j in range(6)
+                )
+                for i in range(6)
             )
-            for i in range(6)
-        )
+        elif self.vec_size == 5:
+            rc_to_perm_row = [g[1][0], g[2][0], g[0][0], g[2][1], g[1][1]]
+            # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
+            # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
+            best_square = tuple(
+                tuple(
+                    list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
+                    for j in range(5)
+                )
+                for i in range(5)
+            )
+
         
         max_nb = max(max(row) for row in rows)
 
@@ -356,16 +391,17 @@ class CSearchStats:
                 P_stat.pretty_print_SStats(verbose)
 
 # given the permutation for the first diagonal, returns possible permutations for the second diagonal
-def other_diagonals(permutation: Vec) -> list[Vec]:
+def other_diagonals(permutation: Vec, vec_size: int) -> list[Vec]:
     out = []
-    for grouping in groups:
-        gmap = {g[0]: g[1] for g in grouping}
-        gmap.update({g[1]: g[0] for g in grouping})
-        out += [tuple(permutation[gmap[i]] for i in range(6))]
+    for grouping in groups[vec_size]:
+            gmap = {g[0]: g[1] for g in grouping}
+            gmap.update({g[1]: g[0] for g in grouping})
+            out += [tuple(permutation[gmap[i]] for i in range(6))]
     return out
 
 def parse_arrangement_output(
     file: str, 
+    vec_size: int,
     cutoff: Union[int, None] = None,
     stats: CSearchStats = CSearchStats(None, [], [], {})
 ) -> CSearchStats:
@@ -398,12 +434,12 @@ def parse_arrangement_output(
                 # blank line
                 f.readline()
                 # parse cols
-                for _ in range(6):
+                for _ in range(vec_size):
                     ci, *col = (int(n) for n in f.readline().split())
                     table.cols += [tuple(col)]
                     table.cis += [ci]
                 # compute diagonal stats
-                solution = Solution(table)
+                solution = Solution(vec_size, table)
                 diagonal_stats = solution.diagonal_stats(P, P_stat.count)
                 # record solution and diagonal stats
                 stats.solutions += [solution]
@@ -430,12 +466,12 @@ def parse_arrangement_output(
     stats.P_stats[P] = P_stat
     return stats
 
-def parse_directory(glob_str: str, cutoff: Union[int, None] = None) -> CSearchStats:
+def parse_directory(glob_str: str, vec_size: int, cutoff: Union[int, None] = None) -> CSearchStats:
     stats = CSearchStats(None, [], [], {})
     print("Looking for files matching pattern", glob_str, file=stderr)
     for file in sorted(glob(glob_str)):
         print("Processing", file, file=stderr)
-        stats = parse_arrangement_output(file, cutoff, stats)
+        stats = parse_arrangement_output(file, vec_size, cutoff, stats)
     return stats
 
 if __name__ == "__main__":
@@ -447,12 +483,13 @@ if __name__ == "__main__":
     parser.add_argument("--expect-nsols", type=int, nargs=1)
     parser.add_argument("--cutoff", type=int, nargs=1)
     parser.add_argument("--sort", choices=['P', 'score'], nargs=1)
+    parser.add_argument("--vec-size", type=int, default=6)
     args = parser.parse_args()
 
     sort = args.sort[0] if args.sort else ("score" if args.glob else "P") 
     cutoff = args.cutoff[0] if args.cutoff else None
 
-    stats = parse_directory(args.glob, cutoff) if args.glob else parse_arrangement_output(args.file, cutoff) 
+    stats = parse_directory(args.glob, args.vec_size, cutoff) if args.glob else parse_arrangement_output(args.file, args.vec_size, cutoff) 
     if args.expect_nsols:
         stats.assert_num_sols(args.expect_nsols[0])
     stats.compute_overall_stats()
