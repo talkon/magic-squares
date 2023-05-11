@@ -162,7 +162,7 @@ if [ "$DEFAULT" = true ]; then
 fi
 
 PRODUCT="${POSITIONAL_ARGS[@]}"
-ARRANGE_PATTERN="${OUTPUT_DIR}/output/output_${PRODUCT// /_}.*"
+ARRANGE_PATTERN="${OUTPUT_DIR}/${VEC_SIZE}/output/output_${PRODUCT// /_}.*"
 
 if [ "$CONTINUE_ARRANGE" = true ]; then
   echo "continuing arrangement"

@@ -396,7 +396,7 @@ def other_diagonals(permutation: Vec, vec_size: int) -> list[Vec]:
     for grouping in groups[vec_size]:
             gmap = {g[0]: g[1] for g in grouping}
             gmap.update({g[1]: g[0] for g in grouping})
-            out += [tuple(permutation[gmap[i]] for i in range(6))]
+            out += [tuple(permutation[gmap[i]] for i in range(vec_size))]
     return out
 
 def parse_arrangement_output(
@@ -427,7 +427,7 @@ def parse_arrangement_output(
             if split == ['solution', 'found']:
                 table = Table([], [], [], [])
                 # parse rows
-                for _ in range(6):
+                for _ in range(vec_size):
                     ri, *row = (int(n) for n in f.readline().split())
                     table.rows += [tuple(row)]
                     table.ris += [ri]
