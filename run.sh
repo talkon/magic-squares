@@ -206,9 +206,9 @@ fi
 if [ "$ARRANGE" = true ]; then
   echo "running arrangement"
   if [ "$PERF" = true ]; then
-    RUN_COMMAND="time perf record bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
+    RUN_COMMAND="time perf record bin/arrangement_$VEC_SIZE --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
   else
-    RUN_COMMAND="bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
+    RUN_COMMAND="bin/arrangement_$VEC_SIZE --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
   fi
   if [ "$FORCE_ARRANGE" = false ] && [ -e $ARRANGE_FILE_NAME ]; then
     echo "file ${ARRANGE_FILE_NAME} exists, not remaking it..."

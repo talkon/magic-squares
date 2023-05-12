@@ -53,6 +53,13 @@ groups: dict[int, tuple[tuple[tuple[int]]]] = {
         ((0, 5), (1, 4), (2, 3))
     )
 }
+groups[7] = tuple()
+for i in range(7):
+    imap = {j : j for j in range(i)}
+    imap.update({j: j+1 for j in range(i, 6)})
+    for g in groups[6]:
+        tup = ((i, i),) + tuple((imap[j], imap[k]) for j, k in g)
+        groups[7] += (tup,)
 
 @dataclasses.dataclass
 class DiagonalStats:
@@ -70,26 +77,27 @@ class DiagonalStats:
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"  {'P_tup':14} {'count_so_far':>13} {'P_val':>13} {'S':>4} {'max':>4}" +
+        print(f"  {'P_tup':18} {'count_so_far':>14} {'P_val':>16} {'S':>4} {'max':>4}" +
               f" {'#S':>3} {'#P':>3} {'#SP':>3} {'best':>4}  {'score_counts'}")
 
     def pretty_print(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
-        print(f"  {P_str:14} {self.count_so_far:>13} {P_val:13} {self.S:4} {self.max_nb:4}" + 
+        print(f"  {P_str:18} {self.count_so_far:>14} {P_val:16} {self.S:4} {self.max_nb:4}" + 
               f" {self.S_count:3} {self.P_count:3} {self.SP_count:3} {self.best_score:4}  {sorted(self.score_counts.items())}")
     
     def pretty_print_best_square(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
-        print(f"  {'P_tup':<7}={P_str:>14}")
-        print(f"  {'P_val':<7}={P_val:>14}")
-        print(f"  {'S':<7}={self.S:>14}")
-        print(f"  {'max_nb':<7}={self.max_nb:>14}")
-        print(f"  {'score':<7}={self.best_score:>14}")
+        print(f"  {'P_tup':<7}={P_str:>20}")
+        print(f"  {'P_val':<7}={P_val:>20}")
+        print(f"  {'S':<7}={self.S:>20}")
+        print(f"  {'max_nb':<7}={self.max_nb:>20}")
+        print(f"  {'score':<7}={self.best_score:>20}")
         print(f"  {'square':<7}=")
         for row in self.best_square:
             print('    ' + ' '.join([f"{i:4}" for i in row]))
+
 @dataclasses.dataclass
 class SStats:
     S: int
@@ -142,14 +150,14 @@ class PStats:
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"  {'P':14} {'P_val':>13} {'num_vecs':>8} {'max':>5} {'max_S':>5} {'count':>13}" +
+        print(f"  {'P':18} {'P_val':>16} {'num_vecs':>8} {'max':>5} {'max_S':>5} {'count':>13}" +
               f" {'time':>10} {'sols':>5} {'#S':>4} {'#P':>4} {'#SP':>4} {'hSS':>4} {'hSP':>4} {'hPP':>4} {'hM':>4} {'best':>4}")
 
     def pretty_print(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
         max_S = min(99999, self.max_S)
-        print(f"  {P_str:14} {P_val:>13} {self.num_vecs:8} {self.max_num_vecs:5} {max_S:5} {self.count:13}" +
+        print(f"  {P_str:18} {P_val:>16} {self.num_vecs:8} {self.max_num_vecs:5} {max_S:5} {self.count:13}" +
               f" {self.time:>10.2f} {self.num_sols:5} {self.total_S_count:4} {self.total_P_count:4} {self.total_SP_count:4}" + 
               f" {self.sum_SS:4} {self.sum_SP:4} {self.sum_PP:4} {self.sum_SSPP:4}" +
               f" {(self.best_score if self.best_score >= 0 else ''):4}")
@@ -179,13 +187,13 @@ class OverallStats:
 
     def pretty_print(self) -> None:
         print("Overall statistics:")
-        print(f"  {'count':<13}={self.count:15}")
-        print(f"  {'time':<13}={self.time:15.2f}")
-        print(f"  {'num_P':<13}={self.num_P:15}")
-        print(f"  {'num_S':<13}={self.num_S:15}")
-        print(f"  {'num_vecs':<13}={self.num_vecs:15}")
-        print(f"  {'max_num_vecs':<13}={self.max_num_vecs:15}")
-        print(f"  {'num_sols':<13}={self.num_sols:15}")
+        print(f"  {'count':<13}={self.count:20}")
+        print(f"  {'time':<13}={self.time:20.2f}")
+        print(f"  {'num_P':<13}={self.num_P:20}")
+        print(f"  {'num_S':<13}={self.num_S:20}")
+        print(f"  {'num_vecs':<13}={self.num_vecs:20}")
+        print(f"  {'max_num_vecs':<13}={self.max_num_vecs:20}")
+        print(f"  {'num_sols':<13}={self.num_sols:20}")
 
 @dataclasses.dataclass
 class Solution:
@@ -264,7 +272,18 @@ class Solution:
         # compute best square
         best_square = None
         p, g = best_perm_group
-        if self.vec_size == 6:
+        if self.vec_size == 7:
+            rc_to_perm_row = [g[1][0], g[2][0], g[3][0], g[0][0], g[3][1], g[2][1], g[1][1]]
+            # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
+            # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
+            best_square = tuple(
+                tuple(
+                    list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
+                    for j in range(7)
+                )
+                for i in range(7)
+            )
+        elif self.vec_size == 6:
             rc_to_perm_row = [g[0][0], g[1][0], g[2][0], g[2][1], g[1][1], g[0][1]]
             # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
             # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]

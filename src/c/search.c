@@ -23,6 +23,7 @@ void record(search_table table, row_table rows, row_table cols, global_t g) {
       }
       printf("\n");
     }
+    fflush(stdout);
   }
 }
 

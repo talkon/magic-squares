@@ -37,8 +37,8 @@ vecs_t read_vecs(char *filename) {
   vecs.num_vecs = 0;
   while (fgets(buf, 1024, fp) != NULL) {
     size_t *vec = vecs.vecs[vecs.num_vecs];
-    sscanf(buf, "%ld %ld %ld %ld %ld %ld", &vec[0], &vec[1], &vec[2], &vec[3],
-           &vec[4], &vec[5]);
+    sscanf(buf, "%ld %ld %ld %ld %ld %ld %ld", &vec[0], &vec[1], &vec[2], &vec[3],
+           &vec[4], &vec[5], &vec[6]);
     vecs.num_vecs++;
   }
   vecs.num_sums = vec_sum(vecs.vecs[vecs.num_vecs - 1]);
@@ -96,6 +96,7 @@ uint64_t search_sum(vecs_t vecs, int sum) {
 
   search_aux(g, rows, cols, table);
   printf("num searched: %ld\n", *table.num_searched);
+  fflush(stdout);
 
   uint64_t ret = *table.num_searched;
 
