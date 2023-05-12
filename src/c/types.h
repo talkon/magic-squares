@@ -5,8 +5,6 @@
 
 #include "bitset.h"
 
-#define VEC_SIZE 6
-
 /* number of slots reserved for valid_rows and valid_cols */
 #define NUM_VALID_SLOTS 64
 
