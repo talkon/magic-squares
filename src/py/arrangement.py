@@ -7,7 +7,7 @@ from typing import Callable
 import bisect
 
 
-Vec = tuple[int, int, int, int, int, int]
+Vec = tuple[int]
 
 
 class Judgment(Enum):

@@ -9,10 +9,13 @@
 #   -ef, -af, -pf: same as -e, -a, -p, but force rerunning if cached files exist
 #   -c: "c"ontinue previous run
 #   --perf: run perf for arrangement step
+#   --vec-size: magic square dimensions, default 6
 #   --output-dir [dir]: override output directory (default is data/)
-#   --efile [fname]: override enumeration file name (default is data/enumerations_[P].txt)
-#   --afile [fname]: override arrangement file name (default is data/output_[P].txt or data/output_[P]_[arrangement.c options].txt if arrangement options are used)
-#   --pfile [fname]: override postprocess file name (default is data/summary_[P].txt or data/summary_[P]_[arrangement.c options].txt if arrangement options are used)
+#   --efile [fname]: override enumeration file name (default is data/{vec_size}/enumerations_[P].txt)
+#   --afile [fname]: override arrangement file name (default is data/{vec_size}/output_[P].txt 
+#                    or data/{vec_size}/output_[P]_[arrangement.c options].txt if arrangement options are used)
+#   --pfile [fname]: override postprocess file name (default is data/{vec_size}/summary_[P].txt 
+#                    or data/{vec_size}/summary_[P]_[arrangement.c options].txt if arrangement options are used)
 # when no -e/a/p flags are used, defaults to -e -a -p
 # supported arrangement.c options: --min-sum, --max-sum, --sum, --count
 # supported postprocess.py options: --verbose (default 1), --cutoff
@@ -34,6 +37,7 @@ FORCE_ARRANGE=false
 FORCE_POSTPROC=false
 
 CONTINUE_ARRANGE=false
+VEC_SIZE=6
 
 GLOB=false
 
@@ -78,6 +82,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-dir)
       OUTPUT_DIR="$2"
+      shift
+      shift
+      ;;
+    --vec-size)
+      VEC_SIZE="$2"
       shift
       shift
       ;;
@@ -153,7 +162,7 @@ if [ "$DEFAULT" = true ]; then
 fi
 
 PRODUCT="${POSITIONAL_ARGS[@]}"
-ARRANGE_PATTERN="${OUTPUT_DIR}/output/output_${PRODUCT// /_}.*"
+ARRANGE_PATTERN="${OUTPUT_DIR}/${VEC_SIZE}/output/output_${PRODUCT// /_}.*"
 
 if [ "$CONTINUE_ARRANGE" = true ]; then
   echo "continuing arrangement"
@@ -178,9 +187,9 @@ if [ ! -f bin/enumeration.py ]; then
   exit
 fi
 
-: ${ENUM_FILE_NAME:="${OUTPUT_DIR}/enumerations/enumerations_${PRODUCT// /_}.txt"}
-: ${ARRANGE_FILE_NAME:="${OUTPUT_DIR}/output/output_${PRODUCT// /_}${FNAME_SUFFIX}.txt"}
-: ${POSTPROC_FILE_NAME:="${OUTPUT_DIR}/stats/summary_${PRODUCT// /_}${FNAME_SUFFIX}.txt"}
+: ${ENUM_FILE_NAME:="${OUTPUT_DIR}/${VEC_SIZE}/enumerations/enumerations_${PRODUCT// /_}.txt"}
+: ${ARRANGE_FILE_NAME:="${OUTPUT_DIR}/${VEC_SIZE}/output/output_${PRODUCT// /_}${FNAME_SUFFIX}.txt"}
+: ${POSTPROC_FILE_NAME:="${OUTPUT_DIR}/${VEC_SIZE}/stats/summary_${PRODUCT// /_}${FNAME_SUFFIX}.txt"}
 
 # make enumeration file
 if [ "$ENUM" = true ]; then
@@ -189,7 +198,7 @@ if [ "$ENUM" = true ]; then
     echo "file ${ENUM_FILE_NAME} exists, not remaking it..."
   else
     echo "making ${ENUM_FILE_NAME}..."
-    $PYPY3 bin/enumeration.py $PRODUCT --file $ENUM_FILE_NAME
+    $PYPY3 bin/enumeration.py $PRODUCT --file $ENUM_FILE_NAME --vec-size $VEC_SIZE
   fi
 fi
 
@@ -197,9 +206,9 @@ fi
 if [ "$ARRANGE" = true ]; then
   echo "running arrangement"
   if [ "$PERF" = true ]; then
-    RUN_COMMAND="time perf record bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
+    RUN_COMMAND="time perf record bin/arrangement_$VEC_SIZE --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
   else
-    RUN_COMMAND="bin/arrangement --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
+    RUN_COMMAND="bin/arrangement_$VEC_SIZE --file $ENUM_FILE_NAME $ARRANGE_OPTIONS"
   fi
   if [ "$FORCE_ARRANGE" = false ] && [ -e $ARRANGE_FILE_NAME ]; then
     echo "file ${ARRANGE_FILE_NAME} exists, not remaking it..."
@@ -218,9 +227,9 @@ if [ "$POSTPROC" = true ]; then
   else
     echo "making ${POSTPROC_FILE_NAME}..."
     if [ "$GLOB" = true ]; then
-      $PYPY3 bin/postprocess.py --glob "$GLOB_STR" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME
+      $PYPY3 bin/postprocess.py --vec-size "$VEC_SIZE" --glob "$GLOB_STR" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME
     else
-      $PYPY3 bin/postprocess.py --glob "$ARRANGE_PATTERN" --sort "P" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
+      $PYPY3 bin/postprocess.py --vec-size "$VEC_SIZE" --glob "$ARRANGE_PATTERN" --sort "P" $POSTPROC_OPTIONS > $POSTPROC_FILE_NAME && cat $POSTPROC_FILE_NAME
     fi
   fi
 fi

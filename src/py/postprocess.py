@@ -17,23 +17,49 @@ class DiagonalType(IntEnum):
     P = 3
     SP = 7
 
-groups: tuple[tuple[tuple[int]]] = (
-    ((0, 1), (2, 3), (4, 5)),
-    ((0, 1), (2, 4), (3, 5)),
-    ((0, 1), (2, 5), (3, 4)),
-    ((0, 2), (1, 3), (4, 5)),
-    ((0, 2), (1, 4), (3, 5)),
-    ((0, 2), (1, 5), (3, 4)),
-    ((0, 3), (1, 2), (4, 5)),
-    ((0, 3), (1, 4), (2, 5)),
-    ((0, 3), (1, 5), (2, 4)),
-    ((0, 4), (1, 2), (3, 5)),
-    ((0, 4), (1, 3), (2, 5)),
-    ((0, 4), (1, 5), (2, 3)),
-    ((0, 5), (1, 2), (3, 4)),
-    ((0, 5), (1, 3), (2, 4)),
-    ((0, 5), (1, 4), (2, 3))
-)
+groups: dict[int, tuple[tuple[tuple[int]]]] = { 
+    5: (
+        ((0, 0), (1, 2), (3, 4)),
+        ((0, 0), (1, 3), (2, 4)),
+        ((0, 0), (1, 4), (2, 3)),
+        ((1, 1), (0, 2), (3, 4)),
+        ((1, 1), (0, 3), (2, 4)),
+        ((1, 1), (0, 4), (2, 3)),
+        ((2, 2), (0, 1), (3, 4)),
+        ((2, 2), (0, 3), (1, 4)),
+        ((2, 2), (0, 4), (1, 3)),
+        ((3, 3), (0, 1), (2, 4)),
+        ((3, 3), (0, 2), (1, 4)),
+        ((3, 3), (0, 4), (1, 2)),
+        ((4, 4), (0, 1), (2, 3)),
+        ((4, 4), (0, 2), (1, 3)),
+        ((4, 4), (0, 3), (1, 2))
+    ),
+    6: (
+        ((0, 1), (2, 3), (4, 5)),
+        ((0, 1), (2, 4), (3, 5)),
+        ((0, 1), (2, 5), (3, 4)),
+        ((0, 2), (1, 3), (4, 5)),
+        ((0, 2), (1, 4), (3, 5)),
+        ((0, 2), (1, 5), (3, 4)),
+        ((0, 3), (1, 2), (4, 5)),
+        ((0, 3), (1, 4), (2, 5)),
+        ((0, 3), (1, 5), (2, 4)),
+        ((0, 4), (1, 2), (3, 5)),
+        ((0, 4), (1, 3), (2, 5)),
+        ((0, 4), (1, 5), (2, 3)),
+        ((0, 5), (1, 2), (3, 4)),
+        ((0, 5), (1, 3), (2, 4)),
+        ((0, 5), (1, 4), (2, 3))
+    )
+}
+groups[7] = tuple()
+for i in range(7):
+    imap = {j : j for j in range(i)}
+    imap.update({j: j+1 for j in range(i, 6)})
+    for g in groups[6]:
+        tup = ((i, i),) + tuple((imap[j], imap[k]) for j, k in g)
+        groups[7] += (tup,)
 
 @dataclasses.dataclass
 class DiagonalStats:
@@ -51,26 +77,27 @@ class DiagonalStats:
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"  {'P_tup':14} {'count_so_far':>13} {'P_val':>13} {'S':>4} {'max':>4}" +
+        print(f"  {'P_tup':18} {'count_so_far':>14} {'P_val':>16} {'S':>4} {'max':>4}" +
               f" {'#S':>3} {'#P':>3} {'#SP':>3} {'best':>4}  {'score_counts'}")
 
     def pretty_print(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
-        print(f"  {P_str:14} {self.count_so_far:>13} {P_val:13} {self.S:4} {self.max_nb:4}" + 
+        print(f"  {P_str:18} {self.count_so_far:>14} {P_val:16} {self.S:4} {self.max_nb:4}" + 
               f" {self.S_count:3} {self.P_count:3} {self.SP_count:3} {self.best_score:4}  {sorted(self.score_counts.items())}")
     
     def pretty_print_best_square(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
-        print(f"  {'P_tup':<7}={P_str:>14}")
-        print(f"  {'P_val':<7}={P_val:>14}")
-        print(f"  {'S':<7}={self.S:>14}")
-        print(f"  {'max_nb':<7}={self.max_nb:>14}")
-        print(f"  {'score':<7}={self.best_score:>14}")
+        print(f"  {'P_tup':<7}={P_str:>20}")
+        print(f"  {'P_val':<7}={P_val:>20}")
+        print(f"  {'S':<7}={self.S:>20}")
+        print(f"  {'max_nb':<7}={self.max_nb:>20}")
+        print(f"  {'score':<7}={self.best_score:>20}")
         print(f"  {'square':<7}=")
         for row in self.best_square:
             print('    ' + ' '.join([f"{i:4}" for i in row]))
+
 @dataclasses.dataclass
 class SStats:
     S: int
@@ -123,14 +150,14 @@ class PStats:
 
     @classmethod
     def pretty_print_header(cls) -> None:
-        print(f"  {'P':14} {'P_val':>13} {'num_vecs':>8} {'max':>5} {'max_S':>5} {'count':>13}" +
+        print(f"  {'P':18} {'P_val':>16} {'num_vecs':>8} {'max':>5} {'max_S':>5} {'count':>13}" +
               f" {'time':>10} {'sols':>5} {'#S':>4} {'#P':>4} {'#SP':>4} {'hSS':>4} {'hSP':>4} {'hPP':>4} {'hM':>4} {'best':>4}")
 
     def pretty_print(self) -> None:
         P_str = ' '.join(str(x) for x in self.P) if self.P else "None"
         P_val = self.P_val if self.P_val else "None"
         max_S = min(99999, self.max_S)
-        print(f"  {P_str:14} {P_val:>13} {self.num_vecs:8} {self.max_num_vecs:5} {max_S:5} {self.count:13}" +
+        print(f"  {P_str:18} {P_val:>16} {self.num_vecs:8} {self.max_num_vecs:5} {max_S:5} {self.count:13}" +
               f" {self.time:>10.2f} {self.num_sols:5} {self.total_S_count:4} {self.total_P_count:4} {self.total_SP_count:4}" + 
               f" {self.sum_SS:4} {self.sum_SP:4} {self.sum_PP:4} {self.sum_SSPP:4}" +
               f" {(self.best_score if self.best_score >= 0 else ''):4}")
@@ -160,29 +187,31 @@ class OverallStats:
 
     def pretty_print(self) -> None:
         print("Overall statistics:")
-        print(f"  {'count':<13}={self.count:15}")
-        print(f"  {'time':<13}={self.time:15.2f}")
-        print(f"  {'num_P':<13}={self.num_P:15}")
-        print(f"  {'num_S':<13}={self.num_S:15}")
-        print(f"  {'num_vecs':<13}={self.num_vecs:15}")
-        print(f"  {'max_num_vecs':<13}={self.max_num_vecs:15}")
-        print(f"  {'num_sols':<13}={self.num_sols:15}")
+        print(f"  {'count':<13}={self.count:20}")
+        print(f"  {'time':<13}={self.time:20.2f}")
+        print(f"  {'num_P':<13}={self.num_P:20}")
+        print(f"  {'num_S':<13}={self.num_S:20}")
+        print(f"  {'num_vecs':<13}={self.num_vecs:20}")
+        print(f"  {'max_num_vecs':<13}={self.max_num_vecs:20}")
+        print(f"  {'num_sols':<13}={self.num_sols:20}")
 
 @dataclasses.dataclass
 class Solution:
     S: int
     P: int
     table: Table
+    vec_size: int
 
-    def __init__(self, table: Table):
+    def __init__(self, vec_size: int, table: Table):
         self.table = table
+        self.vec_size = vec_size
         self.S = sum(table.rows[0])
         self.P = reduce(mul, table.rows[0], 1)
         self.assert_consistent()
 
     def assert_consistent(self) -> None:
-        assert len(self.table.rows) == 6, f"expected 6 rows in solution, found {len(self.table.rows)}"
-        assert len(self.table.cols) == 6, f"expected 6 cols in solution, found {len(self.table.rows)}"
+        assert len(self.table.rows) == self.vec_size, f"expected 6 rows in solution, found {len(self.table.rows)}"
+        assert len(self.table.cols) == self.vec_size, f"expected 6 cols in solution, found {len(self.table.rows)}"
 
         for rc in self.table.rows + self.table.cols:
             assert sum(rc) == self.S, f"expected S={self.S}, but sum of {rc} is {sum(rc)}"
@@ -191,7 +220,7 @@ class Solution:
         elts = set()
         for r in self.table.rows:
             elts.update(r)
-        assert len(elts) == 36, f"expected 36 distinct numbers in table, found {len(elts)}"
+        assert len(elts) == (self.vec_size * self.vec_size), f"expected 36 distinct numbers in table, found {len(elts)}"
         
         for r in self.table.rows:
             for c in self.table.cols:
@@ -213,7 +242,7 @@ class Solution:
         SP_count = 0
 
         # score all diagonals
-        for perm in permutations(range(6)):
+        for perm in permutations(range(self.vec_size)):
             diag = tuple(list(set(rows[i]).intersection(cols[j]))[0] for i, j in enumerate(perm))
             correct_sum = (sum(diag) == self.S)
             correct_product = (reduce(mul, diag, 1) == self.P)
@@ -232,8 +261,8 @@ class Solution:
                 scores[perm] = int(DiagonalType.NONE)
       
         # count scores of diagonal pairs
-        for p1 in permutations(range(6)):
-            for g, p2 in zip(groups, other_diagonals(p1)):
+        for p1 in permutations(range(self.vec_size)):
+            for g, p2 in zip(groups[self.vec_size], other_diagonals(p1, self.vec_size)):
                 score = scores[p1] + scores[p2]
                 score_counts[score] = score_counts.get(score, 0) + 1
                 if score > best_score:
@@ -241,17 +270,42 @@ class Solution:
                     best_perm_group = (p1, g)
         
         # compute best square
+        best_square = None
         p, g = best_perm_group
-        rc_to_perm_row = [g[0][0], g[1][0], g[2][0], g[2][1], g[1][1], g[0][1]]
-        # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
-        # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
-        best_square = tuple(
-            tuple(
-                list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
-                for j in range(6)
+        if self.vec_size == 7:
+            rc_to_perm_row = [g[1][0], g[2][0], g[3][0], g[0][0], g[3][1], g[2][1], g[1][1]]
+            # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
+            # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
+            best_square = tuple(
+                tuple(
+                    list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
+                    for j in range(7)
+                )
+                for i in range(7)
             )
-            for i in range(6)
-        )
+        elif self.vec_size == 6:
+            rc_to_perm_row = [g[0][0], g[1][0], g[2][0], g[2][1], g[1][1], g[0][1]]
+            # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
+            # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
+            best_square = tuple(
+                tuple(
+                    list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
+                    for j in range(6)
+                )
+                for i in range(6)
+            )
+        elif self.vec_size == 5:
+            rc_to_perm_row = [g[1][0], g[2][0], g[0][0], g[2][1], g[1][1]]
+            # reordered_rows = [rows[rc_to_perm_row[i]] for i in range(6)]
+            # reordered_cols = [cols[p[rc_to_perm_row[i]]] for i in range(6)]
+            best_square = tuple(
+                tuple(
+                    list(set(rows[rc_to_perm_row[i]]).intersection(cols[p[rc_to_perm_row[j]]]))[0]
+                    for j in range(5)
+                )
+                for i in range(5)
+            )
+
         
         max_nb = max(max(row) for row in rows)
 
@@ -356,16 +410,17 @@ class CSearchStats:
                 P_stat.pretty_print_SStats(verbose)
 
 # given the permutation for the first diagonal, returns possible permutations for the second diagonal
-def other_diagonals(permutation: Vec) -> list[Vec]:
+def other_diagonals(permutation: Vec, vec_size: int) -> list[Vec]:
     out = []
-    for grouping in groups:
-        gmap = {g[0]: g[1] for g in grouping}
-        gmap.update({g[1]: g[0] for g in grouping})
-        out += [tuple(permutation[gmap[i]] for i in range(6))]
+    for grouping in groups[vec_size]:
+            gmap = {g[0]: g[1] for g in grouping}
+            gmap.update({g[1]: g[0] for g in grouping})
+            out += [tuple(permutation[gmap[i]] for i in range(vec_size))]
     return out
 
 def parse_arrangement_output(
     file: str, 
+    vec_size: int,
     cutoff: Union[int, None] = None,
     stats: CSearchStats = CSearchStats(None, [], [], {})
 ) -> CSearchStats:
@@ -391,19 +446,19 @@ def parse_arrangement_output(
             if split == ['solution', 'found']:
                 table = Table([], [], [], [])
                 # parse rows
-                for _ in range(6):
+                for _ in range(vec_size):
                     ri, *row = (int(n) for n in f.readline().split())
                     table.rows += [tuple(row)]
                     table.ris += [ri]
                 # blank line
                 f.readline()
                 # parse cols
-                for _ in range(6):
+                for _ in range(vec_size):
                     ci, *col = (int(n) for n in f.readline().split())
                     table.cols += [tuple(col)]
                     table.cis += [ci]
                 # compute diagonal stats
-                solution = Solution(table)
+                solution = Solution(vec_size, table)
                 diagonal_stats = solution.diagonal_stats(P, P_stat.count)
                 # record solution and diagonal stats
                 stats.solutions += [solution]
@@ -430,12 +485,12 @@ def parse_arrangement_output(
     stats.P_stats[P] = P_stat
     return stats
 
-def parse_directory(glob_str: str, cutoff: Union[int, None] = None) -> CSearchStats:
+def parse_directory(glob_str: str, vec_size: int, cutoff: Union[int, None] = None) -> CSearchStats:
     stats = CSearchStats(None, [], [], {})
     print("Looking for files matching pattern", glob_str, file=stderr)
     for file in sorted(glob(glob_str)):
         print("Processing", file, file=stderr)
-        stats = parse_arrangement_output(file, cutoff, stats)
+        stats = parse_arrangement_output(file, vec_size, cutoff, stats)
     return stats
 
 if __name__ == "__main__":
@@ -447,12 +502,13 @@ if __name__ == "__main__":
     parser.add_argument("--expect-nsols", type=int, nargs=1)
     parser.add_argument("--cutoff", type=int, nargs=1)
     parser.add_argument("--sort", choices=['P', 'score'], nargs=1)
+    parser.add_argument("--vec-size", type=int, default=6)
     args = parser.parse_args()
 
     sort = args.sort[0] if args.sort else ("score" if args.glob else "P") 
     cutoff = args.cutoff[0] if args.cutoff else None
 
-    stats = parse_directory(args.glob, cutoff) if args.glob else parse_arrangement_output(args.file, cutoff) 
+    stats = parse_directory(args.glob, args.vec_size, cutoff) if args.glob else parse_arrangement_output(args.file, args.vec_size, cutoff) 
     if args.expect_nsols:
         stats.assert_num_sols(args.expect_nsols[0])
     stats.compute_overall_stats()

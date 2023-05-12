@@ -61,7 +61,7 @@ def split_by_sum(all_rows: set[Vec]) -> list[tuple[int, int]]:
     return ucs
 
 
-def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
+def rows_to_rowdict(all_rows: set[Vec], vec_size: int) -> dict[int, list[Vec]]:
     ucs = split_by_sum(all_rows)
     S_set = {S for S, c in ucs if c >= 12}
     row_dict = {S: [] for S in S_set}
@@ -71,9 +71,9 @@ def rows_to_rowdict(all_rows: set[Vec]) -> dict[int, list[Vec]]:
         if len(set(row)) == len(row) and sum(row) in S_set:
             row_dict[sum(row)].append(row)
 
-    # reduction: if there's less than 12 vecs, we can't fill the grid
+    # reduction: if there's less than (2 * VEC_SIZE) vecs, we can't fill the grid
     for S, vecs in row_dict.items():
-        while len(vecs) >= 12:
+        while len(vecs) >= 2 * vec_size:
             count = Counter([elt for vec in vecs for elt in vec])
             if count.most_common()[-1][1] >= 2:
                 break
@@ -120,14 +120,15 @@ if __name__ == "__main__":
     parser.add_argument("--file", metavar="file", type=str)
     parser.add_argument("--sum", metavar="S", type=int, nargs="*")
     parser.add_argument("--counts", action="store_true")
+    parser.add_argument("--vec-size", type=int, default=6)
     parser.add_argument("exponents", metavar="P", type=int, nargs="+")
     args = parser.parse_args()
 
     P = tuple(args.exponents)
-    N = 6
+    N = args.vec_size
     SS = args.sum
     all_rows = gen_rows(P, N)
-    row_dict = rows_to_rowdict(all_rows)
+    row_dict = rows_to_rowdict(all_rows, N)
     if args.counts:
         write_counts(row_dict, args.file, SS)
     else:

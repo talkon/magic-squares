@@ -1,6 +1,9 @@
-add_library(bitset STATIC bitset.c search.c labelling.c)
-add_executable(arrangement arrangement.c)
-target_link_libraries(arrangement bitset)
+add_executable(arrangement_5 arrangement.c bitset.c search.c labelling.c)
+add_executable(arrangement_6 arrangement.c bitset.c search.c labelling.c)
+add_executable(arrangement_7 arrangement.c bitset.c search.c labelling.c)
+target_compile_definitions(arrangement_5 PUBLIC VEC_SIZE=5)
+target_compile_definitions(arrangement_6 PUBLIC VEC_SIZE=6)
+target_compile_definitions(arrangement_7 PUBLIC VEC_SIZE=6)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)

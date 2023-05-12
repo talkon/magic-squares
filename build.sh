@@ -23,12 +23,26 @@ if [[ $* == *c* ]]; then
   cmake --build $CMAKE_DIR --target clean
 else
   cmake --build $CMAKE_DIR
+  mkdir -p bin
+  ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement_5 bin/arrangement_5
+  ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement_6 bin/arrangement_6
+  ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement_7 bin/arrangement_7
+  ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py
+  ln -sf $(realpath src/py/postprocess.py) bin/postprocess.py
+  mkdir -p data
+  mkdir -p data/5
+  mkdir -p data/5/enumerations
+  mkdir -p data/5/output
+  mkdir -p data/5/stats
+  mkdir -p data/6
+  mkdir -p data/6/enumerations
+  mkdir -p data/6/output
+  mkdir -p data/6/stats
+  mkdir -p data/7
+  mkdir -p data/7/enumerations
+  mkdir -p data/7/output
+  mkdir -p data/7/stats
 fi
-
-mkdir -p bin
-ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement bin/arrangement
-ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py
-ln -sf $(realpath src/py/postprocess.py) bin/postprocess.py
 
 if [[ $* == *t* ]]; then
   mkdir -p tests
