@@ -384,6 +384,17 @@ static void report(sstate_t *s) {
 }
 
 #if CARRY_MAX_W > 0
+/* the k-th lowest set bit of y (k < popcount(y)) */
+static inline uint64_t nth_bit(uint64_t y, int k) {
+#ifdef __BMI2__
+  return _pdep_u64((uint64_t)1 << k, y);
+#else
+  for (; k > 0; k--)
+    y &= y - 1;
+  return y & -y;
+#endif
+}
+
 /* lane j of the result: the or of the 8 lanes of a[j] */
 static inline __m512i or_lanes8(const __m512i a[8]) {
   /* t[k], 128-bit lane l: the or of lanes 2l, 2l + 1 of a[2k], a[2k + 1] */

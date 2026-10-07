@@ -65,9 +65,9 @@
 /* the most cells y in a cross pass (2 (n - 2) for the (2,2) nodes) */
 #define CROSS_MAXY 16
 /* TRY_CHILD is inlined into SEARCH_REC on the carried path (3-6% faster on
- * bench/*.txt, with or without cross support; GCC stopped inlining it for
- * W = 3 when cross support was added, 5% slower there), not with the
- * matrices (7% slower with W = 2) */
+ * bench/quick.txt and full.txt, with or without cross support; GCC stopped
+ * inlining it for W = 3 when cross support was added, 5% slower there), not
+ * with the matrices (7% slower with W = 2) */
 #ifdef CARRY
 #define TRY_CHILD_INLINE __attribute__((always_inline))
 #else
@@ -674,8 +674,8 @@ static inline uint32_t CROSS_AXIS(sstate_t *s, int d, int f,
       for (int v = 1; v < W; v++)
         w = c >= nw[v] ? v : w;
       base[j] = hl + w * cap;
-      const uint64_t bit = _pdep_u64((uint64_t)1 << ((c - nw[w]) & 63), Y[w]);
-      B[j] = _mm512_set1_epi64(c < ny ? (long long)bit : 0);
+      const uint64_t bit = c < ny ? nth_bit(Y[w], c - nw[w]) : 0;
+      B[j] = _mm512_set1_epi64((long long)bit);
 #pragma GCC unroll 8
       for (int v = 0; v < W; v++)
         acc[j][v] = _mm512_setzero_si512();
