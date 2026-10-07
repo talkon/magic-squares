@@ -2,7 +2,7 @@
  * Arrangement benchmark.
  *
  * usage: bench [--repeat K] [--only SUBSTR] [--no-fc] [--no-mrv] [--update]
- *              instances.txt
+ *              [--min-words K] instances.txt
  *
  * Each instance line is
  *     n | e1 e2 ... | S | expected_squares | expected_hash
@@ -12,6 +12,9 @@
  * order-independent hash (sum of per-square canonical hashes). Use "-" for
  * unknown expectations, and --update to print instance lines with the
  * observed values filled in.
+ *
+ * --no-fc, --no-mrv and --min-words change the search (to compare variants,
+ * or to test the code paths for wider label bitsets on small instances).
  *
  * Exit status is nonzero if any instance does not match.
  */
@@ -58,9 +61,11 @@ int main(int argc, char *argv[]) {
                                          {"no-fc", no_argument, 0, 'f'},
                                          {"no-mrv", no_argument, 0, 'm'},
                                          {"update", no_argument, 0, 'u'},
+                                         {"min-words", required_argument, 0, 'w'},
                                          {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "r:o:fmu", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "r:o:fmuw:", long_options, NULL)) !=
+         -1) {
     switch (opt) {
     case 'r':
       repeat = atoi(optarg);
@@ -77,13 +82,16 @@ int main(int argc, char *argv[]) {
     case 'u':
       update = 1;
       break;
+    case 'w':
+      opts.min_words = atoi(optarg);
+      break;
     default:
       return 2;
     }
   }
   if (optind >= argc) {
     fprintf(stderr, "usage: bench [--repeat K] [--only SUBSTR] [--no-fc] "
-                    "[--no-mrv] [--update] instances.txt\n");
+                    "[--no-mrv] [--update] [--min-words K] instances.txt\n");
     return 2;
   }
   FILE *fp = fopen(argv[optind], "r");

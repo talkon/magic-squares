@@ -26,7 +26,10 @@
  * and one record per semi-magic square found, preceding its sum record:
  *   {"type":"square","n":6,"P":[...],"S":...,"s_count":..,"p_count":..,
  *    "sp_count":..,"best_score":..,"grid":[[...],...]}
- * where grid has the best pair of diagonals on its main diagonals.
+ * where grid has the best pair of diagonals on its main diagonals. A final
+ *   {"type":"done","min_sum":..,"last_sum":..,"complete":0|1,...}
+ * says every sum in [min_sum, last_sum] was searched (sums with fewer than 2n
+ * vectors after reduction cannot have a square and get no "sum" record).
  */
 #include <getopt.h>
 #include <stdio.h>
@@ -242,6 +245,7 @@ int main(int argc, char *argv[]) {
   /* the window adapts so each holds roughly 10^5 - 10^6 vectors */
   uint64_t window = 32;
   int list_pos = 0;
+  uint64_t last_sum = min_sum ? min_sum - 1 : 0;
   for (uint64_t lo = min_sum, hi; lo <= max_sum && !stop; lo = hi + 1) {
     hi = lo + window - 1 < max_sum ? lo + window - 1 : max_sum;
     if (num_sum_list >= 0) {
@@ -260,6 +264,7 @@ int main(int argc, char *argv[]) {
     double enum_time = wall_time() - te;
     size_t i = 0;
     for (uint64_t S = lo; S <= hi && !stop; S++) {
+      last_sum = S;
       size_t j = i;
       while (j < all.count && vec_list_sum(&all, j) == S)
         j++;
@@ -314,6 +319,17 @@ int main(int argc, char *argv[]) {
       window /= 2;
     vec_list_free(&all);
     vec_list_free(&red);
+  }
+  if (!legacy) {
+    /* every sum in [min_sum, last_sum] has been searched (sums with too few
+     * vectors produce no "sum" record) */
+    char pstr[64];
+    pexp_to_str(&p, pstr, ",");
+    fprintf(out,
+            "{\"type\":\"done\",\"n\":%d,\"P\":[%s],\"min_sum\":%lu,"
+            "\"last_sum\":%lu,\"complete\":%d,\"time\":%.3f}\n",
+            n, pstr, (unsigned long)min_sum, (unsigned long)last_sum,
+            !stop || last_sum >= max_sum, wall_time() - t_start);
   }
   if (legacy) {
     if (stop && total_node_limit)

@@ -29,6 +29,20 @@ static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint32_t *in,
                                     uint32_t min_v, uint32_t *out,
                                     uint64_t *g /* [NSLICE][W] */) {
   uint32_t k = filter_list(in, cnt, row, min_v, out);
+#ifdef HAVE_SIMD_COUNT
+  if (W == 2) {
+    count_slices_simd_w2(s->bits, out, k, g);
+    return k;
+  }
+  if (W == 4) {
+    count_slices_simd_w4(s->bits, out, k, g);
+    return k;
+  }
+  if (W == 8) {
+    count_slices_simd_w8(s->bits, out, k, g);
+    return k;
+  }
+#endif
   /* thermometer code: gg[t] = labels in more than t of the kept vectors */
   uint64_t gg[NSLICE][W];
   for (int t = 0; t < NSLICE; t++)

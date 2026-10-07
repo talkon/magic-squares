@@ -6,6 +6,10 @@
  *
  * usage: enumerate [--vec-size N] [--min-sum S] [--max-sum S]
  *                  [--reduce weak|strong|none] [--counts] --file F  e1 e2 ...
+ *        enumerate [--vec-size N] --print-min-sum e1 e2 ...
+ *
+ * --counts writes "S count" lines instead of the vectors, and
+ * --print-min-sum prints the smallest sum of any vector and exits.
  */
 #include <getopt.h>
 #include <stdio.h>
@@ -19,7 +23,7 @@ int main(int argc, char *argv[]) {
   uint64_t sum_min = 0, sum_max = UINT64_MAX;
   const char *file = NULL;
   int reduce = 1; /* 0 = none, 1 = weak (same as old enumerators), 2 = strong */
-  int counts = 0;
+  int counts = 0, print_min = 0;
 
   static struct option long_options[] = {
       {"vec-size", required_argument, 0, 'n'},
@@ -28,9 +32,10 @@ int main(int argc, char *argv[]) {
       {"file", required_argument, 0, 'f'},
       {"reduce", required_argument, 0, 'r'},
       {"counts", no_argument, 0, 'c'},
+      {"print-min-sum", no_argument, 0, 'm'},
       {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "n:a:b:f:r:c", long_options, NULL)) !=
+  while ((opt = getopt_long(argc, argv, "n:a:b:f:r:cm", long_options, NULL)) !=
          -1) {
     switch (opt) {
     case 'n':
@@ -51,16 +56,27 @@ int main(int argc, char *argv[]) {
     case 'c':
       counts = 1;
       break;
+    case 'm':
+      print_min = 1;
+      break;
     default:
       fprintf(stderr, "bad arguments\n");
       return 1;
     }
   }
   prime_exps_t p;
+  if (print_min) {
+    if (pexp_parse(&p, argc - optind, argv + optind) != 0)
+      return 1;
+    printf("%lu\n", (unsigned long)enum_min_sum(&p, n));
+    return 0;
+  }
   if (!file || pexp_parse(&p, argc - optind, argv + optind) != 0) {
     fprintf(stderr, "usage: enumerate [--vec-size N] [--min-sum S] "
                     "[--max-sum S] [--reduce none|weak|strong] [--counts] "
-                    "--file F e1 e2 ...\n");
+                    "--file F e1 e2 ...\n"
+                    "       enumerate [--vec-size N] --print-min-sum "
+                    "e1 e2 ...\n");
     return 1;
   }
 

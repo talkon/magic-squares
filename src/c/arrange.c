@@ -40,12 +40,18 @@ void search_opts_default(search_opts_t *o) {
   o->node_limit = 0;
   o->forward_check = 1;
   o->mrv = 1;
+  o->min_words = 0;
 }
 
 /* number of bit-sliced counters used to pick the most constrained cell; more
- * slices give a more exact choice (fewer nodes) at a higher cost per node */
+ * slices give a more exact choice (fewer nodes) at a higher cost per node,
+ * which pays off when the counting is vectorized */
 #ifndef NSLICE
+#ifdef __AVX512F__
+#define NSLICE 8
+#else
 #define NSLICE 4
+#endif
 #endif
 
 #define ROW 0
@@ -114,6 +120,76 @@ static inline uint32_t filter_list(const uint32_t *in, uint32_t cnt,
 #endif
   return k;
 }
+
+#if defined(__AVX512F__) && NSLICE == 8
+/*
+ * Thermometer counts g_t = labels in >= t of the vectors in list, for
+ * t = 1..8, with the slices stored in consecutive lanes of zmm registers.
+ * Adding a vector m is g_t |= g_{t-1} & m (with g_0 = all ones), i.e.
+ * state |= (state shifted up by one slice) & broadcast(m): one valignq and
+ * one vpternlogq per register.
+ */
+static inline void count_slices_simd_w2(const uint64_t *bits,
+                                        const uint32_t *list, uint32_t k,
+                                        uint64_t *g) {
+  /* 128-bit label sets: A1 = [g1 g2 g3 g4], A2 = [g5 g6 g7 g8] */
+  const __m512i ones = _mm512_set1_epi64(-1);
+  __m512i A1 = _mm512_setzero_si512(), A2 = _mm512_setzero_si512();
+  for (uint32_t i = 0; i < k; i++) {
+    __m512i m = _mm512_broadcast_i64x2(
+        _mm_loadu_si128((const __m128i *)(bits + 2 * (uint64_t)list[i])));
+    __m512i s1 = _mm512_alignr_epi64(A1, ones, 6);
+    __m512i s2 = _mm512_alignr_epi64(A2, A1, 6);
+    A1 = _mm512_ternarylogic_epi64(A1, s1, m, 0xF8); /* A1 | (s1 & m) */
+    A2 = _mm512_ternarylogic_epi64(A2, s2, m, 0xF8);
+  }
+  _mm512_storeu_si512(g, A1);
+  _mm512_storeu_si512(g + 8, A2);
+}
+
+static inline void count_slices_simd_w4(const uint64_t *bits,
+                                        const uint32_t *list, uint32_t k,
+                                        uint64_t *g) {
+  /* 256-bit label sets: A1 = [g1 g2], ..., A4 = [g7 g8] */
+  const __m512i ones = _mm512_set1_epi64(-1);
+  __m512i A1 = _mm512_setzero_si512(), A2 = _mm512_setzero_si512();
+  __m512i A3 = _mm512_setzero_si512(), A4 = _mm512_setzero_si512();
+  for (uint32_t i = 0; i < k; i++) {
+    __m512i m = _mm512_broadcast_i64x4(
+        _mm256_loadu_si256((const __m256i *)(bits + 4 * (uint64_t)list[i])));
+    __m512i s1 = _mm512_alignr_epi64(A1, ones, 4);
+    __m512i s2 = _mm512_alignr_epi64(A2, A1, 4);
+    __m512i s3 = _mm512_alignr_epi64(A3, A2, 4);
+    __m512i s4 = _mm512_alignr_epi64(A4, A3, 4);
+    A1 = _mm512_ternarylogic_epi64(A1, s1, m, 0xF8);
+    A2 = _mm512_ternarylogic_epi64(A2, s2, m, 0xF8);
+    A3 = _mm512_ternarylogic_epi64(A3, s3, m, 0xF8);
+    A4 = _mm512_ternarylogic_epi64(A4, s4, m, 0xF8);
+  }
+  _mm512_storeu_si512(g, A1);
+  _mm512_storeu_si512(g + 8, A2);
+  _mm512_storeu_si512(g + 16, A3);
+  _mm512_storeu_si512(g + 24, A4);
+}
+
+static inline void count_slices_simd_w8(const uint64_t *bits,
+                                        const uint32_t *list, uint32_t k,
+                                        uint64_t *g) {
+  /* 512-bit label sets: one register per slice */
+  __m512i A[NSLICE];
+  for (int t = 0; t < NSLICE; t++)
+    A[t] = _mm512_setzero_si512();
+  for (uint32_t i = 0; i < k; i++) {
+    __m512i m = _mm512_loadu_si512(bits + 8 * (uint64_t)list[i]);
+    for (int t = NSLICE - 1; t > 0; t--)
+      A[t] = _mm512_ternarylogic_epi64(A[t], A[t - 1], m, 0xF8);
+    A[0] = _mm512_or_si512(A[0], m);
+  }
+  for (int t = 0; t < NSLICE; t++)
+    _mm512_storeu_si512(g + 8 * t, A[t]);
+}
+#define HAVE_SIMD_COUNT 1
+#endif
 
 static void report(sstate_t *s) {
   s->squares++;
@@ -284,12 +360,18 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   qsort(s.lab, count, sizeof(*s.lab), lab_cmp);
 
   /* bitset width */
-  int W_ = L <= 128   ? 2
-           : L <= 192 ? 3
-           : L <= 256 ? 4
-           : L <= 512 ? 8
-           : L <= 1024 ? 16
-                       : 64;
+#ifdef HAVE_SIMD_COUNT
+  const int have_simd = 1; /* W = 3 has no vectorized counting */
+#else
+  const int have_simd = 0;
+#endif
+  size_t Lw = L > 64 * (size_t)opts->min_words ? L : 64 * (size_t)opts->min_words;
+  int W_ = Lw <= 128               ? 2
+           : Lw <= 192 && !have_simd ? 3
+           : Lw <= 256             ? 4
+           : Lw <= 512             ? 8
+           : Lw <= 1024            ? 16
+                                   : 64;
   if (L > 64 * 64) {
     /* would need wider bitsets; not expected for realistic inputs */
     free(vals);

@@ -40,6 +40,8 @@ typedef struct {
   uint64_t node_limit; /* 0 = unlimited */
   int forward_check;   /* prune nodes with an uncoverable cell (default 1) */
   int mrv;             /* branch on the most constrained cell (default 1) */
+  int min_words;       /* use label bitsets of at least this many 64-bit
+                          words (for testing; default 0 = smallest that fits) */
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);
