@@ -29,7 +29,8 @@
  * where grid has the best pair of diagonals on its main diagonals. A final
  *   {"type":"done","min_sum":..,"last_sum":..,"complete":0|1,...}
  * says every sum in [min_sum, last_sum] was searched (sums with fewer than 2n
- * vectors after reduction cannot have a square and get no "sum" record).
+ * vectors after reduction cannot have a square and get no "sum" record); it
+ * is omitted with --sums.
  */
 #include <getopt.h>
 #include <stdio.h>
@@ -320,7 +321,7 @@ int main(int argc, char *argv[]) {
     vec_list_free(&all);
     vec_list_free(&red);
   }
-  if (!legacy) {
+  if (!legacy && num_sum_list < 0) {
     /* every sum in [min_sum, last_sum] has been searched (sums with too few
      * vectors produce no "sum" record) */
     char pstr[64];
