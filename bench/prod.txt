@@ -1,0 +1,15 @@
+# n | exponents of P (2 3 5 7 ...) | S | expected squares | expected hash
+# Production-like sums: sampled (time-weighted) from scheduler runs near S_min,
+# where nearly all CPU time goes to sums with N = 1000-2500 and 80-112
+# labels; the last one (N = 2994) is larger, as the scheduler reaches with
+# more CPU. Square counts match those runs; hashes checked with the
+# intersection-matrix build without the support filter.
+6 | 14 7 5 3 | 1361 | 1 | 07ef03ab2a957073
+6 | 10 6 4 2 1 1 | 838 | 7 | e15840c9efdcdebd
+6 | 10 4 2 2 1 1 | 460 | 1 | f7f4c88cd1be4863
+6 | 14 6 4 2 1 | 920 | 3 | 845a904dec962c69
+6 | 13 8 3 2 1 | 922 | 2 | e152ced922369d82
+6 | 12 6 3 2 1 0 1 | 863 | 2 | 1fd56c9a0c9517ca
+6 | 13 6 3 2 1 1 | 899 | 18 | 43cb59ac03d70672
+6 | 14 7 4 2 1 | 1085 | 3 | 45a4eecb1b787ec5
+6 | 12 6 3 2 1 0 1 | 900 | 18 | ca5a21681093b892

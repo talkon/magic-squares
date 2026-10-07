@@ -36,7 +36,8 @@ sums all have N < 1000 (see research/ideas.md, "msearch overhead").
 
 ```
 bin/bench bench/quick.txt              # ~1 s
-bin/bench --repeat 3 bench/full.txt    # ~20 s, closer to production sizes
+bin/bench --repeat 3 bench/full.txt    # ~5 s, closer to production sizes
+bin/bench bench/prod.txt               # ~20 s, sampled from scheduler runs
 bin/bench --only "S=648" bench/full.txt
 bin/bench --no-fc --no-mrv bench/quick.txt   # compare search variants
 bin/bench --no-support bench/quick.txt
