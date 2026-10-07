@@ -38,6 +38,8 @@ bin/bench --only "S=648" bench/full.txt
 bin/bench --no-fc --no-mrv bench/quick.txt   # compare search variants
 bin/bench --no-support bench/quick.txt
 bin/bench --min-words 8 --gather bench/quick.txt   # test the paths for more labels / larger N
+bin/bench_matrices bench/quick.txt     # the same with the N x N matrices (CARRY_MAX_W=0)
+bin/bench --node-limit 3000000 big.txt # time the first 3M nodes of larger instances
 bin/bench --update bench/quick.txt     # print instances with observed values
 ```
 
@@ -77,23 +79,44 @@ versa), plus:
   versa, so candidates using a number that no candidate of the other axis
   covers are dropped, repeatedly until both lists are closed. This prunes most
   nodes with two rows and two columns placed, which forward checking lets
-  through: 4x fewer nodes and ~30% less time on `bench/full.txt`;
+  through: 4x fewer nodes on `bench/full.txt`, and half the time with the
+  carried bitsets below (30% less with the matrices);
 - branching on the unmatched cell with the fewest candidates, ties broken by
-  the largest label; the counts are exact (saturating byte counters, one
-  masked add per 64 labels) with AVX-512BW and up to 256 labels, and
+  the smallest label (the most frequent number); the counts are exact
+  (saturating byte counters) with AVX-512BW and up to 256 labels, and
   bit-sliced otherwise (exact up to 7 with AVX-512, 3 in plain C);
-- the counts are computed while filtering the candidate lists, filtering first
-  the axis whose cells usually lose all candidates, so most dead children are
-  discarded after one pass; from depth 4 on, where most children are pruned
-  by the support filter, only the unions are computed while filtering, and
-  the full counts only for the nodes that are searched;
+- the axis whose cells usually lose all candidates is filtered first, so
+  most dead children are discarded after one pass; the forward check and the
+  support filter only need the union of each candidate list, so the full
+  counts are computed only for the children that survive them (with the
+  N x N matrices below, from depth 4 on: above it, counting while filtering
+  is cheaper);
 - the children of a node (the candidates through the branching cell) are
-  selected with the same filter as the candidate lists, from a label ->
-  vectors bit matrix, rather than tested one by one;
-- with AVX-512, the candidate lists are filtered 16 at a time against a row
-  of a bit matrix, looking the bits up with permutes from the row held in
-  registers when N <= 3072 (gathers otherwise), and compressed; vectorized
-  counting; plain C otherwise.
+  selected with a vectorized filter (from the bitsets the lists carry, or
+  from a label -> vectors bit matrix, see below), rather than tested one by
+  one;
+- with AVX-512BW and up to 256 labels, the candidate lists carry the label
+  bitsets of their entries (one array per 64-bit word), so filtering a list
+  by the vector v just placed computes |u & v| for 8 entries at a time from
+  contiguous loads (vpopcntq), and compresses the kept entries with their
+  bitsets. The support filter is a test of the same carried words against
+  the uncovered numbers, 8 entries at a time, and its first pass over the
+  axis disjoint from v is fused into that axis' filter (one test against
+  v | uncovered). The labels are counted (8 entries at a time: byte transpose
+  with vpermb, bit transpose with gf2p8affineqb, vpopcntb) only for the
+  children that survive all the filters. No N x N intersection matrices:
+  setup is 4-8x faster and memory is O(N) instead of O(N^2) (7.6 MB of
+  matrices at N = 5500). With the support filter this halves the search
+  time (`bench/full.txt` 8.2 s -> 4.4 s on Sapphire Rapids). AVX-512 CPUs
+  without VPOPCNTDQ or VBMI/GFNI/BITALG (Skylake-X, Cascade Lake) use
+  fallbacks, and are also much faster than with the matrices (built with
+  -march=cascadelake, run on Sapphire Rapids: 8.8 s -> 5.2 s); build with
+  -DCARRY_MAX_W=0 to use the matrices instead;
+- otherwise (more than 256 labels, or no AVX-512BW), the candidate lists are
+  indices filtered with N x N intersection bit matrices: with AVX-512, 16 at
+  a time against a row of a matrix, looking the bits up with permutes from
+  the row held in registers when N <= 3072 (gathers otherwise), and
+  compressed; vectorized counting; plain C otherwise.
 
 ## Legacy arrangement program
 

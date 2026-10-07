@@ -36,8 +36,27 @@ add_test(NAME fast_bench_quick COMMAND bench ${BENCH_DIR}/quick.txt)
 # the same instances, with wider label bitsets than needed
 add_test(NAME fast_bench_quick_wide3 COMMAND bench --min-words 3 ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_wide8 COMMAND bench --min-words 8 ${BENCH_DIR}/quick.txt)
-# the same instances, filtering with gathers as for N > 3072
-add_test(NAME fast_bench_quick_gather COMMAND bench --gather ${BENCH_DIR}/quick.txt)
+# the same instances, filtering with the intersection matrices and gathers
+# as for more than 256 labels and N > 3072
+add_test(NAME fast_bench_quick_gather COMMAND bench --min-words 8 --gather ${BENCH_DIR}/quick.txt)
+# the benchmark built with the N x N intersection matrices for all widths
+# (the path without AVX-512BW), and with the fallbacks for AVX-512 CPUs
+# without GFNI / VPOPCNTDQ (Skylake-X, Cascade Lake), to test those paths
+add_executable(bench_matrices bench.c enumerate.c arrange.c square.c)
+target_compile_definitions(bench_matrices PRIVATE CARRY_MAX_W=0)
+target_link_libraries(bench_matrices m)
+add_test(NAME fast_bench_quick_matrices COMMAND bench_matrices ${BENCH_DIR}/quick.txt)
+add_test(NAME fast_bench_quick_matrices_no_support COMMAND bench_matrices --no-support ${BENCH_DIR}/quick.txt)
+include(CheckCCompilerFlag)
+check_c_compiler_flag("-mno-gfni -mno-avx512vpopcntdq" HAVE_NO_GFNI_FLAGS)
+if (HAVE_NO_GFNI_FLAGS)
+  add_executable(bench_no_gfni bench.c enumerate.c arrange.c square.c)
+  target_compile_options(bench_no_gfni PRIVATE -mno-gfni -mno-avx512vpopcntdq)
+  target_link_libraries(bench_no_gfni m)
+  add_test(NAME fast_bench_quick_no_gfni COMMAND bench_no_gfni ${BENCH_DIR}/quick.txt)
+  add_test(NAME fast_bench_quick_no_gfni_wide3 COMMAND bench_no_gfni --min-words 3 ${BENCH_DIR}/quick.txt)
+  add_test(NAME fast_bench_quick_no_gfni_no_support COMMAND bench_no_gfni --no-support ${BENCH_DIR}/quick.txt)
+endif()
 add_test(NAME fast_bench_quick_no_fc COMMAND bench --no-fc --no-mrv ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_no_support COMMAND bench --no-support ${BENCH_DIR}/quick.txt)
 # msearch finds Morgenstern's square (P = 2^10 3^4 5^3 7^2, S = 327)

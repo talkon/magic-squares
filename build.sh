@@ -25,7 +25,7 @@ if [[ $* == *c* ]]; then
 else
   cmake --build $CMAKE_DIR
   mkdir -p bin
-  for t in arrangement_5 arrangement_6 arrangement_7 enumeration enumerate msearch bench; do
+  for t in arrangement_5 arrangement_6 arrangement_7 enumeration enumerate msearch bench bench_matrices; do
     [ -e $CMAKE_DIR/src/c/$t ] && ln -sf $(realpath $CMAKE_DIR)/src/c/$t bin/$t
   done
   ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py

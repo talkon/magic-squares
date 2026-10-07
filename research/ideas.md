@@ -126,3 +126,61 @@ one axis is complete) cannot save anything measurable.
   searched (2,2) nodes, but a single pass kills only 4% / 29%: the power is
   in the cascade, which needs recounting both lists several times. 2.8x
   slower at the (1,2) nodes, 13% slower at the (2,2) nodes only.
+
+## Candidate lists that carry their bitsets (October 2026)
+
+With AVX-512BW and at most 256 labels, the candidate lists hold the label
+bitsets of their entries (one array per 64-bit word) instead of vector
+indices, and the filters compute |u & v| from them rather than looking up
+bit u of row v of the N x N intersection matrices (see README). Before the
+support filter this was 13-15% faster than the matrices; with it, where the
+support filter's per-candidate test becomes a contiguous vectorized test of
+the carried words, the search takes half the time (min of alternating runs,
+Sapphire Rapids, `-march=native`: `quick.txt` 0.62 s -> 0.34 s, `full.txt`
+8.2 s -> 4.4 s, P = 13 6 3 2 1 1, S = 905: 4.1 s -> 2.1 s, P = 12 7 4 2 1,
+S = 900: 5.1 s -> 2.6 s; same nodes). Built with `-march=cascadelake` (no
+VPOPCNTDQ/VBMI/GFNI/BITALG, so the fallbacks; run on the same machine):
+`quick.txt` 0.64 s -> 0.39 s, `full.txt` 8.8 s -> 5.2 s; without the support
+filter the fallbacks had been 5% slower than the matrices.
+
+Where the time goes now (rdtsc around each phase, P = 14 7 5 3, S = 1460):
+for the children with four vectors placed, the exactly-once filter 23%, the
+disjoint filter 13%, the support filter 27% (3.4 passes per child that gets
+there, two thirds of those children die in it), counting 4%; the children
+one level deeper (nearly all dead after the disjoint filter) 17%.
+
+Variants that did not pay off (min of alternating runs, `bench/quick.txt`):
+
+* Before the support filter (matrices 0.67 s): gathering the bitsets of the
+  list entries (2 qword gathers per word per 16 entries): 0.97 s, and still
+  19% slower than the matrices at N = 2900-5500; rebuilding the matrix row
+  of v in registers from the 6 label -> vectors rows of v's labels: 0.81 s.
+  Carrying the bitsets in the lists, so that the loads are contiguous, is
+  what made it faster (0.58 s). Also: counting the labels in the same pass
+  as the filter (4-5% slower than counting only for the children that
+  survive the forward check); deferring the compression of the lists until
+  the child survives (saving the kept-entry masks, then compressing): 18%
+  slower; running the first forward check for all the kids of a node before
+  searching any: 14% slower; unrolling the filter loop by 2: 6% slower;
+  skipping the words of v without labels when W = 2: 2% slower.
+* With the support filter (carried bitsets 0.333-0.342 s): the support
+  filter's first pass over the disjoint axis as a separate pass after its
+  filter, rather than fused into it: 0.394 s (+17%).
+* Filtering the disjoint axis first, with the support pass fused into the
+  exactly-once filter instead: from depth 3 on 0.385 s (+13%), from depth 4
+  on 0.383 s (+12%), from depth 5 on 0.353 s (+3%); `full.txt` +7% / +1%.
+* Counting while filtering at shallow depths (the vpermb / gf2p8affineqb
+  transpose on the compressed kept entries, recounting a list only if the
+  support filter then drops some): below depth 3: 0.349 s (+5%), below 4:
+  0.367 s (+10%), below 5: 0.417 s (+25%); the extra code alone (never
+  counting early) costs 4%. So counting only the children that survive all
+  the filters replaces LAZY_DEPTH on this path.
+* One OR reduction for both words of the unions (W = 2: unpack, then one
+  512 -> 128 bit reduction) instead of one per word: no change (0.341 s).
+* LAZY_DEPTH, still used with the matrices (more than 256 labels, no
+  AVX-512BW): byte counters (`-DCARRY_MAX_W=0`): 1: 0.633 s, 2: 0.632-0.655,
+  3: 0.628-0.637, 4: 0.610-0.613, 5: 0.69-0.71, never lazy: 0.717;
+  bit-sliced W = 8 (`--min-words 8`): 1: 0.733, 2: 0.737, 3: 0.713-0.732,
+  4: 0.719-0.746, 5: 0.879, never: 0.916; AVX2 build (plain C, 4 slices):
+  1: 1.356, 2: 1.302, 3: 1.334, 4: 1.347, 5: 1.607, never: 1.579. 2-4 are
+  within noise, so it stays 4.

@@ -42,7 +42,8 @@ typedef struct {
   int mrv;             /* branch on the most constrained cell (default 1) */
   int min_words;       /* use label bitsets of at least this many 64-bit
                           words (for testing; default 0 = smallest that fits) */
-  int gather;          /* filter candidate lists with gathers even when N is
+  int gather;          /* when filtering candidate lists with the
+                          intersection matrices, use gathers even when N is
                           small enough for permutes (for testing; default 0) */
   int support;         /* drop candidates with a cell that no candidate of the
                           other axis covers (default 1; needs forward_check) */

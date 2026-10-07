@@ -14,12 +14,17 @@
  * candidate rows/cols contain it (saturating byte counters with AVX-512BW,
  * bit-sliced counters otherwise), which tells us for every unmatched cell
  * whether it can be covered by 0, 1, 2 or more candidates.
- * A cell with 0 candidates prunes the node (forward checking); otherwise we
- * branch on the cell with the fewest candidates (ties: largest label).
+ * A cell with 0 candidates prunes the node (forward checking), and so does
+ * a candidate list that loses all its candidates through some cell under
+ * the support filter (see SUPPORT in arrange_core.h); otherwise we branch on
+ * the cell with the fewest candidates (ties: smallest label).
  *
- * The counting is fused into the filtering of the candidate lists, and the
- * axis whose cells are most likely to lose all candidates is filtered first,
- * so that most dead children are discarded after a single pass.
+ * The axis whose cells are most likely to lose all candidates is filtered
+ * first, so that most dead children are discarded after a single pass, and
+ * the forward check and the support filter only need the union of each
+ * list: the full counts are computed only for the children that survive
+ * them (from LAZY_DEPTH on with the N x N intersection matrices, always
+ * when the candidate lists carry their bitsets, see CARRY_MAX_W below).
  */
 #include "arrange.h"
 
@@ -53,9 +58,11 @@ void search_opts_default(search_opts_t *o) {
  * - with AVX-512BW and W <= COUNT_BYTES_MAX_W, one saturating byte counter
  *   per label: adding a vector is one masked add per 64 labels, with the
  *   bitset word loaded straight into a mask register, and the W
- *   accumulators are independent chains of 1-cycle adds. The counts are
- *   exact up to 255, so the most constrained cell is chosen exactly (8%
- *   fewer nodes than with 8 slices on bench/quick.txt).
+ *   accumulators are independent chains of 1-cycle adds (when the lists
+ *   carry their bitsets, 8 vectors are added at a time, with a bit
+ *   transpose: see COUNT_CARRY). The counts are exact up to 255, so the
+ *   most constrained cell is chosen exactly (8% fewer nodes than with 8
+ *   slices on bench/quick.txt).
  * - otherwise, NSLICE bit-sliced thermometer counters (labels in >= 1, 2,
  *   ..., NSLICE candidates), vectorized for W = 8 with AVX-512 (one register
  *   per slice; byte counters were 35% slower there), plain C otherwise.
@@ -79,16 +86,54 @@ void search_opts_default(search_opts_t *o) {
 #define NSLICE 4
 #endif
 #endif
-/* with bit-sliced counters, nodes from this depth on (two rows and two cols
- * placed, for n = 6) are mostly pruned by the support filter, which needs
- * only the union of each candidate list, so the full counts for choosing the
- * branching cell are computed only for the nodes that are actually searched
- * (byte counters cost no more than the unions, so they are always full) */
+/* with the N x N intersection matrices, nodes from this depth on (two rows
+ * and two cols placed, for n = 6) are mostly pruned by the support filter,
+ * which needs only the union of each candidate list, so the full counts for
+ * choosing the branching cell are computed only for the nodes that are
+ * actually searched; above it, counting while filtering is cheaper (2-4
+ * are within noise of each other, 5 or never is 15-25% slower, see
+ * research/ideas.md). When the lists carry their bitsets, the counts are
+ * always computed only for the nodes that are searched (COUNT_CARRY). */
 #ifndef LAZY_DEPTH
 #define LAZY_DEPTH 4
 #endif
 /* words of cnt[d][a] per word of labels, for either kind of counters */
 #define CNT_WORDS (NSLICE > 8 ? NSLICE : 8)
+
+/*
+ * How candidate lists are filtered by the vector v just placed (keeping the
+ * vectors u with |u & v| = 0 on v's axis, 1 on the other):
+ *
+ * - with AVX-512BW and up to CARRY_MAX_W words of labels (<= 256 labels,
+ *   nearly all searches), the lists carry the label bitsets of their
+ *   entries (vw below) and |u & v| is computed from them, 8 entries at a
+ *   time (FILTER_CARRY in arrange_core.h); the support filter tests the
+ *   carried words in the same way. No N x N matrices: setup is 4-8x faster
+ *   and the search touches only the lists, not a matrix row of N bits per
+ *   filter and a random bitset load per candidate (N = 1000-5000);
+ * - otherwise, with precomputed N x N intersection bit matrices, looking up
+ *   bit u of row v for every entry u (filter_list below).
+ *
+ * The carried bitsets are fastest with VPOPCNTDQ (|u & v| == 1 in
+ * FILTER_CARRY) and VBMI, GFNI and BITALG (the bit transpose of
+ * COUNT_CARRY): Ice Lake and later, Zen 4. The other AVX-512BW CPUs
+ * (Skylake-X, Cascade Lake) use fallbacks for those, and are still much
+ * faster than with the matrices since the support filter (built with
+ * -march=cascadelake: 40% less time on bench/full.txt; without the support
+ * filter they were 5% slower, see research/ideas.md).
+ * Compile with -DCARRY_MAX_W=0 to always use the matrices.
+ */
+#ifdef __AVX512BW__
+#ifndef CARRY_MAX_W
+#define CARRY_MAX_W 4
+#endif
+#else
+#undef CARRY_MAX_W
+#define CARRY_MAX_W 0
+#endif
+#if CARRY_MAX_W > 4
+#error "CARRY_MAX_W is at most 4 (see placedw)"
+#endif
 
 #define ROW 0
 #define COL 1
@@ -109,9 +154,21 @@ typedef struct {
   uint64_t *bits;       /* bits[v * W ...]: label bitset of vector v, for
                            v < N, and an empty set for v = N */
 
+  /* candidate lists, as vector indices ... */
   uint32_t *valid[MAXD][2];
   uint32_t nvalid[MAXD][2];
   uint32_t *kids[MAXD];     /* candidates through the branching cell */
+  /* ... or, if they carry their bitsets (W <= CARRY_MAX_W), as bitsets
+   * only: word w of the bitset of entry i of the list of axis a at depth d
+   * is vw[d][a][w * cap + i] (valid, kids and placed are then unused, the
+   * vectors being identified by their bitsets), and uni[d][a] is the union
+   * of the list, which the forward check and the support filter read
+   * instead of the counts */
+  uint32_t cap;
+  uint64_t *vw[MAXD][2];
+  uint64_t *kidw[MAXD];
+  uint64_t uni[MAXD][2][4];
+  uint64_t placedw[2][SQ_MAX_N][4];
   uint64_t *cells[MAXD][2]; /* W words each: union of placed rows / cols */
   uint64_t *cnt[MAXD][2];   /* CNT_WORDS * W words each: number of
                                candidates valid[d][a] through each label
@@ -289,7 +346,8 @@ static inline uint32_t keep_union_simd_w8(const uint64_t *bits, uint32_t *list,
 #define HAVE_SIMD_COUNT_W8 1
 #endif
 
-static void report(sstate_t *s) {
+/* report a square, given the labels (descending) of its rows and cols */
+static void report_labels(sstate_t *s, const uint16_t *lab[2][SQ_MAX_N]) {
   s->squares++;
   if (!s->cb)
     return;
@@ -297,12 +355,39 @@ static void report(sstate_t *s) {
   sq.n = s->n;
   for (int i = 0; i < s->n; i++)
     for (int j = 0; j < s->n; j++) {
-      sq.rows[i][j] = s->label_val[s->lab[s->placed[ROW][i]][j]];
-      sq.cols[i][j] = s->label_val[s->lab[s->placed[COL][i]][j]];
+      sq.rows[i][j] = s->label_val[lab[ROW][i][j]];
+      sq.cols[i][j] = s->label_val[lab[COL][i][j]];
     }
   if (s->cb(&sq, s->ctx))
     s->stop = 1;
 }
+
+/* the square of the placed vectors (by index) */
+static void report(sstate_t *s) {
+  const uint16_t *lab[2][SQ_MAX_N];
+  for (int a = 0; a < 2; a++)
+    for (int i = 0; i < s->n; i++)
+      lab[a][i] = s->lab[s->placed[a][i]];
+  report_labels(s, lab);
+}
+
+#if CARRY_MAX_W > 0
+/* the square of the placed vectors (by bitset, of W words) */
+static void report_bits(sstate_t *s, int W) {
+  uint16_t buf[2][SQ_MAX_N][8];
+  const uint16_t *lab[2][SQ_MAX_N];
+  for (int a = 0; a < 2; a++)
+    for (int i = 0; i < s->n; i++) {
+      int p = 0;
+      for (int w = W - 1; w >= 0; w--)
+        for (uint64_t x = s->placedw[a][i][w]; x && p < 8;
+             x &= ~((uint64_t)1 << (63 - __builtin_clzll(x))))
+          buf[a][i][p++] = (uint16_t)(64 * w + 63 - __builtin_clzll(x));
+      lab[a][i] = buf[a][i];
+    }
+  report_labels(s, lab);
+}
+#endif
 
 #ifdef PROFILE
 /* per depth: children created, children pruned before being searched, and
@@ -481,13 +566,14 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     for (int p = 0; p < n; p++)
       s.bits[v * W_ + s.lab[v][p] / 64] |= (uint64_t)1 << (s.lab[v][p] % 64);
 
-  /* intersection bit matrices */
+  /* intersection bit matrices, unless the lists carry their bitsets */
+  const int carry = W_ <= CARRY_MAX_W;
   s.IW = (count + 63) / 64 + 1;
   s.nseg = opts->gather ? 0 : (uint32_t)((count + 1023) / 1024);
-  /* + 16: filter_list may read whole segments past the end of a row */
-  s.inters0 = calloc(count * s.IW + 16, sizeof(uint64_t));
-  s.inters1 = calloc(count * s.IW + 16, sizeof(uint64_t));
-  {
+  if (!carry) {
+    /* + 16: filter_list may read whole segments past the end of a row */
+    s.inters0 = calloc(count * s.IW + 16, sizeof(uint64_t));
+    s.inters1 = calloc(count * s.IW + 16, sizeof(uint64_t));
     uint32_t *deg = calloc(L + 2, sizeof(uint32_t));
     for (size_t v = 0; v < count; v++)
       for (int p = 0; p < n; p++)
@@ -534,20 +620,33 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
    * (the candidates through the branching cell) are selected with the same
    * vectorized filter as the candidate lists, instead of a scalar loop with
    * an unpredictable branch per candidate */
-  s.has_label = calloc((L + 1) * s.IW + 16, sizeof(uint64_t));
-  for (size_t v = 0; v < count; v++)
-    for (int p = 0; p < n; p++)
-      s.has_label[s.lab[v][p] * s.IW + v / 64] |= (uint64_t)1 << (v % 64);
+  if (!carry) {
+    s.has_label = calloc((L + 1) * s.IW + 16, sizeof(uint64_t));
+    for (size_t v = 0; v < count; v++)
+      for (int p = 0; p < n; p++)
+        s.has_label[s.lab[v][p] * s.IW + v / 64] |= (uint64_t)1 << (v % 64);
+  }
 
   int maxd = 2 * n + 1;
+  /* room for 64 entries past the end of a list (filters store whole
+   * vectors), and 64-byte aligned word arrays */
+  s.cap = (uint32_t)((count + 64 + 7) & ~(size_t)7);
+  const size_t wbytes = (size_t)W_ * s.cap * sizeof(uint64_t);
   for (int a = 0; a < 2; a++)
     for (int d = 0; d <= maxd; d++) {
-      s.valid[d][a] = malloc((count + 64) * sizeof(uint32_t));
+      if (carry)
+        s.vw[d][a] = aligned_alloc(64, wbytes);
+      else
+        s.valid[d][a] = malloc((count + 64) * sizeof(uint32_t));
       s.cells[d][a] = calloc(W_, sizeof(uint64_t));
       s.cnt[d][a] = calloc(CNT_WORDS * W_, sizeof(uint64_t));
     }
-  for (int d = 0; d <= maxd; d++)
-    s.kids[d] = malloc((count + 64) * sizeof(uint32_t));
+  for (int d = 0; d <= maxd; d++) {
+    if (carry)
+      s.kidw[d] = aligned_alloc(64, wbytes);
+    else
+      s.kids[d] = malloc((count + 64) * sizeof(uint32_t));
+  }
   double t1 = wall_time();
 
   switch (W_) {
@@ -583,9 +682,12 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
       free(s.valid[d][a]);
       free(s.cells[d][a]);
       free(s.cnt[d][a]);
+      free(s.vw[d][a]);
     }
-  for (int d = 0; d <= maxd; d++)
+  for (int d = 0; d <= maxd; d++) {
     free(s.kids[d]);
+    free(s.kidw[d]);
+  }
   free(s.inters0);
   free(s.inters1);
   free(s.has_label);
