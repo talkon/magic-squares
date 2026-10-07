@@ -662,3 +662,128 @@ nearly every child. An idea for filter o, outside this direction: an
 inverted index of the parent's list (label -> mask of entries, 192 bits),
 from which "meets v exactly once" is a few mask operations over v's 4
 labels, leaving only the compress work per child.
+
+
+## Stronger pruning above the (2,2) children, carried path (October 2026, not merged)
+
+Question (branch `opt2/shallow`, from f61e719): now that the candidate
+lists carry their bitsets, do the stronger rules of "Stronger pruning on
+top of the support filter" pay off at the searched nodes with one or two
+rows and cols placed, where a kill saves the whole subtree? No: at
+production sizes the nodes that hold the time are not killed by any of
+them, even at zero cost. Nothing kept; the instrumentation (rdtsc per
+subtree, reference implementations of the rules) is not committed.
+
+Where the time is (rdtsc around each searched node's subtree,
+`bench/prod.txt`, -march=native): the subtrees of the searched (1,2)/(2,1)
+nodes are 85-92% of the search (S = 900: 12.8 of 14.0 Gcyc), 3400-8600
+cycles each; a subtree is the node's 6-12 children with two rows and two
+cols, nearly all of them killed as they are created (by cross support and
+the support filter, 620-810 cycles each). The searched (2,2) nodes'
+subtrees are 0.1-5%; the (1,1) nodes' own work, creating the (1,2)/(2,1)
+children, most of the rest.
+
+Method: reference implementations in plain C, run on copies of the lists
+of 1 in 8 searched nodes, each rule iterated with the support filter and
+forward checking to a fixpoint; the cycles of the node's subtree (the
+evaluation excluded) give what a kill would save at zero cost. Rules, for
+a candidate u of axis f (h the other axis, y an unmatched cell of a placed
+f vector, i.e. one that needs an h vector):
+
+* cross: u meets the union of the h candidates through y, for every y;
+* cell: u meets some h candidate through y exactly once, for every y;
+* pair: every cell of u outside the placed h vectors is in an h candidate
+  meeting u exactly once;
+* p1 (count-1 rule): a number in exactly one h candidate c: the f
+  candidates through it meet c exactly once;
+* also same-axis support, forced numbers (the intersection of the
+  candidates through a cell), Hall (with two placed h vectors, the f
+  candidates are edges between their unmatched cells and must lie in a
+  perfect matching), and exact one-axis feasibility (n - r pairwise
+  disjoint candidates, a DFS).
+
+No rule ever killed a node with a square in its subtree. Share of the
+(1,2) subtree time that the kills would save (the (2,1) nodes: 1-2x
+these), on a machine shared with other benchmarks:
+
+| sum | N | cross | cross + p1 | cell | cell + pair | all rules |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| quick, P = 10 6 3 1 0 1, S = 648 | 1682 | 38% | 58% | 55% | 77% | 77% |
+| full, P = 13 6 3 2, S = 561 | 1195 | 10% | 20% | 23% | 40% | |
+| full, P = 14 7 5 3, S = 1460 | 2237 | 2.6% | 5.3% | 5.9% | 10% | |
+| prod, P = 14 7 5 3, S = 1361 | 1491 | 4.7% | 9.5% | | 27% | |
+| prod, P = 10 4 2 2 1 1, S = 460 | 1932 | 7.9% | 16% | | 29% | |
+| prod, P = 10 6 4 2 1 1, S = 838 | 1986 | 2.4% | 5.0% | 6.0% | 11% | 12% |
+| prod, P = 14 7 4 2 1, S = 1085 | 2082 | 1.3% | 3.0% | | 7.2% | |
+| prod, P = 12 6 3 2 1 0 1, S = 900 | 2994 | 0.9% | 1.8% | 2.1% | 3.7% | |
+
+Weighted by the time of each sum, cell + pair would save ~8% of prod at no
+cost, cross + p1 ~4%; one pass of each rule instead of the fixpoint, a
+sixth to a third of that. The exact one-axis check kills 0.6-1.2% of the
+nodes (0.1% of the time, S = 838) and nothing on top of the others, Hall
+0-1% on top of cross.
+
+Why: the rules kill the cheap nodes. By the number k of children of the
+node (the MRV count), S = 900: the nodes with k >= 9 hold 81% of the
+(1,2)/(2,1) subtree time and cell + pair kills 0.0-0.4% of it; k = 5-8,
+17% of the time, 17% killed; k <= 4, 2% of the time, 60-91% killed. These
+nodes are consistent under every local rule: their children die only
+when the second row (or col) is placed. The rules do not shrink the lists
+of the nodes they leave either (their MRV count drops by 1-4%), and at the
+(1,1) nodes cell + pair kills 5% of them, with 0.7% of the nodes below
+them, and leaves the lists of the others the size they were (S = 1361).
+Singleton consistency (place each candidate, run the filters that create
+the child, drop the candidate if the child is pruned) finds the same: at
+the (1,1) nodes 4% of the candidates go (11% of the nodes die), -2.3%
+nodes, for probes costing twice the subtree; at the (1,0) nodes 10% of
+the candidates go, -0.1% nodes (S = 1361). So the (2,1)/(1,2) nodes
+under a (1,1) node are nearly all consistent too, and a cache of dead
+(2,1) nodes to skip the (2,2) children that contain them would not help.
+
+Cost, against the ~300-900 cycles per node that the best rule could save
+on prod (S = 900: 3.7% of ~8600): cross support iterated with the support
+filter at the searched (1,2)/(2,1) nodes, with the tuned CROSS of the
+(2,2) children (14 cells, lists of 60-220): `full.txt` 14.96M -> 12.36M
+nodes but 3.78 -> 5.51 s (~3000 cycles per node). The building block of
+the pairwise rules, label -> candidate-mask tables for both lists (scalar,
+masks of up to 512 bits), alone costs 3300-4700 cycles per node at prod
+sizes (167-232 entries in the two lists, S = 1361 / 838 / 1085): the
+lists are in vector order, so consecutive entries share their largest
+numbers and the read-modify-writes of the table rows form chains; a
+64 x 64 bit transpose might be ~4x cheaper (estimate), still more than
+the saving.
+
+At the (2,2) nodes:
+
+* The searched (2,2) nodes (which survived cross support and the support
+  filter as they were created) die under cross support iterated with the
+  support filter (98-99.6%): one round of cross support is not a fixpoint,
+  as the second pass changes the unions the first one used. Running
+  CROSS and SUPPORT in turn at the (2,2) children until neither drops
+  anything, when the support filter dropped something after the cross
+  passes (198k calls on P = 13 6 3 2 1 1, S = 899, 98% killed, ~590
+  cycles each): prod 50.4M -> 44.6M nodes, `full.txt` 14.96M -> 14.75M,
+  but no gain in time: prod native 14.78 -> 14.61 s (sum of the per-sum
+  minima of 3 alternating rounds), cascadelake 16.11 -> 16.00 s and, in 4
+  more rounds, 16.14 -> 16.10 s (min of totals 16.19 -> 16.30 s);
+  `full.txt` native +2.5%, cascadelake -0.6%; `quick.txt` +-0. A searched
+  (2,2) node costs about what the extra round costs (counting two lists of
+  ~30, ~3 children dying at their first filters). Unconditionally (on
+  every surviving child): the same nodes, no gain; a single cross pass on
+  either axis instead of the round: +1% (three largest prod sums).
+* The (2,2) children: where they die (S = 900 / S = 1361): first filter
+  0.6 / 2.9%, second 2.8 / 11.2%, first cross pass 15.6 / 27.9%, second
+  34.1 / 21.5%, support filter after them 43.1 / 36.2%, alive 3.9 / 0.3%.
+  Kill rates right after the two filters (S = 1361 / S = 838), one pass on
+  each axis: support 29 / 15%, Hall 2 / 1%, p1 19 / 10%, pair 25 / 13%,
+  cross 78 / 57%, cross with the support test folded in (the current
+  pass) 91 / 74%; to a fixpoint with the support filter: support 72 / 49%,
+  Hall 81 / 60%, p1 98 / 91%, cross 100%. So cross support stays the
+  cheapest strong test there. Its pass on the axis of the vector just
+  placed first: +5% (prod). Choosing per child to run the support filter
+  first where the other axis is not closed under it: not selective (that
+  is the case for 98.5-99.6% of the children).
+
+So above the (2,2) children the search is locally consistent, as far as
+these rules can tell at a cost below the subtree they would save; what is
+left is the cost of creating those children, not missing pruning.
