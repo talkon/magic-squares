@@ -5,7 +5,7 @@
  * Invariant on entering SEARCH_REC(s, d): the candidate lists valid[d][a] and
  * their bit-sliced label counts cnt[d][a] are filled in, every unmatched cell
  * has at least one candidate, and each axis has enough candidates left. The
- * parent does this work while creating the child (see try_child), so that
+ * parent does this work while creating the child (see TRY_CHILD), so that
  * children which would be pruned are discarded as cheaply as possible.
  */
 #ifndef W

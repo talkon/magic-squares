@@ -44,3 +44,9 @@ add_test(NAME fast_msearch_327 COMMAND sh -c
 add_test(NAME fast_enumerate_matches_cpp COMMAND sh -c
   "$<TARGET_FILE:enumeration> old_10_4_3_2.txt 10 4 3 2 > /dev/null && $<TARGET_FILE:enumerate> --file new_10_4_3_2.txt 10 4 3 2 2> /dev/null && cmp old_10_4_3_2.txt new_10_4_3_2.txt"
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+# the scheduler (needs python3 with numpy; skipped if python3 is missing)
+find_package(Python3 COMPONENTS Interpreter)
+if (Python3_FOUND)
+  add_test(NAME fast_scheduler COMMAND ${Python3_EXECUTABLE}
+    ${PROJECT_SOURCE_DIR}/scripts/test_scheduler.py)
+endif()

@@ -6,10 +6,14 @@
  *
  * usage: enumerate [--vec-size N] [--min-sum S] [--max-sum S]
  *                  [--reduce weak|strong|none] [--counts] --file F  e1 e2 ...
- *        enumerate [--vec-size N] --print-min-sum e1 e2 ...
+ *        enumerate [--vec-size N] --print-min-sum [--window F [--until C]]
+ *                  e1 e2 ...
  *
  * --counts writes "S count" lines instead of the vectors, and
- * --print-min-sum prints the smallest sum of any vector and exits.
+ * --print-min-sum prints the smallest sum S_min of any vector and exits;
+ * with --window F it also prints "S count" lines (before reduction) for the
+ * sums in [S_min, F * S_min], stopping early (at the end of a chunk of sums)
+ * once some sum has at least C vectors if --until C is given.
  */
 #include <getopt.h>
 #include <stdio.h>
@@ -24,6 +28,8 @@ int main(int argc, char *argv[]) {
   const char *file = NULL;
   int reduce = 1; /* 0 = none, 1 = weak (same as old enumerators), 2 = strong */
   int counts = 0, print_min = 0;
+  double window = 0;
+  uint64_t until = UINT64_MAX;
 
   static struct option long_options[] = {
       {"vec-size", required_argument, 0, 'n'},
@@ -33,9 +39,11 @@ int main(int argc, char *argv[]) {
       {"reduce", required_argument, 0, 'r'},
       {"counts", no_argument, 0, 'c'},
       {"print-min-sum", no_argument, 0, 'm'},
+      {"window", required_argument, 0, 'w'},
+      {"until", required_argument, 0, 'u'},
       {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "n:a:b:f:r:cm", long_options, NULL)) !=
+  while ((opt = getopt_long(argc, argv, "n:a:b:f:r:cmw:u:", long_options, NULL)) !=
          -1) {
     switch (opt) {
     case 'n':
@@ -59,6 +67,12 @@ int main(int argc, char *argv[]) {
     case 'm':
       print_min = 1;
       break;
+    case 'w':
+      window = atof(optarg);
+      break;
+    case 'u':
+      until = strtoull(optarg, NULL, 10);
+      break;
     default:
       fprintf(stderr, "bad arguments\n");
       return 1;
@@ -68,7 +82,31 @@ int main(int argc, char *argv[]) {
   if (print_min) {
     if (pexp_parse(&p, argc - optind, argv + optind) != 0)
       return 1;
-    printf("%lu\n", (unsigned long)enum_min_sum(&p, n));
+    uint64_t smin = enum_min_sum(&p, n);
+    printf("%lu\n", (unsigned long)smin);
+    if (window > 1 && smin > 0) {
+      uint64_t end = (uint64_t)(window * smin);
+      uint64_t chunk = smin / 50 > 8 ? smin / 50 : 8;
+      int done = 0;
+      for (uint64_t lo = smin; lo <= end && !done; lo += chunk) {
+        uint64_t hi = lo + chunk - 1 < end ? lo + chunk - 1 : end;
+        vec_list_t l;
+        vec_list_init(&l, n);
+        enum_vectors(&p, n, lo, hi, &l);
+        for (size_t i = 0; i < l.count;) {
+          uint64_t S = vec_list_sum(&l, i);
+          size_t j = i;
+          while (j < l.count && vec_list_sum(&l, j) == S)
+            j++;
+          printf("%lu %zu\n", (unsigned long)S, j - i);
+          done |= j - i >= until;
+          i = j;
+        }
+        if (done)
+          printf("# counted to %lu\n", (unsigned long)hi);
+        vec_list_free(&l);
+      }
+    }
     return 0;
   }
   if (!file || pexp_parse(&p, argc - optind, argv + optind) != 0) {
@@ -76,7 +114,7 @@ int main(int argc, char *argv[]) {
                     "[--max-sum S] [--reduce none|weak|strong] [--counts] "
                     "--file F e1 e2 ...\n"
                     "       enumerate [--vec-size N] --print-min-sum "
-                    "e1 e2 ...\n");
+                    "[--window F [--until C]] e1 e2 ...\n");
     return 1;
   }
 
