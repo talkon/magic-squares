@@ -10,9 +10,10 @@
  *   row-unmatched cells   = rowcells & ~colcells   (need a col through them)
  *   col-unmatched cells   = colcells & ~rowcells   (need a row through them)
  *
- * At every node, we OR together the bitsets of the remaining candidate
- * rows/cols with bit-sliced saturating counters, which tells us for every
- * unmatched cell whether it can be covered by 0, 1, 2 or more candidates.
+ * At every node, we count for every label how many of the remaining
+ * candidate rows/cols contain it (saturating byte counters with AVX-512BW,
+ * bit-sliced counters otherwise), which tells us for every unmatched cell
+ * whether it can be covered by 0, 1, 2 or more candidates.
  * A cell with 0 candidates prunes the node (forward checking); otherwise we
  * branch on the cell with the fewest candidates (ties: largest label).
  *
@@ -43,9 +44,32 @@ void search_opts_default(search_opts_t *o) {
   o->min_words = 0;
 }
 
-/* number of bit-sliced counters used to pick the most constrained cell; more
- * slices give a more exact choice (fewer nodes) at a higher cost per node,
- * which pays off when the counting is vectorized */
+/*
+ * How candidates are counted per label (read with COVERED / IN_CLASS in
+ * arrange_core.h):
+ *
+ * - with AVX-512BW and W <= COUNT_BYTES_MAX_W, one saturating byte counter
+ *   per label: adding a vector is one masked add per 64 labels, with the
+ *   bitset word loaded straight into a mask register, and the W
+ *   accumulators are independent chains of 1-cycle adds. The counts are
+ *   exact up to 255, so the most constrained cell is chosen exactly (8%
+ *   fewer nodes than with 8 slices on bench/quick.txt).
+ * - otherwise, NSLICE bit-sliced thermometer counters (labels in >= 1, 2,
+ *   ..., NSLICE candidates), vectorized for W = 8 with AVX-512 (one register
+ *   per slice; byte counters were 35% slower there), plain C otherwise.
+ *   More slices give a more exact choice (fewer nodes) at a higher cost per
+ *   node, which pays off when the counting is vectorized.
+ *
+ * (Vectorized bit-sliced counters for W = 2 and 4 keep the slices in the
+ * lanes of a register, and adding a vector is a lane shift and a ternary
+ * op in one dependency chain, ~4 cycles: counting was then a quarter of the
+ * search time.)
+ */
+#ifdef __AVX512BW__
+#define COUNT_BYTES_MAX_W 4
+#else
+#define COUNT_BYTES_MAX_W 0
+#endif
 #ifndef NSLICE
 #ifdef __AVX512F__
 #define NSLICE 8
@@ -53,6 +77,8 @@ void search_opts_default(search_opts_t *o) {
 #define NSLICE 4
 #endif
 #endif
+/* words of cnt[d][a] per word of labels, for either kind of counters */
+#define CNT_WORDS (NSLICE > 8 ? NSLICE : 8)
 
 #define ROW 0
 #define COL 1
@@ -68,14 +94,16 @@ typedef struct {
   uint64_t *inters0;    /* bit u of row v: u, v disjoint */
   uint64_t *inters1;    /* bit u of row v: |u & v| == 1 */
   uint64_t *has_label;  /* bit v of row x: vector v contains label x */
-  uint64_t *bits;       /* bits[v * W ...]: label bitset of vector v */
+  uint64_t *bits;       /* bits[v * W ...]: label bitset of vector v, for
+                           v < N, and an empty set for v = N */
 
   uint32_t *valid[MAXD][2];
   uint32_t nvalid[MAXD][2];
   uint32_t *kids[MAXD];     /* candidates through the branching cell */
   uint64_t *cells[MAXD][2]; /* W words each: union of placed rows / cols */
-  uint64_t *cnt[MAXD][2];   /* NSLICE * W words each: labels in >= 1, 2, ...
-                               of the candidates valid[d][a] */
+  uint64_t *cnt[MAXD][2];   /* CNT_WORDS * W words each: number of
+                               candidates valid[d][a] through each label
+                               (see COVERED / IN_CLASS in arrange_core.h) */
 
   uint32_t placed[2][SQ_MAX_N];
   int np[2];
@@ -124,56 +152,6 @@ static inline uint32_t filter_list(const uint32_t *in, uint32_t cnt,
 }
 
 #if defined(__AVX512F__) && NSLICE == 8
-/*
- * Thermometer counts g_t = labels in >= t of the vectors in list, for
- * t = 1..8, with the slices stored in consecutive lanes of zmm registers.
- * Adding a vector m is g_t |= g_{t-1} & m (with g_0 = all ones), i.e.
- * state |= (state shifted up by one slice) & broadcast(m): one valignq and
- * one vpternlogq per register.
- */
-static inline void count_slices_simd_w2(const uint64_t *bits,
-                                        const uint32_t *list, uint32_t k,
-                                        uint64_t *g) {
-  /* 128-bit label sets: A1 = [g1 g2 g3 g4], A2 = [g5 g6 g7 g8] */
-  const __m512i ones = _mm512_set1_epi64(-1);
-  __m512i A1 = _mm512_setzero_si512(), A2 = _mm512_setzero_si512();
-  for (uint32_t i = 0; i < k; i++) {
-    __m512i m = _mm512_broadcast_i64x2(
-        _mm_loadu_si128((const __m128i *)(bits + 2 * (uint64_t)list[i])));
-    __m512i s1 = _mm512_alignr_epi64(A1, ones, 6);
-    __m512i s2 = _mm512_alignr_epi64(A2, A1, 6);
-    A1 = _mm512_ternarylogic_epi64(A1, s1, m, 0xF8); /* A1 | (s1 & m) */
-    A2 = _mm512_ternarylogic_epi64(A2, s2, m, 0xF8);
-  }
-  _mm512_storeu_si512(g, A1);
-  _mm512_storeu_si512(g + 8, A2);
-}
-
-static inline void count_slices_simd_w4(const uint64_t *bits,
-                                        const uint32_t *list, uint32_t k,
-                                        uint64_t *g) {
-  /* 256-bit label sets: A1 = [g1 g2], ..., A4 = [g7 g8] */
-  const __m512i ones = _mm512_set1_epi64(-1);
-  __m512i A1 = _mm512_setzero_si512(), A2 = _mm512_setzero_si512();
-  __m512i A3 = _mm512_setzero_si512(), A4 = _mm512_setzero_si512();
-  for (uint32_t i = 0; i < k; i++) {
-    __m512i m = _mm512_broadcast_i64x4(
-        _mm256_loadu_si256((const __m256i *)(bits + 4 * (uint64_t)list[i])));
-    __m512i s1 = _mm512_alignr_epi64(A1, ones, 4);
-    __m512i s2 = _mm512_alignr_epi64(A2, A1, 4);
-    __m512i s3 = _mm512_alignr_epi64(A3, A2, 4);
-    __m512i s4 = _mm512_alignr_epi64(A4, A3, 4);
-    A1 = _mm512_ternarylogic_epi64(A1, s1, m, 0xF8);
-    A2 = _mm512_ternarylogic_epi64(A2, s2, m, 0xF8);
-    A3 = _mm512_ternarylogic_epi64(A3, s3, m, 0xF8);
-    A4 = _mm512_ternarylogic_epi64(A4, s4, m, 0xF8);
-  }
-  _mm512_storeu_si512(g, A1);
-  _mm512_storeu_si512(g + 8, A2);
-  _mm512_storeu_si512(g + 16, A3);
-  _mm512_storeu_si512(g + 24, A4);
-}
-
 static inline void count_slices_simd_w8(const uint64_t *bits,
                                         const uint32_t *list, uint32_t k,
                                         uint64_t *g) {
@@ -190,7 +168,7 @@ static inline void count_slices_simd_w8(const uint64_t *bits,
   for (int t = 0; t < NSLICE; t++)
     _mm512_storeu_si512(g + 8 * t, A[t]);
 }
-#define HAVE_SIMD_COUNT 1
+#define HAVE_SIMD_COUNT_W8 1
 #endif
 
 static void report(sstate_t *s) {
@@ -362,18 +340,13 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   qsort(s.lab, count, sizeof(*s.lab), lab_cmp);
 
   /* bitset width */
-#ifdef HAVE_SIMD_COUNT
-  const int have_simd = 1; /* W = 3 has no vectorized counting */
-#else
-  const int have_simd = 0;
-#endif
   size_t Lw = L > 64 * (size_t)opts->min_words ? L : 64 * (size_t)opts->min_words;
-  int W_ = Lw <= 128               ? 2
-           : Lw <= 192 && !have_simd ? 3
-           : Lw <= 256             ? 4
-           : Lw <= 512             ? 8
-           : Lw <= 1024            ? 16
-                                   : 64;
+  int W_ = Lw <= 128    ? 2
+           : Lw <= 192  ? 3
+           : Lw <= 256  ? 4
+           : Lw <= 512  ? 8
+           : Lw <= 1024 ? 16
+                        : 64;
   if (L > 64 * 64) {
     /* would need wider bitsets; not expected for realistic inputs */
     free(vals);
@@ -385,7 +358,7 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     st.truncated = 1;
     return st;
   }
-  s.bits = calloc(count * W_ + 8, sizeof(uint64_t));
+  s.bits = calloc((count + 1) * W_ + 8, sizeof(uint64_t));
   for (size_t v = 0; v < count; v++)
     for (int p = 0; p < n; p++)
       s.bits[v * W_ + s.lab[v][p] / 64] |= (uint64_t)1 << (s.lab[v][p] % 64);
@@ -451,7 +424,7 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     for (int d = 0; d <= maxd; d++) {
       s.valid[d][a] = malloc((count + 64) * sizeof(uint32_t));
       s.cells[d][a] = calloc(W_, sizeof(uint64_t));
-      s.cnt[d][a] = calloc(NSLICE * W_, sizeof(uint64_t));
+      s.cnt[d][a] = calloc(CNT_WORDS * W_, sizeof(uint64_t));
     }
   for (int d = 0; d <= maxd; d++)
     s.kids[d] = malloc((count + 64) * sizeof(uint32_t));

@@ -70,12 +70,16 @@ versa), plus:
   operations;
 - forward checking: a node is pruned as soon as some unmatched cell has no
   remaining candidate through it;
-- branching on the unmatched cell with the fewest candidates (bit-sliced
-  counts, exact up to 7 with AVX-512 and up to 3 otherwise), ties broken by the
-  largest label;
+- branching on the unmatched cell with the fewest candidates, ties broken by
+  the largest label; the counts are exact (saturating byte counters, one
+  masked add per 64 labels) with AVX-512BW and up to 256 labels, and
+  bit-sliced otherwise (exact up to 7 with AVX-512, 3 in plain C);
 - the counts are computed while filtering the candidate lists, filtering first
   the axis whose cells usually lose all candidates, so most dead children are
   discarded after one pass;
+- the children of a node (the candidates through the branching cell) are
+  selected with the same filter as the candidate lists, from a label ->
+  vectors bit matrix, rather than tested one by one;
 - AVX-512 gather/compress for filtering and vectorized counting when
   available; plain C otherwise.
 
