@@ -1,0 +1,112 @@
+/*
+ * Standalone enumeration tool, a drop-in replacement for enumeration.cpp /
+ * enumeration.py that writes the same file format (one vector per line,
+ * elements descending, ascending order of sum) but uses far less memory and
+ * can be restricted to a range of sums.
+ *
+ * usage: enumerate [--vec-size N] [--min-sum S] [--max-sum S]
+ *                  [--reduce weak|strong|none] [--counts] --file F  e1 e2 ...
+ */
+#include <getopt.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "enumerate.h"
+
+int main(int argc, char *argv[]) {
+  int n = 6;
+  uint64_t sum_min = 0, sum_max = UINT64_MAX;
+  const char *file = NULL;
+  int reduce = 1; /* 0 = none, 1 = weak (same as old enumerators), 2 = strong */
+  int counts = 0;
+
+  static struct option long_options[] = {
+      {"vec-size", required_argument, 0, 'n'},
+      {"min-sum", required_argument, 0, 'a'},
+      {"max-sum", required_argument, 0, 'b'},
+      {"file", required_argument, 0, 'f'},
+      {"reduce", required_argument, 0, 'r'},
+      {"counts", no_argument, 0, 'c'},
+      {0, 0, 0, 0}};
+  int opt;
+  while ((opt = getopt_long(argc, argv, "n:a:b:f:r:c", long_options, NULL)) !=
+         -1) {
+    switch (opt) {
+    case 'n':
+      n = atoi(optarg);
+      break;
+    case 'a':
+      sum_min = strtoull(optarg, NULL, 10);
+      break;
+    case 'b':
+      sum_max = strtoull(optarg, NULL, 10);
+      break;
+    case 'f':
+      file = optarg;
+      break;
+    case 'r':
+      reduce = !strcmp(optarg, "none") ? 0 : !strcmp(optarg, "strong") ? 2 : 1;
+      break;
+    case 'c':
+      counts = 1;
+      break;
+    default:
+      fprintf(stderr, "bad arguments\n");
+      return 1;
+    }
+  }
+  prime_exps_t p;
+  if (!file || pexp_parse(&p, argc - optind, argv + optind) != 0) {
+    fprintf(stderr, "usage: enumerate [--vec-size N] [--min-sum S] "
+                    "[--max-sum S] [--reduce none|weak|strong] [--counts] "
+                    "--file F e1 e2 ...\n");
+    return 1;
+  }
+
+  vec_list_t all;
+  vec_list_init(&all, n);
+  uint64_t nodes = enum_vectors(&p, n, sum_min, sum_max, &all);
+  fprintf(stderr, ">>> (enum) %zu %d-vecs with sum in range (%lu dfs nodes)\n",
+          all.count, n, (unsigned long)nodes);
+
+  FILE *fp = fopen(file, "w");
+  if (!fp) {
+    perror(file);
+    return 1;
+  }
+  size_t written = 0;
+  vec_list_t red;
+  vec_list_init(&red, n);
+  for (size_t i = 0; i < all.count;) {
+    uint64_t s = vec_list_sum(&all, i);
+    size_t j = i;
+    while (j < all.count && vec_list_sum(&all, j) == s)
+      j++;
+    red.count = 0;
+    if (reduce)
+      reduce_vectors(&all, i, j - i, &red, reduce == 2);
+    else
+      for (size_t k = i; k < j; k++)
+        vec_list_push(&red, vec_list_get(&all, k));
+    if (counts) {
+      if (red.count)
+        fprintf(fp, "%lu %zu\n", (unsigned long)s, red.count);
+    } else {
+      for (size_t k = 0; k < red.count; k++) {
+        uint64_t *v = vec_list_get(&red, k);
+        for (int t = 0; t < n; t++)
+          fprintf(fp, t ? " %lu" : "%lu", (unsigned long)v[t]);
+        fputc('\n', fp);
+      }
+    }
+    written += red.count;
+    i = j;
+  }
+  fclose(fp);
+  fprintf(stderr, ">>> (enum) wrote %zu rows to %s in ascending order of sum\n",
+          written, file);
+  vec_list_free(&all);
+  vec_list_free(&red);
+  return 0;
+}
