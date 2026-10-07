@@ -32,10 +32,9 @@ else
   make
   cd ..
   mkdir -p bin
-  ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement_5 bin/arrangement_5
-  ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement_6 bin/arrangement_6
-  ln -sf $(realpath $CMAKE_DIR)/src/c/arrangement_7 bin/arrangement_7
-  ln -sf $(realpath $CMAKE_DIR)/src/c/enumeration bin/enumeration
+  for t in arrangement_5 arrangement_6 arrangement_7 enumeration enumerate msearch bench; do
+    [ -e $CMAKE_DIR/src/c/$t ] && ln -sf $(realpath $CMAKE_DIR)/src/c/$t bin/$t
+  done
   ln -sf $(realpath src/py/enumeration.py) bin/enumeration.py
   ln -sf $(realpath src/py/postprocess.py) bin/postprocess.py
   mkdir -p data

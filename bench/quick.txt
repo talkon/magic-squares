@@ -1,0 +1,9 @@
+# n | exponents of P (2 3 5 7 ...) | S | expected squares | expected hash
+# expected values verified against the legacy arrangement_6 (bench/validate_legacy.py)
+6 | 10 4 3 2 | 327 | 1 | 108d4c547ab2a103
+6 | 11 4 3 1 1 | 470 | 1 | b9a334c3153f26f3
+6 | 11 5 3 2 | 401 | 1 | 68522704e220b7a3
+6 | 10 6 3 1 0 1 | 391 | 2 | f194cda6b61cb326
+6 | 13 6 3 2 | 506 | 0 | 0000000000000000
+6 | 13 6 3 2 | 517 | 2 | 46e94a05bc8fdbf2
+6 | 10 6 3 1 0 1 | 648 | 1 | 242b236846ec15df
