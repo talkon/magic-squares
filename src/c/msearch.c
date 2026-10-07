@@ -18,6 +18,7 @@
  *   --reduce strong   use the stronger (slower) vector reduction
  *   --no-fc/--no-mrv  disable forward checking / most-constrained branching
  *   --no-support      disable the support filter (see arrange_core.h)
+ *   --no-cross        disable the cross support filter (see arrange_core.h)
  *
  * Output (JSON lines, one record per searched sum, flushed immediately so a
  * killed run keeps all completed sums):
@@ -154,10 +155,11 @@ int main(int argc, char *argv[]) {
       {"no-fc", no_argument, 0, 'f'},
       {"no-mrv", no_argument, 0, 'm'},
       {"no-support", no_argument, 0, 'S'},
+      {"no-cross", no_argument, 0, 'X'},
       {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "n:a:b:s:l:t:T:o:F:r:fmS", long_options,
-                            NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "n:a:b:s:l:t:T:o:F:r:fmSX",
+                            long_options, NULL)) != -1) {
     switch (opt) {
     case 'n':
       n = atoi(optarg);
@@ -203,6 +205,9 @@ int main(int argc, char *argv[]) {
       break;
     case 'S':
       opts.support = 0;
+      break;
+    case 'X':
+      opts.cross = 0;
       break;
     default:
       return 2;

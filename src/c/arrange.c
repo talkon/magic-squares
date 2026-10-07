@@ -18,8 +18,9 @@
  * whether it can be covered by 0, 1, 2 or more candidates.
  * A cell with 0 candidates prunes the node (forward checking), and so does
  * a candidate list that loses all its candidates through some cell under
- * the support filter (see SUPPORT in arrange_core.h); otherwise we branch on
- * the cell with the fewest candidates (ties: smallest label).
+ * the support filter or cross support (see SUPPORT and CROSS in
+ * arrange_core.h); otherwise we branch on the cell with the fewest
+ * candidates (ties: smallest label).
  *
  * The axis whose cells are most likely to lose all candidates is filtered
  * first, so that most dead children are discarded after a single pass, and
@@ -51,6 +52,7 @@ void search_opts_default(search_opts_t *o) {
   o->min_words = 0;
   o->gather = 0;
   o->support = 1;
+  o->cross = 1;
 }
 
 /*
@@ -376,6 +378,22 @@ static void report(sstate_t *s) {
 }
 
 #if CARRY_MAX_W > 0
+/* lane j of the result: the or of the 8 lanes of a[j] */
+static inline __m512i or_lanes8(const __m512i a[8]) {
+  /* t[k], 128-bit lane l: the or of lanes 2l, 2l + 1 of a[2k], a[2k + 1] */
+  __m512i t[4], u[2];
+  for (int k = 0; k < 4; k++)
+    t[k] = _mm512_or_si512(_mm512_unpacklo_epi64(a[2 * k], a[2 * k + 1]),
+                           _mm512_unpackhi_epi64(a[2 * k], a[2 * k + 1]));
+  /* u[k], 128-bit lane l: the or of 128-bit lanes 2l, 2l + 1 of t[2k]
+   * (l < 2) or of t[2k + 1] (l >= 2) */
+  for (int k = 0; k < 2; k++)
+    u[k] = _mm512_or_si512(_mm512_shuffle_i64x2(t[2 * k], t[2 * k + 1], 0x88),
+                           _mm512_shuffle_i64x2(t[2 * k], t[2 * k + 1], 0xDD));
+  return _mm512_or_si512(_mm512_shuffle_i64x2(u[0], u[1], 0x88),
+                         _mm512_shuffle_i64x2(u[0], u[1], 0xDD));
+}
+
 /* the square of the placed vectors (by bitset, of W words) */
 static void report_bits(sstate_t *s, int W) {
   uint16_t buf[2][SQ_MAX_N][8];

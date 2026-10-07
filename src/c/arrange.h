@@ -47,6 +47,10 @@ typedef struct {
                           small enough for permutes (for testing; default 0) */
   int support;         /* drop candidates with a cell that no candidate of the
                           other axis covers (default 1; needs forward_check) */
+  int cross;           /* drop candidates that miss every candidate of the
+                          other axis through some unmatched cell (default 1:
+                          where it pays off, see arrange_core.h; 2: always;
+                          needs support) */
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);

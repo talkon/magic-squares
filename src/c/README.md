@@ -16,7 +16,7 @@ Options: `--vec-size N` (5, 6, 7), `--min-sum`, `--max-sum`, `--sums`,
 `--node-limit X` (per sum; the record is marked `truncated`), `--total-nodes X`
 and `--time-limit T` (stop after the sum during which the limit is reached),
 `--out FILE` (append), `--format legacy`, `--reduce strong`, and `--no-fc` /
-`--no-mrv` / `--no-support` to disable the search heuristics.
+`--no-mrv` / `--no-support` / `--no-cross` to disable the search heuristics.
 
 Output is JSON lines, flushed as it goes: one `square` record per semi-magic
 square (with its traversal counts, the best pair of diagonals, and the square
@@ -41,6 +41,7 @@ bin/bench bench/prod.txt               # ~20 s, sampled from scheduler runs
 bin/bench --only "S=648" bench/full.txt
 bin/bench --no-fc --no-mrv bench/quick.txt   # compare search variants
 bin/bench --no-support bench/quick.txt
+bin/bench --no-cross bench/quick.txt
 bin/bench --min-words 8 --gather bench/quick.txt   # test the paths for more labels / larger N
 bin/bench_matrices bench/quick.txt     # the same with the N x N matrices (CARRY_MAX_W=0)
 bin/bench --node-limit 3000000 big.txt # time the first 3M nodes of larger instances
@@ -91,6 +92,23 @@ versa), plus:
   nodes with two rows and two columns placed, which forward checking lets
   through: 4x fewer nodes on `bench/full.txt`, and half the time with the
   carried bitsets below (30% less with the matrices);
+- cross support (n <= 6, when the children with two rows and two columns
+  placed are created): the column through an unmatched cell y of a placed
+  row is one of the candidate columns through y, and every remaining row
+  meets it, so a candidate row that misses the union of the candidate
+  columns through some row-unmatched cell is dropped, and vice versa. One
+  pass per axis, with the support filter's test folded in, before the
+  support filter: it kills most of these children, and nearly all of the
+  ones that the support filter let through and that were searched (with a
+  few children each, all dead). 41% fewer nodes and 9% less time on
+  `bench/full.txt`, 65% fewer nodes and 25-30% less time on
+  production-sized instances (N = 2000-3000, built with -march=native or
+  -march=cascadelake). With the carried bitsets, a pass builds the unions
+  8 cells at a time (8 entries of the other list: a test per cell and a
+  masked or per word, then one transposing reduction) and tests 8
+  candidates at a time against all of them; with the matrices it runs
+  only with AVX-512 and byte counters (39% fewer nodes, 19% less time on
+  `bench/full.txt`), elsewhere it cost more than it saved;
 - branching on the unmatched cell with the fewest candidates, ties broken by
   the smallest label; the counts are exact (saturating byte counters) with
   AVX-512BW and up to 256 labels, and

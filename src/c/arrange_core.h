@@ -33,6 +33,9 @@
 #define TRY_CHILD CAT(try_child, W)
 #define COVERED CAT(covered, W)
 #define IN_CLASS CAT(in_class, W)
+#define CROSS_AXIS CAT(cross_axis, W)
+#define CROSS_TEST CAT(cross_test, W)
+#define CROSS CAT(cross, W)
 
 /* the kind of label counters for this width (see arrange.c), and the number
  * of classes of counts used to pick the most constrained cell: exactly 1, 2,
@@ -47,6 +50,19 @@
 #if W <= CARRY_MAX_W
 #define CARRY 1
 #endif
+
+/* on the matrix path, the cross support filter (CROSS) pays off with the
+ * AVX-512 code below and byte counters (up to 256 labels), for n <= 6; in
+ * plain C, or with wider bitsets and bit-sliced counters, it cost ~10% more
+ * time than it saved, and for n = 7 (where the search dies further down)
+ * 10-25% more, so there it only runs when forced (opts.cross = 2, to test
+ * that code). With carried bitsets it runs for n <= 6 (n = 7: 7% fewer
+ * nodes, 33% more time). */
+#if defined(COUNT_BYTES) && defined(__BMI2__) && !defined(CARRY)
+#define CROSS_SIMD 1
+#endif
+/* the most cells y in a cross pass (2 (n - 2) for the (2,2) nodes) */
+#define CROSS_MAXY 16
 
 /*
  * Reading the label counts g = cnt[d][a] (CNT_WORDS * W words), for the
@@ -527,6 +543,331 @@ static int SUPPORT(sstate_t *s, int d, int a, int union_only) {
   return 0;
 }
 
+/*
+ * Cross support. Let y be an unmatched cell of a placed vector of axis f, a
+ * cell in no placed vector of the other axis h. In any completion of the
+ * node, y lies in one remaining vector of axis h, which is one of the
+ * candidates of axis h through y, and every remaining vector of axis f
+ * meets it. So a candidate of axis f that misses U_y, the union of the
+ * candidates of axis h through y, is in no completion.
+ *
+ * The support filter asks every cell of a candidate to be covered by a
+ * candidate of the other axis; this asks every candidate to cross each of
+ * the remaining vectors of the other axis, which the unmatched cells pin
+ * down to a few candidates each. It is a relaxation of "some candidate
+ * through y meets the candidate exactly once", which kills hardly more but
+ * needs a pairwise test. See TRY_CHILD for where it runs.
+ */
+#ifdef CARRY
+/*
+ * The test of a cross pass on carried lists: keeps the entries of
+ * fl[0..kf) that meet U_y for every cell y and are disjoint from bad
+ * (compressed in place, as KEEP_CARRY), sets un to their union and returns
+ * their number. Ub holds the U_y of ng groups of 8 cells, word w of U_y of
+ * cell 8 g + j at Ub[8 W g + 8 w + j]. 8 entries at a time: t_y = u & U_y
+ * (an and per word), and the entry is kept if the minimum of the t_y is
+ * nonzero.
+ */
+static inline __attribute__((always_inline)) uint32_t
+CROSS_TEST(const sstate_t *s, uint64_t *fl, uint32_t kf, const uint64_t *Ub,
+           const int ng, const uint64_t *bad, uint64_t *un /* [W] */) {
+  const size_t cap = s->cap;
+  __m512i acc[W], Bad[W];
+  for (int w = 0; w < W; w++) {
+    acc[w] = _mm512_setzero_si512();
+    Bad[w] = _mm512_set1_epi64((long long)bad[w]);
+  }
+  /* the list padded with empty sets, which fail every U_y (the lists have
+   * room), so that no lane mask is needed */
+  for (int w = 0; w < W; w++)
+    _mm512_storeu_si512(fl + w * cap + kf, _mm512_setzero_si512());
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < kf; i += 8) {
+    __m512i x[W];
+    for (int w = 0; w < W; w++)
+      x[w] = _mm512_loadu_si512(fl + w * cap + i);
+    __mmask8 keep = _mm512_testn_epi64_mask(x[0], Bad[0]);
+    for (int w = 1; w < W; w++)
+      keep = _mm512_mask_testn_epi64_mask(keep, x[w], Bad[w]);
+    for (int g = 0; g < ng; g++) {
+      __m512i t[8];
+      for (int j = 0; j < 8; j++) {
+        const uint64_t *u = Ub + 8 * W * g + j;
+        t[j] = _mm512_and_si512(x[0], _mm512_set1_epi64((long long)u[0]));
+        for (int w = 1; w < W; w++) /* t |= x & U */
+          t[j] = _mm512_ternarylogic_epi64(
+              t[j], x[w], _mm512_set1_epi64((long long)u[8 * w]), 0xF8);
+      }
+      /* (a tree of minimums, rather than a chain of masked tests: 2-5%
+       * faster) */
+      for (int j = 0; j < 4; j++)
+        t[j] = _mm512_min_epu64(t[j], t[j + 4]);
+      t[0] = _mm512_min_epu64(_mm512_min_epu64(t[0], t[2]),
+                              _mm512_min_epu64(t[1], t[3]));
+      keep = _mm512_mask_test_epi64_mask(keep, t[0], t[0]);
+    }
+    for (int w = 0; w < W; w++) {
+      __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
+      _mm512_storeu_si512(fl + w * cap + k, y);
+      acc[w] = _mm512_or_si512(acc[w], y);
+    }
+    k += (uint32_t)__builtin_popcount(keep);
+  }
+  for (int w = 0; w < W; w++)
+    un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
+  return k;
+}
+
+/*
+ * One cross pass on carried lists: drops the candidates of axis f that
+ * miss U_y for some unmatched cell y of the placed vectors of axis f, and
+ * those meeting bad (the support filter's test, for free), in place; sets
+ * uni[d][f] and nvalid[d][f], and returns the number of candidates left.
+ *
+ * The U_y are built 8 cells at a time: for 8 entries of the list of axis
+ * h = 1 - f, one test per cell y gives the entries through y, which are
+ * or-ed into that cell's accumulators (one per word); the 8 accumulators
+ * of a word are then reduced at once, lane j getting U_y of the j-th cell
+ * (or_lanes8). Then CROSS_TEST.
+ */
+static inline uint32_t CROSS_AXIS(sstate_t *s, int d, int f,
+                                  const uint64_t *bad) {
+  const int h = 1 - f;
+  const size_t cap = s->cap;
+  const uint64_t *Cf = s->cells[d][f], *Ch = s->cells[d][h];
+  uint64_t Y[W]; /* the cells y */
+  int ny = 0, nw[W]; /* nw[w]: cells in the words before w */
+  for (int w = 0; w < W; w++) {
+    Y[w] = Cf[w] & ~Ch[w];
+    nw[w] = ny;
+    ny += __builtin_popcountll(Y[w]);
+  }
+  const uint32_t kf = s->nvalid[d][f];
+  if (ny == 0 || ny > CROSS_MAXY)
+    return kf;
+  const int ng = (ny + 7) / 8;
+  /* all ones past the cells, which then pass */
+  uint64_t Ub[CROSS_MAXY * W] __attribute__((aligned(64)));
+  uint64_t *hl = s->vw[d][h];
+  const uint32_t kh = s->nvalid[d][h];
+  /* padded with empty sets, which are in no cell */
+  for (int w = 0; w < W; w++)
+    _mm512_storeu_si512(hl + w * cap + kh, _mm512_setzero_si512());
+  for (int g = 0; g < ng; g++) {
+    const uint64_t *base[8];
+    __m512i B[8], acc[8][W];
+#pragma GCC unroll 8
+    for (int j = 0; j < 8; j++) {
+      /* cell 8 g + j: its word w and bit (with pdep, no branch) */
+      const int c = 8 * g + j;
+      int w = 0;
+      for (int v = 1; v < W; v++)
+        w = c >= nw[v] ? v : w;
+      base[j] = hl + w * cap;
+      const uint64_t bit = _pdep_u64((uint64_t)1 << ((c - nw[w]) & 63), Y[w]);
+      B[j] = _mm512_set1_epi64(c < ny ? (long long)bit : 0);
+#pragma GCC unroll 8
+      for (int v = 0; v < W; v++)
+        acc[j][v] = _mm512_setzero_si512();
+    }
+    for (uint32_t i = 0; i < kh; i += 8) {
+      __m512i x[W];
+      for (int w = 0; w < W; w++)
+        x[w] = _mm512_loadu_si512(hl + w * cap + i);
+      for (int j = 0; j < 8; j++) {
+        const __mmask8 m =
+            _mm512_test_epi64_mask(_mm512_loadu_si512(base[j] + i), B[j]);
+        for (int w = 0; w < W; w++)
+          acc[j][w] = _mm512_mask_or_epi64(acc[j][w], m, acc[j][w], x[w]);
+      }
+    }
+    const __mmask8 pad =
+        ny - 8 * g >= 8 ? 0 : (__mmask8)(0xff << (ny - 8 * g));
+    for (int w = 0; w < W; w++) {
+      __m512i a[8];
+      for (int j = 0; j < 8; j++)
+        a[j] = acc[j][w];
+      _mm512_store_si512(Ub + 8 * W * g + 8 * w,
+                         _mm512_mask_set1_epi64(or_lanes8(a), pad, -1));
+    }
+  }
+  uint64_t *fl = s->vw[d][f];
+  uint64_t *un = s->uni[d][f];
+  /* (specialized for the common single group, whose U_y stay in
+   * registers) */
+  const uint32_t k = ng == 1 ? CROSS_TEST(s, fl, kf, Ub, 1, bad, un)
+                             : CROSS_TEST(s, fl, kf, Ub, ng, bad, un);
+  s->nvalid[d][f] = k;
+  return k;
+}
+
+/*
+ * Cross support on both axes, axis `first` first, each pass with the
+ * support filter's test against the current union of the other axis, and
+ * forward checking after each. Returns nonzero if the node is dead.
+ */
+static int CROSS(sstate_t *s, int d, int first) {
+  const int n = s->n;
+  for (int p = 0; p < 2; p++) {
+    const int f = p ? 1 - first : first;
+    const int h = 1 - f;
+    const uint64_t *Cf = s->cells[d][f], *Ch = s->cells[d][h];
+    uint64_t bad[W];
+    for (int w = 0; w < W; w++)
+      bad[w] = ~(Ch[w] | s->uni[d][h][w]);
+    const uint32_t k0 = s->nvalid[d][f];
+    const uint32_t k = CROSS_AXIS(s, d, f, bad);
+    if (k == k0)
+      continue;
+    if (s->np[f] + (int)k < n)
+      return 1;
+    /* forward checking: the cells that the f candidates cover */
+    uint64_t dead = 0;
+    for (int w = 0; w < W; w++)
+      dead |= Ch[w] & ~Cf[w] & ~s->uni[d][f][w];
+    if (dead)
+      return 1;
+  }
+  return 0;
+}
+
+#else /* !CARRY */
+
+/*
+ * One pass on lists of indices: drops the candidates of axis o = 1 - b that
+ * miss some U_y (y: the unmatched cells of the placed vectors of axis o),
+ * in place (counts not updated); returns nonzero if any was dropped.
+ */
+static int CROSS_AXIS(sstate_t *s, int d, int b) {
+  const int o = 1 - b;
+  const uint64_t *Co = s->cells[d][o], *Cb = s->cells[d][b];
+  uint64_t Y[W]; /* the cells y */
+  int ny = 0, off[W];
+  for (int w = 0; w < W; w++) {
+    Y[w] = Co[w] & ~Cb[w];
+    off[w] = ny; /* index of the first cell of word w among the cells */
+    ny += __builtin_popcountll(Y[w]);
+  }
+  if (ny == 0)
+    return 0;
+  const uint32_t *Lb = s->valid[d][b];
+  const uint32_t kb = s->nvalid[d][b];
+  uint32_t *Lo = s->valid[d][o];
+  const uint32_t ko = s->nvalid[d][o];
+  uint32_t kk = 0;
+#ifdef CROSS_SIMD
+  if (ny <= 16) {
+    /* lane j of U[w][z] is word w of U_y for the (8z + j)-th cell y. Each
+     * candidate of axis b is or-ed into the lanes of its cells of Y, which
+     * pext extracts from its bitset as a mask of cell indices; then each
+     * candidate of axis o is tested against all the U_y at once. */
+    __m512i U[W][2];
+    for (int w = 0; w < W; w++)
+      U[w][0] = U[w][1] = _mm512_setzero_si512();
+    for (uint32_t i = 0; i < kb; i++) {
+      const uint64_t *vb = s->bits + (uint64_t)Lb[i] * W;
+      uint32_t cm = 0;
+      for (int w = 0; w < W; w++)
+        cm |= (uint32_t)_pext_u64(vb[w], Y[w]) << off[w];
+      for (int w = 0; w < W; w++) {
+        /* broadcast from memory: a load, not a shuffle */
+        const __m512i x = _mm512_broadcastq_epi64(
+            _mm_loadl_epi64((const __m128i *)(vb + w)));
+        U[w][0] = _mm512_mask_or_epi64(U[w][0], (__mmask8)cm, U[w][0], x);
+        if (ny > 8)
+          U[w][1] =
+              _mm512_mask_or_epi64(U[w][1], (__mmask8)(cm >> 8), U[w][1], x);
+      }
+    }
+    const __mmask8 all0 = ny >= 8 ? 0xff : (__mmask8)((1u << ny) - 1);
+    const __mmask8 all1 = ny > 8 ? (__mmask8)((1u << (ny - 8)) - 1) : 0;
+    for (uint32_t i = 0; i < ko; i++) {
+      const uint32_t u = Lo[i];
+      const uint64_t *ub = s->bits + (uint64_t)u * W;
+      __m512i a0 =
+          _mm512_and_si512(U[0][0], _mm512_set1_epi64((long long)ub[0]));
+      for (int w = 1; w < W; w++) /* a0 |= U & u */
+        a0 = _mm512_ternarylogic_epi64(
+            U[w][0], _mm512_set1_epi64((long long)ub[w]), a0, 0xEA);
+      __mmask8 miss = _mm512_mask_testn_epi64_mask(all0, a0, a0);
+      if (ny > 8) {
+        __m512i a1 =
+            _mm512_and_si512(U[0][1], _mm512_set1_epi64((long long)ub[0]));
+        for (int w = 1; w < W; w++)
+          a1 = _mm512_ternarylogic_epi64(
+              U[w][1], _mm512_set1_epi64((long long)ub[w]), a1, 0xEA);
+        miss |= _mm512_mask_testn_epi64_mask(all1, a1, a1);
+      }
+      Lo[kk] = u;
+      kk += miss == 0;
+    }
+  } else
+#endif
+  {
+    uint64_t U[ny][W];
+    for (int j = 0; j < ny; j++)
+      for (int w = 0; w < W; w++)
+        U[j][w] = 0;
+    for (uint32_t i = 0; i < kb; i++) {
+      const uint64_t *vb = s->bits + (uint64_t)Lb[i] * W;
+      for (int w = 0; w < W; w++)
+        for (uint64_t m = vb[w] & Y[w]; m; m &= m - 1) {
+          /* index of the cell: number of cells before it */
+          const uint64_t below = (m & -m) - 1;
+          uint64_t *Uy = U[off[w] + __builtin_popcountll(Y[w] & below)];
+          for (int w2 = 0; w2 < W; w2++)
+            Uy[w2] |= vb[w2];
+        }
+    }
+    for (uint32_t i = 0; i < ko; i++) {
+      const uint32_t u = Lo[i];
+      const uint64_t *ub = s->bits + (uint64_t)u * W;
+      int ok = 1;
+      for (int j = 0; j < ny; j++) {
+        uint64_t hit = 0;
+        for (int w = 0; w < W; w++)
+          hit |= ub[w] & U[j][w];
+        ok &= hit != 0;
+      }
+      Lo[kk] = u;
+      kk += (uint32_t)ok;
+    }
+  }
+  s->nvalid[d][o] = kk;
+  return kk < ko;
+}
+
+/*
+ * Cross support on both axes (the col candidates first, which was slightly
+ * faster), with forward checking after each; recounts the lists that
+ * changed (only their unions if union_only). Returns nonzero if the node is
+ * dead.
+ */
+static int CROSS(sstate_t *s, int d, int union_only) {
+  const int n = s->n;
+  for (int b = ROW; b <= COL; b++) {
+    const int o = 1 - b;
+    if (!CROSS_AXIS(s, d, b))
+      continue;
+    if (s->np[o] + (int)s->nvalid[d][o] < n)
+      return 1;
+    uint64_t *go = s->cnt[d][o];
+    if (union_only)
+      UNION_LIST(s, s->valid[d][o], s->nvalid[d][o], go);
+    else
+      COUNT_LIST(s, s->valid[d][o], s->nvalid[d][o], go);
+    /* forward checking: the cells that the o candidates cover */
+    const uint64_t *Co = s->cells[d][o], *Cb = s->cells[d][b];
+    uint64_t dead = 0;
+    for (int w = 0; w < W; w++)
+      dead |= Cb[w] & ~Co[w] & ~COVERED(go, w);
+    if (dead)
+      return 1;
+  }
+  return 0;
+}
+#endif /* CARRY */
+
 static void SEARCH_REC(sstate_t *s, int d);
 
 /*
@@ -607,6 +948,14 @@ static inline void TRY_CHILD(sstate_t *s, int d, int b, const uint64_t *m,
     if (s->opts.forward_check)
       for (int w = 0; w < W; w++)
         dead |= ncell_o[w] & ~ncell_b[w] & ~ub[w];
+    /* with two rows and two cols placed, most children are dead, and cross
+     * support (with the support filter's test folded in) finds it faster
+     * than the support filter's cascade: on the o candidates first, which
+     * the support filter would also check first. Elsewhere, and after the
+     * support filter, it cost more than it saved (see research/ideas.md) */
+    if (!dead && sup && s->np[ROW] == 2 && s->np[COL] == 2 &&
+        (s->opts.cross > 1 || (s->opts.cross && n <= 6)))
+      dead = CROSS(s, d + 1, o);
     /* the b candidates are closed already, the o candidates may not be */
     if (!dead && sup)
       dead = SUPPORT(s, d + 1, o, 1);
@@ -667,6 +1016,17 @@ static inline void TRY_CHILD(sstate_t *s, int d, int b, const uint64_t *m,
     if (s->opts.forward_check)
       for (int w = 0; w < W; w++)
         dead |= ncell_o[w] & ~ncell_b[w] & ~COVERED(gb, w);
+    /* with two rows and two cols placed, most children are dead, and cross
+     * support finds it faster than the support filter, which needs several
+     * passes for it (and nearly always where the support filter does not);
+     * at the other nodes it cost more than it saved */
+#ifdef CROSS_SIMD
+    const int cross = s->opts.cross > 1 || (s->opts.cross && n <= 6);
+#else
+    const int cross = s->opts.cross > 1;
+#endif
+    if (!dead && sup && cross && s->np[ROW] == 2 && s->np[COL] == 2)
+      dead = CROSS(s, d + 1, lazy);
     /* the b candidates are closed already, the o candidates may not be */
     if (!dead && sup)
       dead = SUPPORT(s, d + 1, o, lazy);
@@ -817,6 +1177,10 @@ static void SEARCH_ROOT(sstate_t *s) {
 #undef TRY_CHILD
 #undef COVERED
 #undef IN_CLASS
+#undef CROSS_AXIS
+#undef CROSS_TEST
+#undef CROSS
+#undef CROSS_SIMD
 #undef COUNT_BYTES
 #undef CARRY
 #undef NCLASS
