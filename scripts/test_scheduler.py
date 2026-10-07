@@ -83,6 +83,36 @@ def test_fit_model():
     print("fit_model ok")
 
 
+def test_coverage():
+    """searched sums are tracked as ranges: a unit that stopped early (or a
+    --sums run) leaves a gap that is searched next, even when a later unit
+    of the same P finished"""
+    class FakePInfo:
+        def smin(self, P):
+            return 171
+    P = (10, 4, 3, 2)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "u.jsonl")
+        with open(path, "w") as f:
+            for r in ({"type": "sum", "S": 171}, {"type": "sum", "S": 172},
+                      {"type": "done", "min_sum": 171, "last_sum": 295, "complete": 0},
+                      {"type": "sum", "S": 350},
+                      {"type": "done", "min_sum": 350, "last_sum": 399, "complete": 1},
+                      {"type": "sum", "S": 450}):
+                f.write(json.dumps({"n": 6, "P": list(P), **r}) + "\n")
+        res = scheduler.Results(6)
+        res.add_file(path)
+        assert res.frontier(P, FakePInfo()) == 296, res.covered
+        assert res.next_covered(P, 296) == 350
+        res.mark_covered(P, 296, 349)
+        assert res.frontier(P, FakePInfo()) == 400
+        assert res.next_covered(P, 400) == 450
+        res.mark_covered(P, 400, 449)
+        assert res.frontier(P, FakePInfo()) == 451
+        assert res.next_covered(P, 451) is None
+    print("coverage ok")
+
+
 def test_commands():
     with tempfile.TemporaryDirectory() as state:
         # use the built-in default model
@@ -113,11 +143,13 @@ def test_commands():
         for line in out.split("\n")[1:]:
             if line.startswith("10 4 3 2 "):
                 lo = int(line.split()[4].split("-")[0])
-                assert lo > before.done_to.get((10, 4, 3, 2), 0), line
+                done = max(hi for lo_, hi in before.covered[(10, 4, 3, 2)])
+                assert lo > done, line
         print(f"commands ok ({len(units)} units, {sums} sums)")
 
 
 if __name__ == "__main__":
     test_fit_poisson()
     test_fit_model()
+    test_coverage()
     test_commands()

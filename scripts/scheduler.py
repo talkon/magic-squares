@@ -203,7 +203,11 @@ class Results:
         self.n = n
         self.sums = {}       # (P, S) -> sum record
         self.squares = {}    # hash -> square record
-        self.done_to = {}    # P -> all sums <= this have been searched
+        # P -> list of (lo, hi): ranges of sums known to be searched (a done
+        # record covers [min_sum, last_sum], a sum record its own S). Units
+        # of one P can run concurrently (plans run as job arrays) and stop
+        # early, so the searched sums need not be a prefix.
+        self.covered = {}
         self.legacy = {}     # P -> legacy aggregate (searched up to maxS)
 
     def add_file(self, path):
@@ -224,17 +228,31 @@ class Results:
                 P = norm_p(r["P"])
                 if r["type"] == "sum":
                     self.sums[(P, r["S"])] = r
-                    self.done_to[P] = max(self.done_to.get(P, 0), r["S"])
+                    self.covered.setdefault(P, []).append((r["S"], r["S"]))
                 elif r["type"] == "square":
                     r["P"] = P
                     self.squares[r["hash"]] = r
-                elif r["type"] == "done":
-                    self.done_to[P] = max(self.done_to.get(P, 0), r["last_sum"])
+                elif r["type"] == "done" and r["last_sum"] >= r["min_sum"]:
+                    self.covered.setdefault(P, []).append((r["min_sum"], r["last_sum"]))
 
     def frontier(self, P, pinfo):
-        """next sum to search for P"""
-        f = max(self.done_to.get(P, 0), self.legacy.get(P, {}).get("maxS", 0)) + 1
-        return max(f, pinfo.smin(P))
+        """next sum to search for P: the first one not covered, from S_min
+        (or past the legacy search's range)"""
+        f = max(pinfo.smin(P), self.legacy.get(P, {}).get("maxS", 0) + 1)
+        for lo, hi in sorted(self.covered.get(P, ())):
+            if lo > f:
+                break
+            f = max(f, hi + 1)
+        return f
+
+    def next_covered(self, P, S):
+        """the first covered sum > S (None if there is none), where a unit
+        starting at S has to stop"""
+        nxt = [lo for lo, hi in self.covered.get(P, ()) if lo > S]
+        return min(nxt) if nxt else None
+
+    def mark_covered(self, P, lo, hi):
+        self.covered.setdefault(P, []).append((lo, hi))
 
     def by_p(self):
         out = {}
@@ -693,10 +711,11 @@ class Scorer:
         predicted CPU time, semi-magic squares and magic squares; its score
         is the predicted magic squares per CPU-second"""
         lo = self.results.frontier(P, self.pinfo)
+        stop = self.results.next_covered(P, lo)  # fill a gap, don't redo
         counts = self.pinfo.counts(P, lo, lo + 200)
         total_t, total_sq, total_m, S = 0.0, 0.0, 0.0, lo
         hi = lo
-        while True:
+        while stop is None or S < stop:
             if S not in counts:
                 counts.update(self.pinfo.counts(P, S, S + 200))
             N = counts[S]
@@ -1036,7 +1055,7 @@ def simulate(sch, scorer, all_cands, unit_time, max_units=None, max_hours=None,
         hours += u.time / 3600
         i += 1
         started.add(u.P)
-        sch.results.done_to[u.P] = u.hi
+        sch.results.mark_covered(u.P, u.lo, u.hi)
         cache[u.P] = scorer.next_unit(u.P, unit_time)
 
 
