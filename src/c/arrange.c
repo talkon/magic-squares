@@ -187,6 +187,12 @@ typedef struct {
   square_cb cb;
   void *ctx;
   uint64_t nodes, squares;
+  /* where cross support runs (see TRY_CHILD in arrange_core.h): after the
+   * support filter (1) or before it (0); xs_n of the children where the
+   * support filter ran first (a decaying count), xs_k of them killed by
+   * it, and a counter to sample one child in 16 */
+  int cross_after;
+  uint32_t xs_tick, xs_n, xs_k;
   int stop;
 } sstate_t;
 

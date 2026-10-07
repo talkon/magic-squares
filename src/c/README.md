@@ -100,14 +100,17 @@ versa), plus:
   pass per axis, with the support filter's test folded in, before the
   support filter: it kills most of these children, and nearly all of the
   ones that the support filter let through and that were searched (with a
-  few children each, all dead). 41% fewer nodes and 9% less time on
+  few children each, all dead). Where the support filter alone kills
+  nearly all of these children, cross support is cheaper after it, on the
+  few it lets through, so the search estimates that kill rate as it goes
+  (on one child in 16) and switches. 41% fewer nodes and ~10% less time on
   `bench/full.txt`, 65% fewer nodes and 25-30% less time on
   production-sized instances (N = 2000-3000, built with -march=native or
   -march=cascadelake). With the carried bitsets, a pass builds the unions
   8 cells at a time (8 entries of the other list: a test per cell and a
   masked or per word, then one transposing reduction) and tests 8
   candidates at a time against all of them; with the matrices it runs
-  only with AVX-512 and byte counters (39% fewer nodes, 19% less time on
+  only with AVX-512 and byte counters (39% fewer nodes, 22% less time on
   `bench/full.txt`), elsewhere it cost more than it saved;
 - branching on the unmatched cell with the fewest candidates, ties broken by
   the smallest label; the counts are exact (saturating byte counters) with

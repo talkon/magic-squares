@@ -36,6 +36,7 @@
 #define CROSS_AXIS CAT(cross_axis, W)
 #define CROSS_TEST CAT(cross_test, W)
 #define CROSS CAT(cross, W)
+#define SUPPORT_AGAIN CAT(support_again, W)
 
 /* the kind of label counters for this width (see arrange.c), and the number
  * of classes of counts used to pick the most constrained cell: exactly 1, 2,
@@ -63,6 +64,15 @@
 #endif
 /* the most cells y in a cross pass (2 (n - 2) for the (2,2) nodes) */
 #define CROSS_MAXY 16
+/* TRY_CHILD is inlined into SEARCH_REC on the carried path (3-6% faster on
+ * bench/*.txt, with or without cross support; GCC stopped inlining it for
+ * W = 3 when cross support was added, 5% slower there), not with the
+ * matrices (7% slower with W = 2) */
+#ifdef CARRY
+#define TRY_CHILD_INLINE __attribute__((always_inline))
+#else
+#define TRY_CHILD_INLINE
+#endif
 
 /*
  * Reading the label counts g = cnt[d][a] (CNT_WORDS * W words), for the
@@ -868,6 +878,15 @@ static int CROSS(sstate_t *s, int d, int union_only) {
 }
 #endif /* CARRY */
 
+#ifdef CARRY
+/* (a separate function, so that the main call of SUPPORT in TRY_CHILD is
+ * inlined as before) */
+static __attribute__((noinline)) int SUPPORT_AGAIN(sstate_t *s, int d,
+                                                   int a) {
+  return SUPPORT(s, d, a, 1);
+}
+#endif
+
 static void SEARCH_REC(sstate_t *s, int d);
 
 /*
@@ -876,8 +895,9 @@ static void SEARCH_REC(sstate_t *s, int d);
  * to indices >= min_v. When the lists carry their bitsets, the vectors are
  * identified by their bitsets alone, and v is unused.
  */
-static inline void TRY_CHILD(sstate_t *s, int d, int b, const uint64_t *m,
-                             uint32_t v, uint32_t min_v) {
+static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+                                            const uint64_t *m, uint32_t v,
+                                            uint32_t min_v) {
   const int n = s->n;
   s->nodes++;
   if (s->opts.node_limit && s->nodes > s->opts.node_limit) {
@@ -951,14 +971,42 @@ static inline void TRY_CHILD(sstate_t *s, int d, int b, const uint64_t *m,
     /* with two rows and two cols placed, most children are dead, and cross
      * support (with the support filter's test folded in) finds it faster
      * than the support filter's cascade: on the o candidates first, which
-     * the support filter would also check first. Elsewhere, and after the
-     * support filter, it cost more than it saved (see research/ideas.md) */
-    if (!dead && sup && s->np[ROW] == 2 && s->np[COL] == 2 &&
-        (s->opts.cross > 1 || (s->opts.cross && n <= 6)))
-      dead = CROSS(s, d + 1, o);
+     * the support filter would also check first. That is, where the support
+     * filter alone lets many of them through: where it kills nearly all of
+     * them, cross support is cheaper after it, on the few that it lets
+     * through (4-8% less time than before it on P = 16 5 4 2, S = 1200,
+     * where the support filter kills 98% of these children, but ~8% more
+     * on production-sized instances, where it kills about half). So the
+     * search estimates that kill rate as it goes: one child in 16 (all of
+     * them in the "after" mode) runs the support filter first, and the
+     * mode is "after" when it killed more than 3/4 of the last ~256 of
+     * those. Elsewhere than at the (2,2) children, cross support cost more
+     * than it saved (see research/ideas.md). */
+    const int cross = sup && s->np[ROW] == 2 && s->np[COL] == 2 &&
+                      (s->opts.cross > 1 || (s->opts.cross && n <= 6));
+    int after = 0; /* cross support after the support filter */
+    if (!dead && cross) {
+      after = s->cross_after || (++s->xs_tick & 15) == 0;
+      if (!after)
+        dead = CROSS(s, d + 1, o);
+    }
     /* the b candidates are closed already, the o candidates may not be */
     if (!dead && sup)
       dead = SUPPORT(s, d + 1, o, 1);
+    if (after) {
+      s->xs_k += dead != 0;
+      if (++s->xs_n == 256) {
+        s->cross_after = s->xs_k > 192;
+        s->xs_n = 128; /* (decay) */
+        s->xs_k /= 2;
+      }
+      if (!dead) {
+        const uint32_t k0 = s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
+        dead = CROSS(s, d + 1, o);
+        if (!dead && s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL] < k0)
+          dead = SUPPORT_AGAIN(s, d + 1, o);
+      }
+    }
     if (!dead) {
       /* the child survives: count the labels of its lists, for the cells
        * each list covers (the unmatched cells of the other axis); only
@@ -1180,6 +1228,8 @@ static void SEARCH_ROOT(sstate_t *s) {
 #undef CROSS_AXIS
 #undef CROSS_TEST
 #undef CROSS
+#undef SUPPORT_AGAIN
+#undef TRY_CHILD_INLINE
 #undef CROSS_SIMD
 #undef COUNT_BYTES
 #undef CARRY

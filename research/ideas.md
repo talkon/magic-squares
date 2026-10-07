@@ -290,3 +290,162 @@ vectors but only 0.2% of the nodes (the search discards those vectors at
 the first level anyway) and costs more than it saves (first unit: 0.30 s
 of setup + reduction instead of 0.08 s before this change), so it stays
 off.
+
+## Stronger pruning on top of the support filter (October 2026)
+
+(Measured on the matrix path, before the candidate lists carried their
+bitsets, on branch `opt/stronger-pruning`; for the carried lists see the
+next section.)
+
+Where the work is with the support filter (`bench/full.txt`, 26.0M nodes;
+"(r,c)" = rows and cols placed): creating the (2,2) children of the (1,2)
+and (2,1) nodes is ~60% of the time (13.2M children, 80% pruned, mostly by
+the support cascade, ~900 cycles each), and the (2,3)/(3,2) children of
+the surviving (2,2) nodes ~15% (10.4M children, all pruned, ~250 cycles
+each). Kill rates below are of the searched (2,2) nodes on P = 13 6 3 2,
+S = 561 or 699 unless noted, each followed by the support filter.
+
+* Pair support (PS): every cell of a candidate outside the placed vectors
+  of the other axis lies in a candidate of the other axis meeting it
+  exactly once. Iterated: 98% of (2,2) killed, -29% nodes; one pass on
+  both axes 93%, on one axis 80% (-24% nodes); at (1,2)/(2,1) -16..20%
+  nodes. Even with label -> candidate-mask tables (T[x] = 64-bit mask of
+  the other list) it costs ~1500 cycles per node: 20% slower overall.
+* Count-1 rule (a number in exactly one candidate u of the other axis:
+  candidates through it must meet u once): iterated 96% at (2,2), one
+  pass 83%; -10% nodes at (1,2)/(2,1). Needs per-label lookups like PS.
+* One-axis exact cover (the n - r rows must be disjoint): 17% at (2,2),
+  -2.5% nodes. Same-axis pair support (candidates disjoint from v must
+  cover the cells v does not): 73% at (2,2), -17% nodes, pairwise. A count
+  of free numbers covered by both axes (>= (n-r)(n-c)): never fires.
+* Static pair consistency (drop pairs of vectors whose 2-vector node dies
+  under forward checking + support, with all vectors as candidates):
+  removes thousands of pairs but only 0.2% of the nodes.
+* Branch support: exactly one child through the branching cell is in any
+  completion, so the other axis must meet some child once and the same
+  axis must be disjoint from some child (unions of inters rows), then the
+  support filter. 58-70% of (2,2) killed, -25..36% nodes, but ~800 cycles
+  per node: no gain in time. At (1,2) only 4-10% killed.
+* Cell support: for every unmatched cell y, the other axis must meet some
+  candidate through y exactly once: 99.96% of (2,2) killed (93% even
+  without the support filter after it); at (1,2)/(2,1) 20%/29%.
+* Cross support (kept, `CROSS` in arrange_core.h): the >= 1 relaxation of
+  cell support, "a candidate must meet the union of the candidates of the
+  other axis through each unmatched cell", needs only bitset ANDs: 99.7%
+  of (2,2) killed (85% without the support filter). Applied at searched
+  (2,2) nodes it removes the (2,3)/(3,2) layer (-39% nodes, -9% time);
+  applied to the (2,2) children before the support filter, where it kills
+  70-90% in one pass per axis, the support cascade runs 7-10x less often:
+  -19% time on `full.txt`, -7% on `quick.txt` (fewer (2,3)/(3,2) nodes
+  there). Cost ~350-500 cycles per call with AVX-512 (pext to the cells'
+  lanes, masked ORs, one test per candidate). Not kept: at (1,2)/(2,1)
+  nodes (kills 12-21%, costs ~1600 cycles: slower), at the (1,3)/(3,1)/
+  (2,3)/(3,2) children (no gain), with 8 words of labels (bit-sliced
+  counters: 10% slower), in plain C / AVX2 (10% slower), and for n = 7
+  (P = 12 6 3 2 1, S = 290..380: 6% fewer nodes but 25% slower; the 7x7
+  search dies further down). Gains vary with the instance: -64% nodes and
+  -30% time on P = 12 6 3 2 1 0 1, S = 900 (N = 2994, 18 squares), but
+  only -5% nodes and no gain on P = 16 5 4 2, S = 1200, where the support
+  filter already kills 98% of the (2,2) children.
+* Cheaper cross support (none kept): fusing the two cross passes into the
+  child's filtering passes (unions of the new o candidates built with their
+  union, b candidates tested while filtered) was slower, as both halves
+  then always run (the first one alone kills about half); a byte table
+  (label -> cells) looked up with vpermi2b for 8 candidates at a time made
+  the test ~3% cheaper per call, not measurable overall; iterating cross
+  and support, cross after the support filter, or rows first: no gain.
+  Unions over the parent's list (shared by the ~6 siblings): only 6% of
+  the children killed (31% when that list is first filtered by
+  disjointness from the new vector, which is the child's own work).
+
+## Cross support on the carried bitsets (October 2026)
+
+Cross support (above) ported to the candidate lists that carry their
+bitsets (AVX-512BW, up to 256 labels: production), and re-tuned there,
+since not all of the conclusions on the matrix path carried over: on the
+carried lists the support filter is a cheap vectorized test of
+contiguous words, and so are the (2,3)/(3,2) children that cross support
+removes. Min of alternating runs on the shared Sapphire Rapids machine
+(3-5% noise, often thread CPU time to cut it); "prod" = P = 13 6 3 2 1 1,
+S = 905, P = 12 7 4 2 1, S = 900 and P = 12 6 3 2 1 0 1, S = 900 (N =
+2161-2994, 106-121 labels).
+
+Implementation (`CROSS_AXIS`, `CROSS_TEST`): for each group of 8 unmatched
+cells, 8 entries of the other list at a time, a test per cell (the entries
+through it) and a masked or per word into that cell's accumulator, then one
+transposing or-reduction of the 8 accumulators of a word (`or_lanes8`: lane
+j = U_y of cell j). Then 8 candidates at a time, t_y = u & U_y (an and per
+word) for every cell, kept if the minimum of the t_y is nonzero (a tree of
+vpminuq; a chain of masked tests was 2-5% slower per call), and the
+support filter's test folded in for free; compressed in place. The lists
+are padded with empty sets, so there are no lane masks. In a replay
+harness over dumped (2,2) states: ~250-300 cycles per call (two passes,
+unless the first one kills) on `full.txt` (lists of ~35 entries), ~400 on
+prod (~47): building the unions ~60%, the test ~40%. The setup was not
+unrolled at first (accumulators spilled and reloaded): -4% per call;
+padding instead of lane masks: -1..3%; the cell list with pdep instead of
+a loop: no change.
+
+Where it runs, at the (2,2) children (`full.txt` with e9a0540: 25.2M
+nodes, 4.3 s; prod 91.6M nodes, 13.6 s):
+
+* Room: skipping (wrongly) every (2,2) child that survives the support
+  filter saves 14% of the time on `full.txt` and 37% on prod; no filter of
+  that layer can save more.
+* The branch's placement (before the support filter, cols first, no
+  support test in the passes): -40% nodes but only -1% time on `full.txt`
+  (10.4M calls at ~570 cycles). After the support filter, on its 2.6M
+  survivors: -34% nodes, -3%; and then the support filter again when cross
+  support dropped something: -41% nodes, -3..5% (prod -9..16%). Before the
+  support filter with its test folded into each pass: -5% / -17%; with the
+  pass on the axis that the support filter checks first (o, not the axis
+  of the vector just placed) first: -6% / -20%; with the micro-
+  optimizations above: -9% / -25..30%.
+* But where the support filter alone kills nearly all the (2,2) children
+  (P = 16 5 4 2, S = 1200, 133 labels: 98%), running cross support on all
+  of them first costs more (+10-14%, part of it the inlining below) than the
+  few searched (2,2) nodes it saves, while after the support filter it is
+  nearly free. Before is better where the support filter kills about half of
+  them (prod: 46%; ~8% faster than after), and the two are equal on
+  `full.txt` (75%). So the mode adapts (`cross_after`): one (2,2) child in
+  16 runs the support filter first, and once it has killed more than 3/4 of
+  the last ~256 of those, all of them do (and measure it). Same time as
+  "before" on `full.txt` and prod (it stays mostly before there), 4-8% less
+  than "before" on P = 16 5 4 2, 1-4% less on `quick.txt`. Thresholds 5/8,
+  3/4 and 7/8: within noise on `full.txt`.
+* Not kept: also at the (1,2)/(2,1) children (12% fewer (2,2) children,
+  but 10-15% more time, before or after the support filter); at the
+  (2,3)/(3,2) or (1,3)/(3,1) children (no gain); one pass only, on either
+  axis (+5-7%: with the support filter after it, 85% of the children
+  killed instead of 98%); the support cascade between the two passes (more
+  kills, ~3% slower); rows first (same); n = 7 (P = 12 6 3 2 1, S =
+  352-355: -7% nodes, +33% time, so n <= 6 by default as on the matrix
+  path).
+* Kill structure (dumped states): about half of the candidates tested in a
+  pass miss some U_y, spread over cells with 1 to ~20 candidates of the
+  other axis through them, so testing only the cells with few candidates
+  would lose most of the kills (and building the unions is the larger
+  part anyway). 55% of the children that a pass kills die by count (fewer
+  candidates than vectors still to place), the rest by forward checking.
+* Inlining: with cross support, GCC no longer inlined TRY_CHILD into
+  SEARCH_REC for W = 3 (+5% on P = 16 5 4 2, also with --no-cross). Forcing
+  it on the carried path is faster for W = 2 too, also on e9a0540 alone
+  (`quick.txt` -6%, `full.txt` -3%, prod no change), but 7% slower with the
+  matrices (-DCARRY_MAX_W=0), where it is not forced.
+* W = 3 / 4 (`--min-words`): -2..5% / no change on `full.txt`.
+
+Result (bench wall time, min of alternating runs; e9a0540 -> this):
+
+| | nodes | -march=native | -march=cascadelake |
+| --- | ---: | ---: | ---: |
+| `quick.txt` | 1.94M -> 1.77M | 0.324 -> 0.303 s | 0.363 -> 0.340 s |
+| `full.txt` | 25.2M -> 15.0M | 4.33 -> 3.71 s | 4.98 -> 4.16 s |
+| P = 13 6 3 2 1 1, S = 905 | 14.4M -> 5.6M | 2.14 -> 1.62 s | 2.33 -> 1.78 s |
+| P = 12 7 4 2 1, S = 900 | 18.2M -> 7.0M | 2.52 -> 1.92 s | 2.86 -> 2.16 s |
+| P = 12 6 3 2 1 0 1, S = 900 | 59.1M -> 19.8M | 9.05 -> 6.93 s | 10.08 -> 7.35 s |
+| P = 16 5 4 2, S = 1200 | 3.62M -> 3.44M | 0.93 -> 0.95 s | 1.09 -> 1.07 s |
+
+Of this, the forced inlining is ~6% on `quick.txt` and ~3% on `full.txt`
+(e9a0540 with it: 0.302 s, 4.15 s), nothing on prod. On the matrix path
+(-DCARRY_MAX_W=0, byte counters), the branch's code as it was: `quick.txt`
+-6%, `full.txt` -22% (8.15 -> 6.37 s CPU).
