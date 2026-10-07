@@ -72,6 +72,12 @@ versa), plus:
 - vectors are bitsets over labels (only ~50-200 distinct numbers per (P, S)),
   so the placed cells, unmatched cells and candidate counts are a few bitwise
   operations;
+- the search is split by the largest label x of the square (r1 and c1 go
+  through x, every other vector has only labels < x), and the labels are a
+  degeneracy order: the largest label goes to the rarest number, the next one
+  to the rarest number among the vectors left without it, and so on, so that
+  each x is rare in its own part of the search (3% fewer nodes than labels by
+  plain frequency on `bench/full.txt`, 6% on `bench/quick.txt`);
 - forward checking: a node is pruned as soon as some unmatched cell has no
   remaining candidate through it;
 - support filter: every cell of a candidate column must lie in a placed row
@@ -82,8 +88,8 @@ versa), plus:
   through: 4x fewer nodes on `bench/full.txt`, and half the time with the
   carried bitsets below (30% less with the matrices);
 - branching on the unmatched cell with the fewest candidates, ties broken by
-  the smallest label (the most frequent number); the counts are exact
-  (saturating byte counters) with AVX-512BW and up to 256 labels, and
+  the smallest label; the counts are exact (saturating byte counters) with
+  AVX-512BW and up to 256 labels, and
   bit-sliced otherwise (exact up to 7 with AVX-512, 3 in plain C);
 - the axis whose cells usually lose all candidates is filtered first, so
   most dead children are discarded after one pass; the forward check and the

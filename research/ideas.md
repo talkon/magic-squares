@@ -184,3 +184,51 @@ Variants that did not pay off (min of alternating runs, `bench/quick.txt`):
   4: 0.719-0.746, 5: 0.879, never: 0.916; AVX2 build (plain C, 4 slices):
   1: 1.356, 2: 1.302, 3: 1.334, 4: 1.347, 5: 1.607, never: 1.579. 2-4 are
   within noise, so it stays 4.
+
+## Label order and root strategy (October 2026)
+
+The search finds each square from its largest label x (r1 and c1 go through
+x, every other vector has only labels < x), so the label order decides how
+the search is split into one subproblem per number. On `bench/full.txt` the
+work is spread over many r1 (the top 100 r1 hold 20-40% of the nodes) and
+over the 20-30 rarest anchors, whose subproblems keep most of the vectors
+(85-95% on the largest instance); nearly all nodes are 4-5 vectors deep.
+
+* Degeneracy order (kept): the largest label goes to the rarest number, the
+  next to the rarest among the vectors left without it, etc. 2-8% fewer
+  nodes on every instance (quick 2.07M -> 1.94M, full 26.0M -> 25.2M, the
+  largest instance only 2%), ~2% less time on `full.txt`.
+* Other label orders, nodes on `quick.txt` relative to plain frequency:
+  ties by larger value -0.4%; frequency ascending +43%; random +29%; number
+  of distinct co-occurring numbers +6% (degeneracy version +3%); pairs of
+  vectors meeting exactly at x +0.3% (degeneracy version -5%). Variants of
+  the degeneracy order are all within 0.5% of it (-6.3%): other tie-breaks,
+  counting only the vectors with a partner meeting them exactly at x, or
+  also removing, after each step, the vectors that can no longer be in a
+  square (a cell with no vector meeting it exactly there, or fewer than
+  n - 1 disjoint vectors).
+* Upper bound for orders: a local search over label orders (moving a number
+  up to 12 places, keeping improvements, one search per step) found only
+  2.7% (S = 506) and 3.8% (S = 561) fewer nodes than the degeneracy order.
+* Vector orders that are not by label (r1 = first vector of the square in a
+  greedy order, e.g. fewest partners through its most constrained cell):
+  -3.6% at best, worse than the label blocks, where c1 shares the rare
+  anchor with r1.
+* Depth 1: always branching on the anchor x (choosing c1 right after r1):
+  +1.7% nodes with labels by frequency, +0.1% with the degeneracy order (MRV
+  picks x for ~75% / ~95% of the r1 anyway).
+* Shrinking each anchor's universe by the reduction rules before searching
+  it: -0.04% nodes (forward checking and the support filter catch the same).
+* One-step lookahead at shallow depths (the cell with the fewest children
+  that survive their creation, instead of the fewest candidates): more
+  nodes (+0.1% at depth 1, +3% to depth 2, 3x to depth 3).
+* The one-axis feasibility check (see above) near the root, where it could
+  afford to be slow: it kills 3-13% / 0.4-4% / 2-20% of the searched nodes
+  at depths 1 / 2 / 3 (all but the smallest instance of `quick.txt`), but
+  those die within ~2-5 nodes anyway (2% fewer nodes on S = 517). The nodes that cost are the ones that look alive for a few
+  more levels.
+* Pairwise support (see above) only near the root: -2% nodes when applied
+  up to depth 2, -26% up to depth 3. The naive version (a pass over the other
+  list per candidate) is 10-75x slower; even vectorized (filter the other
+  list by the candidate's inters1 row, then a union) it would take a few
+  microseconds per depth-3 node, against ~0.4 us of nodes saved per node.

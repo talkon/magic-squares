@@ -702,8 +702,9 @@ static void SEARCH_REC(sstate_t *s, int d) {
   const uint64_t *gr = s->cnt[d][COL], *gc = s->cnt[d][ROW];
 
   /* branch on the unmatched cell with the fewest candidates (exactly 1, 2,
-   * ..., or >= NCLASS), ties broken by the smallest label (the most frequent
-   * number; ~0.5% fewer nodes than the largest). Among cells with >= NCLASS
+   * ..., or >= NCLASS), ties broken by the smallest label (a common number;
+   * ~0.5% fewer nodes than the largest with labels by plain frequency, the
+   * same with those of assign_labels). Among cells with >= NCLASS
    * candidates, and without MRV, by the largest label instead, which is a
    * much better stand-in for the fewest candidates there (with 8 bit-sliced
    * classes, the smallest label gives 4x more nodes). */
@@ -777,7 +778,12 @@ static void SEARCH_REC(sstate_t *s, int d) {
 }
 
 /* the first row r1 is the lowest-index vector of the square, so it contains
- * the square's largest label; every other vector has index > r1 */
+ * the square's largest label x (as does c1, the col through x); every other
+ * vector has index > r1, so labels < x (see assign_labels in arrange.c).
+ * MRV branches on x at depth 1 for ~95% of the r1 that survive; always
+ * branching on x there (choosing c1 right after r1) is no better (+0.1%
+ * nodes; +2% with labels by plain frequency, where MRV picks x ~75% of the
+ * time). */
 static void SEARCH_ROOT(sstate_t *s) {
   s->nodes = 1;
   uint32_t count = s->N;

@@ -1,10 +1,12 @@
 /*
  * Arrangement search, label-bitset version.
  *
- * Every vector is a bitset over labels (labels are the distinct numbers in
- * the vectors, most frequent first). For one (P, S) there are typically only
- * 50-200 labels, so a vector fits in a few machine words, and all of the
- * bookkeeping of the search is done with a handful of bitwise operations:
+ * Every vector is a bitset over labels (labels number the distinct numbers
+ * in the vectors, roughly the most frequent first: see assign_labels, which
+ * also explains how the search is split between the labels). For one
+ * (P, S) there are typically only 50-200 labels, so a vector fits in a few
+ * machine words, and all of the bookkeeping of the search is done with a
+ * handful of bitwise operations:
  *
  *   rowcells / colcells   = union of the placed rows / cols
  *   row-unmatched cells   = rowcells & ~colcells   (need a col through them)
@@ -437,16 +439,77 @@ void prof_print(void) {
 /* ---------------------------------------------------------------------- */
 /* setup                                                                   */
 
-typedef struct {
-  uint64_t val;
-  uint32_t freq;
-} vf_t;
-
-static int vf_cmp(const void *a, const void *b) {
-  const vf_t *x = a, *y = b;
-  if (x->freq != y->freq)
-    return (x->freq < y->freq) - (x->freq > y->freq); /* most frequent first */
-  return (x->val > y->val) - (x->val < y->val);
+/*
+ * The labels (the order of the numbers). The search finds every square from
+ * its largest label x: r1 and c1 are the row and col through x, and all the
+ * other vectors have only labels < x (see SEARCH_ROOT). So it is one
+ * subproblem per number x, over the vectors whose numbers all have labels
+ * <= x, and the order decides how the squares (and the dead ends) are split
+ * between the subproblems. A subproblem is cheap when x is in few of its
+ * vectors: few choices of r1, few cols through x for each (MRV then nearly
+ * always branches on x first), so the rarest numbers get the largest labels.
+ *
+ * Rarest where it matters, though: in the subproblem of x, the vectors
+ * through larger labels are gone. So the labels are assigned from the
+ * largest down, each to the number in the fewest of the vectors not yet
+ * removed, and then its vectors are removed (a degeneracy order). The
+ * rarest numbers overall still come first, but a number whose vectors
+ * mostly go with rarer numbers moves down. Ties: rarer overall, then the
+ * larger number, get the larger label (as in the plain frequency order this
+ * replaces). 2-8% fewer nodes than the plain frequency order on every
+ * instance of bench/quick.txt and bench/full.txt (6% and 3% in total, 2% on
+ * the largest instance). Other orders, also relative to plain frequency on
+ * bench/quick.txt: by the number of distinct numbers sharing a vector with
+ * x, +6% nodes (as a degeneracy order +3%); by the pairs of vectors meeting
+ * exactly at x, +0.3% (as a degeneracy order -5%); frequency ascending,
+ * +43%; random, +29%. A local search over orders, running the search for
+ * each, found only 3-4% fewer nodes than this one.
+ *
+ * vals[0..L) are the distinct numbers (ascending) and rk[v * n + p] is the
+ * rank in vals of number p of vector v; sets lab_of[rank]. O(L^2 + n count).
+ */
+static void assign_labels(int n, size_t count, size_t L, const uint32_t *rk,
+                          uint32_t *lab_of) {
+  /* the vectors through each number (CSR) */
+  uint32_t *first = calloc(L + 1, sizeof(uint32_t));
+  for (size_t i = 0; i < count * n; i++)
+    first[rk[i] + 1]++;
+  for (size_t x = 0; x < L; x++)
+    first[x + 1] += first[x];
+  uint32_t *occ = malloc(count * n * sizeof(uint32_t));
+  uint32_t *live = malloc(L * sizeof(uint32_t)); /* fill pointers for now */
+  memcpy(live, first, L * sizeof(uint32_t));
+  for (size_t v = 0; v < count; v++)
+    for (int p = 0; p < n; p++)
+      occ[live[rk[v * n + p]]++] = (uint32_t)v;
+  /* freq: vectors through the number; live: those not yet removed */
+  uint32_t *freq = malloc(L * sizeof(uint32_t));
+  for (size_t x = 0; x < L; x++)
+    freq[x] = live[x] = first[x + 1] - first[x];
+  uint8_t *removed = calloc(count, 1), *done = calloc(L, 1);
+  for (size_t lab = L; lab-- > 0;) {
+    size_t b = L; /* the rarest number left; ranks ascend with the numbers */
+    for (size_t x = 0; x < L; x++)
+      if (!done[x] && (b == L || live[x] < live[b] ||
+                       (live[x] == live[b] && freq[x] <= freq[b])))
+        b = x;
+    done[b] = 1;
+    lab_of[b] = (uint32_t)lab;
+    for (uint32_t k = first[b]; k < first[b + 1]; k++) {
+      uint32_t v = occ[k];
+      if (removed[v])
+        continue;
+      removed[v] = 1;
+      for (int p = 0; p < n; p++)
+        live[rk[v * n + p]]--;
+    }
+  }
+  free(first);
+  free(occ);
+  free(live);
+  free(freq);
+  free(removed);
+  free(done);
 }
 
 static int u64_cmp(const void *a, const void *b) {
@@ -481,47 +544,25 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   s.cb = cb;
   s.ctx = ctx;
 
-  /* distinct values, by decreasing frequency */
+  /* distinct values (ascending), and the rank of every element among them */
   size_t ne = count * n;
   uint64_t *vals = malloc(ne * sizeof(uint64_t));
   memcpy(vals, vec_list_get(l, start), ne * sizeof(uint64_t));
   qsort(vals, ne, sizeof(uint64_t), u64_cmp);
-  vf_t *vf = malloc(ne * sizeof(vf_t));
   size_t L = 0;
-  for (size_t i = 0; i < ne; i++) {
-    if (i == 0 || vals[i] != vals[i - 1]) {
-      vf[L].val = vals[i];
-      vf[L].freq = 0;
-      L++;
-    }
-    vf[L - 1].freq++;
+  for (size_t i = 0; i < ne; i++)
+    if (i == 0 || vals[i] != vals[i - 1])
+      vals[L++] = vals[i];
+  if (L > 64 * 64) {
+    /* would need wider bitsets; not expected for realistic inputs */
+    free(vals);
+    st.num_labels = (int)L;
+    st.truncated = 1;
+    return st;
   }
-  /* vals[0..L) = distinct values ascending, vf[0..L) same order for now */
-  for (size_t i = 0; i < L; i++)
-    vals[i] = vf[i].val;
-  qsort(vf, L, sizeof(vf_t), vf_cmp);
-  s.L = (uint32_t)L;
-  s.label_val = malloc((L + 1) * sizeof(uint64_t));
-  uint32_t *val_to_lab = malloc(L * sizeof(uint32_t)); /* by rank in vals */
-  for (size_t i = 0; i < L; i++) {
-    s.label_val[i] = vf[i].val;
-    size_t lo = 0, hi = L;
-    while (lo < hi) {
-      size_t mid = (lo + hi) / 2;
-      if (vals[mid] < vf[i].val)
-        lo = mid + 1;
-      else
-        hi = mid;
-    }
-    val_to_lab[lo] = (uint32_t)i;
-  }
-  s.label_val[L] = 0;
-
-  s.lab = malloc(count * sizeof(*s.lab));
+  uint32_t *rk = malloc(ne * sizeof(uint32_t));
   for (size_t v = 0; v < count; v++) {
     const uint64_t *vec = vec_list_get(l, start + v);
-    for (int p = 0; p < 8; p++)
-      s.lab[v][p] = (uint16_t)L;
     for (int p = 0; p < n; p++) {
       size_t lo = 0, hi = L;
       while (lo < hi) {
@@ -531,13 +572,32 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
         else
           hi = mid;
       }
-      uint16_t x = (uint16_t)val_to_lab[lo];
+      rk[v * n + p] = (uint32_t)lo;
+    }
+  }
+  uint32_t *lab_of = malloc(L * sizeof(uint32_t)); /* by rank in vals */
+  assign_labels(n, count, L, rk, lab_of);
+  s.L = (uint32_t)L;
+  s.label_val = malloc((L + 1) * sizeof(uint64_t));
+  for (size_t i = 0; i < L; i++)
+    s.label_val[lab_of[i]] = vals[i];
+  s.label_val[L] = 0;
+
+  s.lab = malloc(count * sizeof(*s.lab));
+  for (size_t v = 0; v < count; v++) {
+    for (int p = 0; p < 8; p++)
+      s.lab[v][p] = (uint16_t)L;
+    for (int p = 0; p < n; p++) {
+      uint16_t x = (uint16_t)lab_of[rk[v * n + p]];
       int b = p; /* insertion sort, descending */
       for (; b > 0 && s.lab[v][b - 1] < x; b--)
         s.lab[v][b] = s.lab[v][b - 1];
       s.lab[v][b] = x;
     }
   }
+  free(rk);
+  free(lab_of);
+  free(vals);
   lab_cmp_n = n;
   /* sort by descending labels: the vector with the largest label first */
   qsort(s.lab, count, sizeof(*s.lab), lab_cmp);
@@ -550,17 +610,6 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
            : Lw <= 512  ? 8
            : Lw <= 1024 ? 16
                         : 64;
-  if (L > 64 * 64) {
-    /* would need wider bitsets; not expected for realistic inputs */
-    free(vals);
-    free(vf);
-    free(val_to_lab);
-    free(s.lab);
-    free(s.label_val);
-    st.num_labels = (int)L;
-    st.truncated = 1;
-    return st;
-  }
   s.bits = calloc((count + 1) * W_ + 8, sizeof(uint64_t));
   for (size_t v = 0; v < count; v++)
     for (int p = 0; p < n; p++)
@@ -694,8 +743,5 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   free(s.bits);
   free(s.lab);
   free(s.label_val);
-  free(val_to_lab);
-  free(vals);
-  free(vf);
   return st;
 }
