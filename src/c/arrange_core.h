@@ -75,22 +75,27 @@ static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint32_t *in,
   uint32_t k = filter_list(in, cnt, row, min_v, s->nseg, out);
 #ifdef COUNT_BYTES
   /* 4 vectors per iteration (fewer iterations, so fewer mispredicted loop
-   * exits), padding the list with the empty vector N */
+   * exits), padding the list with the empty vector N. With W = 2, even and
+   * odd entries go to separate counters, which halves the chain of dependent
+   * adds (5% faster; no gain with more words) */
+  const int nacc = W <= 2 ? 2 : 1;
   const __m512i one = _mm512_set1_epi8(1);
-  __m512i acc[W];
+  __m512i acc[2][W];
   for (int w = 0; w < W; w++)
-    acc[w] = _mm512_setzero_si512();
+    acc[0][w] = acc[1][w] = _mm512_setzero_si512();
   for (int j = 0; j < 4; j++)
     out[k + j] = s->N;
   for (uint32_t i = 0; i < k; i += 4)
     for (int j = 0; j < 4; j++) {
       const uint64_t *m = s->bits + (uint64_t)out[i + j] * W;
+      __m512i *a = acc[j % nacc];
       for (int w = 0; w < W; w++)
-        acc[w] = _mm512_mask_adds_epu8(acc[w], _cvtu64_mask64(m[w]), acc[w],
-                                       one);
+        a[w] = _mm512_mask_adds_epu8(a[w], _cvtu64_mask64(m[w]), a[w], one);
     }
   for (int w = 0; w < W; w++)
-    _mm512_storeu_si512(g + 8 * w, acc[w]);
+    _mm512_storeu_si512(g + 8 * w, nacc == 2
+                                       ? _mm512_adds_epu8(acc[0][w], acc[1][w])
+                                       : acc[0][w]);
   return k;
 #else
 #ifdef HAVE_SIMD_COUNT_W8

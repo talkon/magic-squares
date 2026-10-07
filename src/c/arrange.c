@@ -168,7 +168,10 @@ filter_list_seg(const uint32_t *in, uint32_t cnt, const uint64_t *row,
     }
     __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(u, low5));
     __mmask16 keep = _mm512_mask_test_epi32_mask(live, bits, one);
-    _mm512_mask_compressstoreu_epi32(out + k, keep, u);
+    /* compress in a register and store all 16 lanes (out has room): unlike
+     * a compressing store, a plain store can be forwarded to the loads of
+     * the counting loop that follows */
+    _mm512_storeu_si512(out + k, _mm512_maskz_compress_epi32(keep, u));
     k += (uint32_t)__builtin_popcount(keep);
   }
   return k;
@@ -176,7 +179,8 @@ filter_list_seg(const uint32_t *in, uint32_t cnt, const uint64_t *row,
 #endif
 
 /* out = { u in in[0..cnt) : u >= min_v and bit u of row is set };
- * returns |out|. nseg = number of 1024-bit segments of the rows. */
+ * returns |out|. nseg = number of 1024-bit segments of the rows. out must
+ * have room for 16 entries past the result (the lists have 64). */
 static inline uint32_t filter_list(const uint32_t *in, uint32_t cnt,
                                    const uint64_t *row, uint32_t min_v,
                                    uint32_t nseg, uint32_t *out) {
