@@ -44,6 +44,13 @@
 #include "arrange.h"
 #include "square.h"
 
+/* version of the search, written into every "sum" record: bump it whenever
+ * the search time changes materially, since the scheduler fits its model of
+ * the time per sum only to records of the newest version (1 = the first
+ * version of this pipeline, without the field; 2 = support and cross
+ * filters, carried bitsets, October 2026) */
+#define ENGINE_VERSION 2
+
 static double wall_time(void) {
   struct timeval t;
   gettimeofday(&t, NULL);
@@ -310,13 +317,13 @@ int main(int argc, char *argv[]) {
                 "{\"type\":\"sum\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,\"S\":%lu,"
                 "\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%d,\"nodes\":%lu,"
                 "\"squares\":%lu,\"time\":%.6f,\"setup_time\":%.6f,"
-                "\"enum_time\":%.6f,\"truncated\":%d}\n",
+                "\"enum_time\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
                 n, pstr, (unsigned long)pexp_value(&p), (unsigned long)S,
                 red.count, raw, st.num_labels, (unsigned long)st.nodes,
                 (unsigned long)st.squares, st.seconds,
                 st.setup_seconds + reduce_time,
                 enum_time * (double)raw / (all.count ? all.count : 1),
-                st.truncated);
+                st.truncated, ENGINE_VERSION);
       }
       fflush(out);
       if (total_node_limit && total_nodes >= total_node_limit)

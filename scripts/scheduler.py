@@ -393,6 +393,15 @@ def fit_lsq(X, y, ridge=1e-6):
     return [float(b) for b in beta], float(resid.std())
 
 
+# version of msearch's search (its "engine" field; records without it are
+# version 1): the time model uses only timings of the newest version
+ENGINE = 2
+
+
+def engine_of(r):
+    return r.get("engine", 1)
+
+
 # default model (6x6), used until `fit` writes model_6.json in the state
 # directory: fitted on msearch runs of 36 values of P from their smallest sum
 # (4 minutes each: 7278 sums, 4920 squares) together with the per-P totals of
@@ -492,20 +501,26 @@ def fit_model(results, pinfo, min_n=MIN_N_SQUARES, legacy_min_squares=LEGACY_MIN
     T = NUM_TRAVERSALS[n]
     CLAMP.update(WIDE)  # refit from scratch
 
-    # time per sum, from our own runs (it grows like N^5 in the range that
-    # matters; small N are dominated by overheads and not worth modeling)
+    # time per sum, from our own runs with the newest version of the search
+    # (msearch's "engine"; older timings would overstate the time), or the
+    # default model's if there are too few of those. It grows like N^5 in
+    # the range that matters; small N are dominated by overheads and not
+    # worth modeling.
+    engine = max([engine_of(r) for r in results.sums.values()] or [ENGINE])
     Xt, yt = [], []
     for (P, S), r in results.sums.items():
         t = r["time"] + r["setup_time"] + r.get("enum_time", 0)
-        if r["nvecs_raw"] >= min_n_time and not r["truncated"] and t > 1e-4:
+        if (engine_of(r) == engine and r["nvecs_raw"] >= min_n_time
+                and not r["truncated"] and t > 1e-4):
             Xt.append(time_features(r["nvecs_raw"]))
             yt.append(math.log(t))
-    if len(yt) < 20:
-        raise SystemExit(f"not enough data to fit: {len(yt)} sums")
-    lNs = [x[1] for x in Xt]
-    time_range = (min(lNs), max(lNs))
-    tcoef, tsd = fit_lsq(Xt, yt)
-    tmodel = Model({"time": tcoef, "time_sd": tsd, "time_range": time_range})
+    if len(yt) >= 20:
+        lNs = [x[1] for x in Xt]
+        time_range = (min(lNs), max(lNs))
+        tcoef, tsd = fit_lsq(Xt, yt)
+    else:
+        tcoef, tsd = DEFAULT_MODEL["time"], DEFAULT_MODEL["time_sd"]
+        time_range = DEFAULT_MODEL["time_range"]
 
     # squares per sum: our sums (one observation each) ...
     X, expo, groups, y = [], [], [], []
@@ -550,18 +565,22 @@ def fit_model(results, pinfo, min_n=MIN_N_SQUARES, legacy_min_squares=LEGACY_MIN
     for key, col in (("lN", 1), ("x", 6), ("lt", 7), ("k", 8), ("lp", 9)):
         CLAMP[key] = (min(x[col] for x in X), max(x[col] for x in X))
     # cap on the predicted rate: a few times the best rate of any P we ran
+    # (with the newest search), or the default model's cap
     per_p = {}
     for (P, S), r in results.sums.items():
+        if engine_of(r) != engine:
+            continue
         a = per_p.setdefault(P, [0, 0.0])
         a[0] += r["squares"]
         a[1] += r["time"] + r["setup_time"]
-    best_rate = max([sq / t for sq, t in per_p.values() if sq >= 20 and t > 0] or [1.0])
+    rates = [sq / t for sq, t in per_p.values() if sq >= 20 and t > 0]
+    rate_cap = 3 * max(rates) if rates else DEFAULT_MODEL["rate_cap"]
     # the legacy totals are dominated by large sums, far from where the
     # scheduler works, so they get a smaller weight than our own data
     wts = [1.0] * own_rows + [legacy_weight] * (len(y) - own_rows)
     sq_coef = fit_poisson(X, y, expo, groups, wts)
     model = Model({"n": n, "squares": sq_coef, "min_n": min_n, "time": tcoef,
-                   "time_sd": tsd, "time_range": time_range, "rate_cap": 3 * best_rate})
+                   "time_sd": tsd, "time_range": time_range, "rate_cap": rate_cap})
 
     # traversal probabilities: our squares (one row each) ...
     Xs, es, gs, ys, yp = [], [], [], [], []
@@ -603,7 +622,7 @@ def fit_model(results, pinfo, min_n=MIN_N_SQUARES, legacy_min_squares=LEGACY_MIN
     # report measured ~2x); shrink towards 2 when there are few SP traversals
     rho = (ysp + legacy_sp + 2.0 * 5) / (expected_sp + 5)
     model = Model({"n": n, "squares": sq_coef, "min_n": min_n, "time": tcoef,
-                   "time_sd": tsd, "time_range": time_range, "rate_cap": 3 * best_rate,
+                   "time_sd": tsd, "time_range": time_range, "rate_cap": rate_cap,
                    "ps": ps, "pp": pp, "rho": rho,
                    "clamp": {k: list(v) for k, v in CLAMP.items()}})
     diag = {"own_sums": own_rows, "own_squares": int(own_squares),
