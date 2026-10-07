@@ -530,3 +530,135 @@ P are used up. Wider candidate families (no factor 7, 11^2 / 13^2, prime
 23, exponents beyond gen_candidates' ranges: scripts/cand_explore.py,
 samples of 1500 and 1200 P) put no new P in the model's top 200 and ~1% of
 the score mass in the top 1000, so the candidate space is not the limit.
+
+
+## The support / cross cascade at the (2,2) children (October 2026, no gain)
+
+(Branch `opt2/cascade`, commit c6a487c, from f61e719; not merged. It has
+the measurement switches `-DCASCADE_STATS` and `-DCASCADE_DUMP=K` in
+arrange.c, which compile to the same code when off, and
+`research/cascade_replay.c`. No change to the search: nothing below beat
+the noise of the shared machine.)
+
+How it was measured. `-DCASCADE_STATS` counts, per class of child (rows,
+cols placed) and step of TRY_CHILD on the carried path, the calls,
+candidates in and out, children killed and cycles (rdtsc; ~25 cycles of
+overhead per step, prod 15 s -> 25 s, so only the shares are meaningful).
+`-DCASCADE_DUMP=256` writes one (2,2) child in 256 as it enters cross
+support (143,587 states on `bench/prod.txt`, 210 MB), and
+`research/cascade_replay.c` replays them through variants of the cascade,
+timing each state alone (min of 3 rounds, ~50 cycles of timing overhead
+subtracted below), which resolves differences of 1-2% that whole runs on
+this machine cannot. In-place timings: per-instance minima over 2-5
+alternating rounds, summed (native and `-march=cascadelake`, both on
+Sapphire Rapids); even so, two builds of the same code differ by up to
+~1.5% (f61e719 vs this branch, whose search code is identical: prod 15.00
+vs 14.79 s native, 16.48 vs 16.51 s cascadelake; full 3.65 vs 3.70 s,
+4.10 vs 4.09 s).
+
+Where the time goes (prod, native, default adaptive mode; the instrumented
+cycles): the (2,2) children are 85% of all child creation (83% with
+`-march=cascadelake`), the (1,2)/(2,1) children 11%, (2,3)/(3,2) 2%. Per
+(2,2) child (39.2M of them, 96.6% killed, 1.32M searched), by step:
+
+| step | runs on | in -> out | kills | cycles/call |
+| --- | ---: | ---: | ---: | ---: |
+| filter o (exactly once) | 100% | 187 -> 44 | 1.3% | 240 |
+| filter b (disjoint, 1st support pass) | 99% | 89 -> 36 | 5.1% | 121 |
+| cross o (before mode) | 73% | 48 -> 21 | 27% | 264 |
+| cross b | 53% | 46 -> 10 | 58% | 234 |
+| support passes 1, 2, 3, ... | 43%, 26%, 15%, ... | 35 -> 16, 27 -> 17, ... | 37%, 33%, 29%, ... | 83-93 |
+| after mode (22% of the children): support, cross o, cross b, support | | | | |
+| count (survivors) | 3.4% | | | 129 |
+
+So filters 34%, cross passes 32%, support passes 10% (2.5 passes per child
+that reaches them), counting 0.4%, the rest rdtsc and bookkeeping. With the
+before mode forced: cross o kills 36%, cross b 60% of the rest, the
+support loop 86% of the rest (2.4 passes). With the after mode forced, the
+support loop alone kills only 50%, after 3.4 passes on average (10% of
+the children need 7 or more), which is why cross support goes first.
+With `-march=cascadelake`: filter o 284 cycles (no VPOPCNTDQ), counting
+207, the cascade the same.
+
+Replay (cycles per state, net): before mode 369, after mode 446, support
+filter alone 233 (kills 50%), the two cross passes alone 331 (74%), one
+cross pass 215 (36%). One cross pass (W = 2, 8 cells, lists of ~36 and
+~45): call and setup ~17 + 30, building the 8 unions 63, the transposing
+reduction 14, the test 100. Both loops are bound by ports 0/5 (24 and 32
+vector uops per 8 entries); so is the support pass (~45 cycles).
+
+Tried, none kept:
+
+* The cells of one placed vector only (4 of the 8; every candidate of the
+  other axis passes through exactly one of them, so the test stays valid):
+  no cheaper, as the pass works on groups of 8 cells, and much weaker
+  (prod nodes 50.4M -> 64.9M; first pass kills 16% instead of 27%).
+* Cross b first: the first pass kills 14% instead of 36% (cross b is strong
+  only on the o list that cross o has shrunk); 52.0M nodes, replay 407 vs
+  369. Choosing the order per child: b first is 1-2% cheaper only when
+  ko < kb (17% of the states).
+* The support loop between the two cross passes (to spare cross b on the
+  children it kills): replay 397 (one support pass: 379) vs 370.
+* One support pass as a probe, then after mode if it dropped more than a
+  fraction of the o list: the probe costs ~33 cycles, best 389 vs 369.
+* Choosing before / after per child: a per-child oracle would save 7.7% of
+  the cascade (11% with b-first as a third order), the best mode per
+  instance and list-size bucket 2.6% (~1% of the time). Rules tried in
+  place: by list size (ko + kb < 50-70: within noise on full, +4-10% on
+  P = 16 5 4 2, S = 1200, where the sampled switch is right), by the
+  number of o labels the support test would reject (>= 11, alone or with
+  the sampled switch: replay -2.7% of the cascade; in place prod -0.6 to
+  -1.9%, P = 16 5 4 2 -0.7 to -2.9%, full +1.0 to +2.4%: noise). It does
+  match the sampled switch without sampling, if that switch is ever to be
+  simplified.
+* The sampled switch's threshold: all prod sums prefer the before mode
+  (S = 460, where the support filter kills 82%, is a tie), and the replay
+  puts the break-even at a support kill rate of 0.80-0.85 per sum and
+  0.86-0.92 per size bucket, so 3/4 looked low; but forced before mode is
+  only -1.1..-1.5% on prod (and +7-14% on P = 16 5 4 2), and 13/16, 7/8
+  and 7/8 with sampling 1/32 instead of 1/16 are all within noise (7/8,
+  1/32: prod -1.2% native, +0.9% cascadelake; P = 16 5 4 2 +1.8/+3.0%).
+* Iterating cross support and the support filter to their common fixpoint
+  (a cross pass reruns when the other list has shrunk since its unions
+  were built): the (2,2) children searched drop from 1.32M to 21k, their
+  (2,3)/(3,2) children from 6.0M to 0.2M, nodes 50.4M -> 44.6M (-12%); but
+  time: native +1.4% and -0.6%, cascadelake -0.3% and -1.1% (two sets of
+  runs): neutral. One extra round only: 46.6M nodes, +0.7..+2.1%. A
+  searched (2,2) node costs only ~700 cycles (counting, choosing the cell,
+  ~4.5 children at ~120 cycles that nearly all die in their first filter),
+  about what the second round costs per node it kills.
+* Hall's condition (stronger than cross support): a candidate u of axis f
+  meets the n - 2 remaining vectors of axis h at its n - 2 free cells, and
+  each of those passes through one unmatched cell of each placed f vector
+  p, so the sets t_y = u & U_y (y: the unmatched cells of p) must have a
+  system of distinct representatives (cross support checks |t_y| >= 1).
+  Replay, scalar: cross o + Hall kills 44% instead of 36%, before mode +
+  Hall 99.75% instead of 96.39%. But the extra kills are mostly nodes
+  worth ~700 cycles (as above), and a vectorized test (pairs >= 2 bits,
+  triples >= 3, per placed vector) would cost several times the cross test.
+* Cross support at the (1,2)/(2,1) children, iterated: kills 12% of them
+  (lists of 81 and 167), 6% fewer (2,2) children, ~2000 cycles more per
+  child: slower, as on the matrix path.
+* The cross pass itself (replay, net): a single-group version with
+  branchless cell extraction (pdep per word, or a select chain, which GCC
+  turned into branches and spills): 219-234 vs 216 cycles per pass; the
+  cells extracted in SIMD lanes (clear the lowest bit R times): setup 66 vs
+  47; forcing CROSS_AXIS inline: 375 vs 369 per state. Starting the
+  support filter with the other axis known closed (it always is): no
+  change (369.1 vs 369.6).
+* By analysis, not built: an early exit when a list falls below the needed
+  count can skip at most the last block of a pass (lists of ~40 losing at
+  most 8 per block, 4 needed); incremental unions (per-label counts) save
+  only the 2 ORs per block of a support pass, whose floor is the scan,
+  and re-testing only the entries with newly uncovered labels needs an
+  inverted index per child (a transpose, ~100+ cycles), more than the
+  whole support loop costs where it runs (~100 cycles on 26% of the
+  children).
+
+What is left at the (2,2) children is the filters (34%, mostly filter o,
+the largest single step: the exactly-once test over the ~187 entries of
+the parent's list, of which 23% are kept), and the first cross pass on
+nearly every child. An idea for filter o, outside this direction: an
+inverted index of the parent's list (label -> mask of entries, 192 bits),
+from which "meets v exactly once" is a few mask operations over v's 4
+labels, leaving only the compress work per child.
