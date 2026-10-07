@@ -232,3 +232,18 @@ over the 20-30 rarest anchors, whose subproblems keep most of the vectors
   list per candidate) is 10-75x slower; even vectorized (filter the other
   list by the candidate's inters1 row, then a union) it would take a few
   microseconds per depth-3 node, against ~0.4 us of nodes saved per node.
+
+## Per-node overhead on the matrix path (October 2026, not merged)
+
+Measured on the matrix path before the support filter and the carried
+bitsets (branch `opt/node-overhead`, 8-13% faster there, same nodes):
+children created in batches of 16 (filter all their other-axis lists, then
+count, then forward-check, with no branch per child), 16-bit vector indices
+with AVX-512 VBMI2 (32 entries per register in the filter; ~10% alone),
+prefetching the batch's matrix rows (~2.5%). Profile of that code: counting
+~35% (~2 cycles per vector: mask loads and a single-port saturating add),
+filtering ~30%, choosing the cell and the children ~10%, the rest
+bookkeeping and the mispredicted "dead?" branch after a child's first pass.
+Not ported: since the lists carry their bitsets, the matrix path only runs
+for more than 256 labels or without AVX-512BW, and batching the children's
+first pass on the carried lists was 14% slower (see above).
