@@ -243,7 +243,7 @@ int main(int argc, char *argv[]) {
   out_ctx_t ctx = {.out = out, .legacy = legacy, .p = &p};
   uint64_t total_nodes = 0;
   double t_start = wall_time();
-  int stop = 0;
+  int stop = 0, stop_nodes = 0; /* stop_nodes: by --total-nodes */
   if (legacy)
     fprintf(out, "read\n");
 
@@ -315,7 +315,7 @@ int main(int argc, char *argv[]) {
       }
       fflush(out);
       if (total_node_limit && total_nodes >= total_node_limit)
-        stop = 1;
+        stop = stop_nodes = 1;
       if (time_limit > 0 && wall_time() - t_start >= time_limit)
         stop = 1;
     }
@@ -338,7 +338,7 @@ int main(int argc, char *argv[]) {
             !stop || last_sum >= max_sum, wall_time() - t_start);
   }
   if (legacy) {
-    if (stop && total_node_limit)
+    if (stop_nodes)
       fprintf(out, "terminated: total count %lu exceeds cutoff %lu\n",
               (unsigned long)total_nodes, (unsigned long)total_node_limit);
     fprintf(out, "completed in %.5f secs\n", wall_time() - t_start);

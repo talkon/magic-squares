@@ -40,8 +40,9 @@ add_test(NAME fast_bench_quick_wide8 COMMAND bench --min-words 8 ${BENCH_DIR}/qu
 # as for more than 256 labels and N > 3072
 add_test(NAME fast_bench_quick_gather COMMAND bench --min-words 8 --gather ${BENCH_DIR}/quick.txt)
 # the benchmark built with the N x N intersection matrices for all widths
-# (the path without AVX-512BW), and with the fallbacks for AVX-512 CPUs
-# without GFNI / VPOPCNTDQ (Skylake-X, Cascade Lake), to test those paths
+# (the filter used without AVX-512BW, here still with byte counters), and
+# with the fallbacks for AVX-512 CPUs without GFNI / VPOPCNTDQ (Skylake-X,
+# Cascade Lake), to test those paths
 add_executable(bench_matrices bench.c enumerate.c arrange.c square.c)
 target_compile_definitions(bench_matrices PRIVATE CARRY_MAX_W=0)
 target_link_libraries(bench_matrices m)
@@ -57,11 +58,34 @@ if (HAVE_NO_GFNI_FLAGS)
   add_test(NAME fast_bench_quick_no_gfni_wide3 COMMAND bench_no_gfni --min-words 3 ${BENCH_DIR}/quick.txt)
   add_test(NAME fast_bench_quick_no_gfni_no_support COMMAND bench_no_gfni --no-support ${BENCH_DIR}/quick.txt)
 endif()
+# builds for CPUs without AVX-512BW (bit-sliced counters, 8 slices with
+# AVX-512F) and without AVX-512 (plain C filters, 4 slices), which the
+# native build never compiles on an AVX-512BW machine
+foreach(variant "no_bw:-mno-avx512bw" "portable:-mno-avx512f")
+  string(REPLACE ":" ";" parts ${variant})
+  list(GET parts 0 vname)
+  list(GET parts 1 vflag)
+  check_c_compiler_flag(${vflag} HAVE_FLAG_${vname})
+  if (HAVE_FLAG_${vname})
+    add_executable(bench_${vname} bench.c enumerate.c arrange.c square.c)
+    target_compile_options(bench_${vname} PRIVATE ${vflag})
+    target_link_libraries(bench_${vname} m)
+    add_test(NAME fast_bench_quick_${vname} COMMAND bench_${vname} ${BENCH_DIR}/quick.txt)
+    add_test(NAME fast_bench_quick_${vname}_wide8 COMMAND bench_${vname} --min-words 8 ${BENCH_DIR}/quick.txt)
+    add_test(NAME fast_bench_quick_${vname}_no_support COMMAND bench_${vname} --no-support ${BENCH_DIR}/quick.txt)
+  endif()
+endforeach()
+# the generic bit-sliced counters (more than 512 labels), on the smaller
+# instances
+add_test(NAME fast_bench_quick_wide16 COMMAND bench --min-words 16 --only "S=3" ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_no_fc COMMAND bench --no-fc --no-mrv ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_no_support COMMAND bench --no-support ${BENCH_DIR}/quick.txt)
 # msearch finds Morgenstern's square (P = 2^10 3^4 5^3 7^2, S = 327)
 add_test(NAME fast_msearch_327 COMMAND sh -c
   "$<TARGET_FILE:msearch> --sums 327 10 4 3 2 | grep -c '\"type\":\"square\"' | grep -qx 1")
+# n = 8 (SQ_MAX_N) searches run (they used to overflow the per-depth state)
+add_test(NAME fast_msearch_n8 COMMAND sh -c
+  "$<TARGET_FILE:msearch> --vec-size 8 --min-sum 320 --max-sum 325 12 6 3 2 1 1 | grep -c '\"type\":\"sum\"' | grep -qx 6")
 # the new enumerator writes exactly what the old one did
 add_test(NAME fast_enumerate_matches_cpp COMMAND sh -c
   "$<TARGET_FILE:enumeration> old_10_4_3_2.txt 10 4 3 2 > /dev/null && $<TARGET_FILE:enumerate> --file new_10_4_3_2.txt 10 4 3 2 2> /dev/null && cmp old_10_4_3_2.txt new_10_4_3_2.txt"

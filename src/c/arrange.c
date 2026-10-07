@@ -139,7 +139,9 @@ void search_opts_default(search_opts_t *o) {
 
 #define ROW 0
 #define COL 1
-#define MAXD (2 * SQ_MAX_N + 1)
+/* per-depth state for d = 0 .. 2n + 1 (see the allocation in search_vectors:
+ * cells up to depth 2n, lists one past it) */
+#define MAXD (2 * SQ_MAX_N + 2)
 
 /* state shared by all bitset widths */
 typedef struct {
@@ -723,6 +725,7 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   }
 
   int maxd = 2 * n + 1;
+  _Static_assert(2 * SQ_MAX_N + 1 < MAXD, "MAXD too small for n = SQ_MAX_N");
   /* room for 64 entries past the end of a list (filters store whole
    * vectors), and 64-byte aligned word arrays */
   s.cap = (uint32_t)((count + 64 + 7) & ~(size_t)7);
