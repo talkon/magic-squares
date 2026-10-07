@@ -46,6 +46,43 @@ def test_fit_poisson():
     print("fit_poisson ok")
 
 
+def test_fit_model():
+    """fit_model on synthetic results drawn from the default model"""
+    import random
+    rng = random.Random(1)
+    default = scheduler.Model(dict(scheduler.DEFAULT_MODEL))
+    with tempfile.TemporaryDirectory() as state:
+        pinfo = scheduler.PInfo(os.path.join(state, "pinfo.json"), 6)
+        results = scheduler.Results(6)
+        for P, smin in (((13, 6, 3, 2, 1, 1), 791), ((12, 7, 4, 2, 1), 723),
+                        ((13, 7, 5, 2), 700)):
+            pinfo.data[pinfo.key(P)] = {"smin": smin, "counts": {}, "counted_to": smin,
+                                        "window": True}
+            for i, N in enumerate(range(400, 2400, 25)):
+                S = smin + 2 * i
+                mu = default.squares(P, S, N, smin)
+                k = sum(1 for _ in range(200) if rng.random() < mu / 200)
+                results.sums[(P, S)] = {"type": "sum", "S": S, "nvecs_raw": N, "squares": k,
+                                        "time": default.sum_time(N), "setup_time": 0.0,
+                                        "truncated": 0}
+                for j in range(k):
+                    results.squares[f"{P}{S}{j}"] = {
+                        "P": P, "S": S, "s_count": rng.randint(0, 3),
+                        "p_count": rng.randint(0, 1), "sp_count": 0}
+        model, diag = scheduler.fit_model(results, pinfo)
+        assert diag["own_squares"] > 20, diag
+        print(scheduler.describe_fit(diag))
+        # the fitted model reproduces the data it was drawn from, on average
+        P, smin = (12, 7, 4, 2, 1), 723
+        a = sum(model.squares(P, smin + 40, N, smin) for N in (800, 1200, 1600))
+        b = sum(default.squares(P, smin + 40, N, smin) for N in (800, 1200, 1600))
+        assert 0.3 < a / b < 3, (a, b)
+        sc = scheduler.Scorer(model, results, pinfo)
+        assert sc.score(P, smin + 40, 1500)[0] > 0
+    scheduler.CLAMP.update(scheduler.DEFAULT_MODEL["clamp"])
+    print("fit_model ok")
+
+
 def test_commands():
     with tempfile.TemporaryDirectory() as state:
         # use the built-in default model
@@ -56,6 +93,7 @@ def test_commands():
         lines = run("--state", state, "emit", "--workers", "2", "--only", SMALL,
                     "--units", "4", "--unit-time", "1").strip().split("\n")
         assert len(lines) == 4, lines
+        assert all(l.startswith("--vec-size 6 ") for l in lines), lines
         out = run("--state", state, "run", "--workers", "2", "--only", SMALL,
                   "--unit-time", "2", "--hours", "0.004")
         units = os.listdir(os.path.join(state, "units"))
@@ -81,4 +119,5 @@ def test_commands():
 
 if __name__ == "__main__":
     test_fit_poisson()
+    test_fit_model()
     test_commands()

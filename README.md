@@ -66,9 +66,9 @@ bookkeeping, and vectorized filtering/counting. It no longer requires
 AVX-512.
 
 **Scheduling** (`scripts/scheduler.py`): semi-magic squares are found much
-faster near the smallest possible sum S_min(P) (a few thousand per CPU-hour,
-versus ~80 per hour on average in the first search), and squares with a
-smaller S are also more likely to be magic. The scheduler models
+faster near the smallest possible sum S_min(P) (about 600 to 10,000 per
+CPU-hour depending on P, versus ~80 per hour on average in the first search),
+and squares with a smaller S are also more likely to be magic. The scheduler models
 
     magic squares per CPU-second = (semi-magic squares per CPU-second)
                                    * 5400 * (rho * p_S * p_P)^2
@@ -82,6 +82,21 @@ counts of the squares found. Each P also gets its own correction factors
 (empirical Bayes) as its results come in, with an optimism bonus to explore
 new P. Each P is searched in increasing order of S; the scheduler always runs
 the next chunk of sums of the P with the best predicted yield.
+
+### Running on a cluster (SuperCloud)
+
+The scheduler can also write a static plan, to run as a job array:
+
+```
+python3 scripts/scheduler.py import-legacy stats/stats_short.txt   # once
+python3 scripts/scheduler.py emit --units 4800 --unit-time 600 > plan.txt
+PLAN=plan.txt LLsub ./submit-sc-plan.sh [8,48,1]     # LLsub triples mode
+```
+
+Each line of `plan.txt` is one `msearch` run writing to
+`data/sched/units/`. Afterwards `scheduler.py report` summarizes the results,
+`scheduler.py fit` refits the model on everything found so far, and the next
+`emit` continues where the plan left off.
 
 ## Performance
 

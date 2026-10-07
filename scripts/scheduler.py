@@ -113,7 +113,7 @@ def parse_p(s):
 
 
 def log(msg):
-    print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
+    print(time.strftime("[%H:%M:%S] ") + msg, file=sys.stderr, flush=True)
 
 
 def binary(name):
@@ -248,8 +248,8 @@ class Results:
 # --------------------------------------------------------------------------
 # model
 
-# features are clamped to the range seen when fitting, so that the quadratic
-# terms cannot extrapolate wildly
+# features are clamped to the range seen when fitting, so that the model is
+# not extrapolated far outside its data
 WIDE = {"lN": (0.0, 50.0), "x": (0.0, 50.0), "lt": (0.0, 50.0), "k": (0.0, 50.0),
         "lp": (0.0, 50.0)}
 CLAMP = dict(WIDE)
@@ -281,7 +281,7 @@ def p_features(P):
 
 
 def sum_features(P, S, N, smin):
-    """features for the rate of semi-magic squares at (P, S)"""
+    """features for the number of semi-magic squares at (P, S)"""
     lN = clamp(math.log(max(N, 1)), "lN")
     x = clamp(math.log(S / smin), "x")
     lt, k, lp = p_features(P)
@@ -556,7 +556,6 @@ def fit_model(results, pinfo, min_n=MIN_N_SQUARES, legacy_min_squares=LEGACY_MIN
         ys.append(q["s_count"])
         yp.append(q["p_count"])
         ysp += q["sp_count"]
-    own_sq = len(ys)
     # ... and legacy totals, spread over the sums of P in proportion to the
     # expected number of squares at each sum
     legacy_sp = 0
@@ -597,6 +596,11 @@ def fit_model(results, pinfo, min_n=MIN_N_SQUARES, legacy_min_squares=LEGACY_MIN
     return model, diag
 
 
+def describe_fit(diag):
+    return (f"refit model on {diag['own_sums']} sums / {diag['own_squares']} squares of ours "
+            f"and {diag['legacy_P']} legacy values of P / {diag['legacy_squares']} squares")
+
+
 # --------------------------------------------------------------------------
 # per-P empirical Bayes factors and scores
 
@@ -615,7 +619,6 @@ class Scorer:
         self.results = results
         self.pinfo = pinfo
         self.n = results.n
-        self.factors = {}
         T = NUM_TRAVERSALS[self.n]
         # observed vs expected, per P
         acc = {}
@@ -787,9 +790,10 @@ class Scheduler:
         with ThreadPoolExecutor(max(1, self.args.workers)) as ex:
             return list(ex.map(fn, items))
 
-    def prepare(self, cands, scorer=None):
+    def prepare(self, cands, scorer=None, keep=()):
         """S_min for all candidates, then vector counts for the most promising
-        ones; returns the active set of P"""
+        ones; returns the active set of P: the best by prior, the P with
+        results, and the P in keep"""
         def known(P):
             d = self.pinfo.data.get(self.pinfo.key(P))
             return d is not None and (d.get("window")
@@ -811,7 +815,8 @@ class Scheduler:
         scorer = scorer or Scorer(self.model, self.results, self.pinfo)
         ranked = sorted(cands, key=lambda P: -scorer.prior(P))
         active = ranked[:self.args.active]
-        active = sorted(set(active) | {P for (P, S) in self.results.sums if P in cands})
+        active = sorted(set(active) | {P for (P, S) in self.results.sums if P in cands}
+                        | set(keep))
         need = [P for P in active
                 if self.pinfo.data[self.pinfo.key(P)]["counted_to"]
                 < self.results.frontier(P, self.pinfo) + 100]
@@ -892,7 +897,7 @@ class Scheduler:
                         try:
                             self.model, diag = fit_model(self.results, self.pinfo)
                             self.model.save(self.model_path)
-                            log(f"refit model on {diag['sums']} sums, {diag['squares']} squares")
+                            log(describe_fit(diag))
                         except SystemExit as e:
                             log(str(e))
                         scorer = Scorer(self.model, self.results, self.pinfo)
@@ -990,6 +995,7 @@ def cmd_fit(args):
     model, diag = fit_model(results, pinfo)
     model.save(os.path.join(args.state, f"model_{args.vec_size}.json"))
     pinfo.save()
+    print(describe_fit(diag))
     print(json.dumps(diag, indent=1))
     print(json.dumps(model.c, indent=1))
 
@@ -1008,18 +1014,28 @@ def cmd_plan(args):
               f"{u.score * 3.15e7:14.3g}")
 
 
-def simulate(sch, scorer, cands, unit_time, max_units=None, max_hours=None):
+def simulate(sch, scorer, all_cands, unit_time, max_units=None, max_hours=None,
+             refresh_every=200):
     """greedily simulate the scheduler, assuming every unit takes its
-    predicted time and finds its predicted number of squares; yields units"""
+    predicted time and finds its predicted number of squares; yields units.
+    Like `run`, the active set of P is refreshed regularly, so new values of
+    P come in as the best ones are used up."""
+    started = set()
+    cands = sch.prepare(all_cands, scorer)
     cache = {P: scorer.next_unit(P, unit_time) for P in cands}
     hours, i = 0.0, 0
     while (max_units is None or i < max_units) and (max_hours is None or hours < max_hours):
+        if i and i % refresh_every == 0:
+            for P in sch.prepare(all_cands, scorer, keep=started):
+                if P not in cache:
+                    cache[P] = scorer.next_unit(P, unit_time)
         u = max(cache.values(), key=lambda u: u.score)
         if u.score <= 0:
             break
         yield u
         hours += u.time / 3600
         i += 1
+        started.add(u.P)
         sch.results.done_to[u.P] = u.hi
         cache[u.P] = scorer.next_unit(u.P, unit_time)
 
@@ -1029,7 +1045,7 @@ def cmd_emit(args):
     run (one per line), simulating it with predicted times and squares"""
     sch = Scheduler(args)
     scorer = Scorer(sch.model, sch.results, sch.pinfo)
-    cands = sch.prepare(sch.candidates(), scorer)
+    cands = sch.candidates()
     units_dir = os.path.join(args.state, "units")
     if os.path.abspath(units_dir).startswith(ROOT + os.sep):
         units_dir = os.path.relpath(units_dir, ROOT)  # portable plan
@@ -1041,9 +1057,8 @@ def cmd_emit(args):
 def cmd_forecast(args):
     """predicted squares and magic squares for the next CPU-hours of search"""
     sch = Scheduler(args)
-    cands = sch.prepare(sch.candidates(), Scorer(sch.model, sch.results, sch.pinfo))
-    # the scheduler's choices use the exploration bonus, but the predicted
-    # numbers of squares should not
+    cands = sch.candidates()
+    # predicted numbers of squares, without the exploration bonus
     scorer = Scorer(sch.model, sch.results, sch.pinfo, optimistic=False)
     checkpoints = [args.hours * f for f in (0.01, 0.03, 0.1, 0.3, 1.0)]
     hours = squares = magic = 0.0
