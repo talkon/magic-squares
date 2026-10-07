@@ -132,14 +132,25 @@ Estimating the chance that each square is magic from the observed rates of
 S- and P-traversals, these runs found magic-square "probability mass" at
 ~2.5-3e-5 per CPU-hour, versus ~4e-7 per CPU-hour for the first search (the
 same estimate applied to its 758,949 squares), i.e. ~60x more per CPU-hour,
-from the faster search and from staying close to S_min. That pace cannot be
-kept up forever, since every P has only a short stretch of good sums: the
-scheduler's model forecasts ~2.7e-6 per CPU-hour averaged over the next 600
-CPU-hours and ~1.8e-6 over the next 2000 (`scheduler.py forecast`), i.e. on
-the order of 40-65 CPU-years per magic square, versus ~280 for the first
-search under the same model. These
-estimates assume the two diagonals behave independently given their
-traversal probabilities, so treat them as rough.
+from the faster search and from staying close to S_min.
+
+That pace cannot be kept up: every P has only a short stretch of good sums,
+so the rate falls as the best ones are used up. The figure quoted here
+earlier ("40-65 CPU-years per magic square") was the starting rate, not the
+time to a first magic square. [research/forecast.md](research/forecast.md)
+has a long-horizon forecast with the current, ~6x faster search, checked
+independently. Central estimates of the expected number of magic squares E:
+
+| CPU time | 1000 h | 1 CPU-yr | 10 CPU-yr | 100 CPU-yr |
+|---|---:|---:|---:|---:|
+| E | ~0.009 | 0.015-0.018 | 0.03-0.045 | 0.05-0.12 |
+
+That is a few percent chance at 10 CPU-years. Two cheap measurements would
+narrow these estimates:
+- the rate of SP traversals near S_min, which enters squared and is known
+  from only 14 events;
+- how squares and time scale for sums with N > 5,000, where the scheduler's
+  model has no data and undervalues them 10-60x.
 
 ## Directory structure
 
