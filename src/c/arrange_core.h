@@ -28,6 +28,7 @@
 #define KEEP_COUNT CAT(keep_count, W)
 #define SUPPORT CAT(support, W)
 #define FILTER_CARRY CAT(filter_carry, W)
+#define FILTER_STEP CAT(filter_step, W)
 #define KEEP_CARRY CAT(keep_carry, W)
 #define COUNT_CARRY CAT(count_carry, W)
 #define TRY_CHILD CAT(try_child, W)
@@ -78,7 +79,8 @@
  * Reading the label counts g = cnt[d][a] (CNT_WORDS * W words), for the
  * labels of word w:
  * COVERED: labels in at least one candidate;
- * IN_CLASS: labels in exactly c + 1 candidates, or, for the last class
+ * IN_CLASS (bit-sliced counters; SEARCH_REC reads byte counters directly):
+ * labels in exactly c + 1 candidates, or, for the last class
  * c = NCLASS - 1, in at least NCLASS candidates.
  * Byte counters: byte i of words 8 * w ... 8 * w + 7 counts label 64 * w + i.
  * Bit-sliced counters: bit i of word t * W + w is set if label 64 * w + i is
@@ -93,25 +95,76 @@ static inline uint64_t COVERED(const uint64_t *g, int w) {
 #endif
 }
 
+#ifndef COUNT_BYTES
 static inline uint64_t IN_CLASS(const uint64_t *g, int w, int c) {
-#ifdef COUNT_BYTES
-  __m512i x = _mm512_loadu_si512(g + 8 * w);
-  if (c + 1 < NCLASS)
-    return _mm512_cmpeq_epu8_mask(x, _mm512_set1_epi8((char)(c + 1)));
-  return _mm512_cmpge_epu8_mask(x, _mm512_set1_epi8((char)NCLASS));
-#else
   uint64_t r = g[c * W + w];
   if (c + 1 < NCLASS)
     r &= ~g[(c + 1) * W + w];
   return r;
-#endif
 }
+#endif
 
 #ifdef CARRY
 /*
  * Candidate lists that carry their bitsets: word w of entry i of a list is
  * at list[w * cap + i].
  *
+ * FILTER_STEP: the test and compression of FILTER_CARRY and KEEP_CARRY for
+ * the 8 entries of in from position i on, of which those in live exist;
+ * appends the kept ones (word w at out + w * cap + k) and returns the new
+ * k. full (a compile-time constant) says that all 8 exist: the callers run
+ * it on the full groups of 8 entries, then once with a lane mask on the
+ * last one, rather than computing a lane mask in every iteration (~8
+ * scalar instructions and masked loads: the loop split of gcc's
+ * profile-guided build, 4-5% less time on bench/prod.txt, see
+ * research/ideas.md). For once = 1, V[w] and R[w] are word w of v and its
+ * rotation (see FILTER_CARRY); otherwise V[w] is word w of the bitset that
+ * the kept entries miss (R is unused).
+ */
+static inline __attribute__((always_inline)) uint32_t
+FILTER_STEP(const uint64_t *in, size_t cap, uint32_t i, const int full,
+            __mmask8 live, const __m512i *V, const __m512i *R,
+            const bool *tw, const int once, uint64_t *out, uint32_t k,
+            __m512i *acc) {
+  __m512i x[W];
+  for (int w = 0; w < W; w++)
+    x[w] = full ? _mm512_loadu_si512(in + w * cap + i)
+                : _mm512_maskz_loadu_epi64(live, in + w * cap + i);
+  __mmask8 keep;
+  if (once) {
+    /* c = the words of u & v, each rotated by R[w], or-ed into one word:
+     * the rotated words of v are disjoint, so |c| = |u & v| */
+    __m512i c = _mm512_and_si512(x[0], V[0]);
+    for (int w = 1; w < W; w++)
+      if (tw[w]) /* c |= rot(u) & rot(v) */
+        c = _mm512_ternarylogic_epi64(c, _mm512_rolv_epi64(x[w], R[w]), V[w],
+                                      0xF8);
+#ifdef __AVX512VPOPCNTDQ__
+    keep = _mm512_mask_cmpeq_epi64_mask(live, _mm512_popcnt_epi64(c),
+                                        _mm512_set1_epi64(1));
+#else
+    /* exactly one bit: c != 0 and c & (c - 1) == 0 */
+    keep = _mm512_mask_testn_epi64_mask(
+        _mm512_mask_test_epi64_mask(live, c, c), c,
+        _mm512_sub_epi64(c, _mm512_set1_epi64(1)));
+#endif
+  } else {
+    keep = live;
+    for (int w = 0; w < W; w++)
+      if (tw[w])
+        keep = _mm512_mask_testn_epi64_mask(keep, x[w], V[w]);
+  }
+  for (int w = 0; w < W; w++) {
+    /* compress in a register and store all 8 lanes (the lists have
+     * room) */
+    __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
+    _mm512_storeu_si512(out + w * cap + k, y);
+    acc[w] = _mm512_or_si512(acc[w], y);
+  }
+  return k + (uint32_t)__builtin_popcount(keep);
+}
+
+/*
  * FILTER_CARRY: out = the entries u of in[0..cnt) with |u & v| == once
  * (once = 0 or 1), where vb is the bitset of v, and, for once = 0 and excl
  * not NULL, also disjoint from excl; un = the union of the kept entries.
@@ -129,69 +182,48 @@ static inline uint64_t IN_CLASS(const uint64_t *g, int w, int c) {
  * The support filter's first pass over the disjoint axis (excl = the labels
  * neither placed nor covered by the other axis) is free here: "disjoint
  * from v and from excl" is one test against v | excl.
+ *
+ * For |u & v| == 1, word w of v is rotated by some r_w such that the
+ * rotated words are disjoint: then |u & v| is the number of bits of one
+ * word, the or of the words of u & v rotated the same way, so the test is
+ * one popcount, or one exactly-one-bit test without VPOPCNTDQ, instead of
+ * one per word and a sum or cross-word test (W = 2: 5 vector instructions
+ * per 8 entries instead of 6 with VPOPCNTDQ, 6 instead of 11 without it,
+ * which made the -march=cascadelake build ~5% faster on bench/prod.txt).
+ * Such an r_w exists: v has n <= 8 labels in all, so at most 16 of the 64
+ * rotations of a word hit the bits taken by the words before it.
  */
 static inline uint32_t FILTER_CARRY(const sstate_t *s, const uint64_t *in,
                                     uint32_t cnt, const uint64_t *vb,
                                     const int once, const uint64_t *excl,
                                     uint64_t *out, uint64_t *un /* [W] */) {
   const size_t cap = s->cap;
-  __m512i V[W], acc[W];
+  __m512i V[W], R[W], acc[W];
   /* with more than 2 words, skip the words where the test mask is empty
    * (v has at most 8 labels; with 2 words the test costs more than it
    * saves) */
   bool tw[W];
+  uint64_t used = 0; /* the bits of the rotated words of v so far */
   for (int w = 0; w < W; w++) {
     uint64_t t = vb[w] | (!once && excl ? excl[w] : 0);
+    int r = 0;
+    if (once && w > 0)
+      while (rotl64(t, r) & used)
+        r++;
+    t = rotl64(t, r);
+    used |= t;
     V[w] = _mm512_set1_epi64((long long)t);
+    R[w] = _mm512_set1_epi64(r);
     acc[w] = _mm512_setzero_si512();
     tw[w] = W <= 2 || t;
   }
-  uint32_t k = 0;
-  for (uint32_t i = 0; i < cnt; i += 8) {
-    __mmask8 live = cnt - i >= 8 ? 0xff : (__mmask8)((1u << (cnt - i)) - 1);
-    __m512i x[W];
-    for (int w = 0; w < W; w++)
-      x[w] = _mm512_maskz_loadu_epi64(live, in + w * cap + i);
-    __mmask8 keep;
-    if (once) {
-#ifdef __AVX512VPOPCNTDQ__
-      __m512i c = _mm512_setzero_si512();
-      for (int w = 0; w < W; w++)
-        if (tw[w])
-          c = _mm512_add_epi64(
-              c, _mm512_popcnt_epi64(_mm512_and_si512(x[w], V[w])));
-      keep = _mm512_mask_cmpeq_epi64_mask(live, c, _mm512_set1_epi64(1));
-#else
-      /* exactly one bit in all the words a = u & v: some bit, no word with
-       * two bits (a & (a - 1) != 0), and no two nonzero words (their
-       * minimum is nonzero) */
-      __m512i any = _mm512_setzero_si512(), bad = _mm512_setzero_si512();
-      for (int w = 0; w < W; w++)
-        if (tw[w]) {
-          __m512i a = _mm512_and_si512(x[w], V[w]);
-          __m512i a1 = _mm512_sub_epi64(a, _mm512_set1_epi64(1));
-          bad = _mm512_ternarylogic_epi64(bad, a, a1, 0xF8); /* A | B & C */
-          bad = _mm512_or_si512(bad, _mm512_min_epu64(any, a));
-          any = _mm512_or_si512(any, a);
-        }
-      keep = _mm512_mask_testn_epi64_mask(
-          _mm512_mask_test_epi64_mask(live, any, any), bad, bad);
-#endif
-    } else {
-      keep = live;
-      for (int w = 0; w < W; w++)
-        if (tw[w])
-          keep = _mm512_mask_testn_epi64_mask(keep, x[w], V[w]);
-    }
-    for (int w = 0; w < W; w++) {
-      /* compress in a register and store all 8 lanes (the lists have
-       * room) */
-      __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
-      _mm512_storeu_si512(out + w * cap + k, y);
-      acc[w] = _mm512_or_si512(acc[w], y);
-    }
-    k += (uint32_t)__builtin_popcount(keep);
-  }
+  /* the full groups of 8 entries, then the last one (see FILTER_STEP) */
+  uint32_t k = 0, i = 0;
+  for (; i + 8 <= cnt; i += 8)
+    k = FILTER_STEP(in, cap, i, 1, 0xff, V, R, tw, once, out, k, acc);
+  if (i < cnt)
+    k = FILTER_STEP(in, cap, i, 0, (__mmask8)((1u << (cnt - i)) - 1), V, R,
+                    tw, once, out, k, acc);
   for (int w = 0; w < W; w++)
     un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
   return k;
@@ -217,23 +249,14 @@ static inline uint32_t KEEP_CARRY(const sstate_t *s, uint64_t *list,
     acc[w] = _mm512_setzero_si512();
     tw[w] = bad[w] != 0;
   }
-  uint32_t k = 0;
-  for (uint32_t i = 0; i < cnt; i += 8) {
-    __mmask8 live = cnt - i >= 8 ? 0xff : (__mmask8)((1u << (cnt - i)) - 1);
-    __m512i x[W];
-    for (int w = 0; w < W; w++)
-      x[w] = _mm512_maskz_loadu_epi64(live, list + w * cap + i);
-    __mmask8 keep = live;
-    for (int w = 0; w < W; w++)
-      if (tw[w])
-        keep = _mm512_mask_testn_epi64_mask(keep, x[w], B[w]);
-    for (int w = 0; w < W; w++) {
-      __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
-      _mm512_storeu_si512(list + w * cap + k, y);
-      acc[w] = _mm512_or_si512(acc[w], y);
-    }
-    k += (uint32_t)__builtin_popcount(keep);
-  }
+  /* the test of FILTER_CARRY with once = 0, full groups of 8 entries
+   * first (see FILTER_STEP) */
+  uint32_t k = 0, i = 0;
+  for (; i + 8 <= cnt; i += 8)
+    k = FILTER_STEP(list, cap, i, 1, 0xff, B, NULL, tw, 0, list, k, acc);
+  if (i < cnt)
+    k = FILTER_STEP(list, cap, i, 0, (__mmask8)((1u << (cnt - i)) - 1), B,
+                    NULL, tw, 0, list, k, acc);
   for (int w = 0; w < W; w++)
     un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
   return k;
@@ -267,16 +290,26 @@ static inline void COUNT_CARRY(const sstate_t *s, uint64_t *list,
   /* byte j = 1 << j: gf2p8affineqb then gathers bit j of the 8 bytes of
    * each qword of the matrix operand into byte j */
   const __m512i id = _mm512_set1_epi64(0x8040201008040201);
-  for (uint32_t i = 0; i < cnt; i += 8) {
-    __mmask8 live = cnt - i >= 8 ? 0xff : (__mmask8)((1u << (cnt - i)) - 1);
+  /* full groups of 8 entries, then the last one with a lane mask (see
+   * FILTER_STEP) */
+  uint32_t i = 0;
+  for (; i + 8 <= cnt; i += 8)
     for (int w = 0; w < W; w++)
       if (need[w]) {
-        __m512i y = _mm512_maskz_loadu_epi64(live, list + w * cap + i);
+        __m512i y = _mm512_loadu_si512(list + w * cap + i);
         y = _mm512_gf2p8affine_epi64_epi8(id, _mm512_permutexvar_epi8(tr, y),
                                           0);
         acc[w] = _mm512_adds_epu8(acc[w], _mm512_popcnt_epi8(y));
       }
-  }
+  if (i < cnt)
+    for (int w = 0; w < W; w++)
+      if (need[w]) {
+        __m512i y = _mm512_maskz_loadu_epi64(
+            (__mmask8)((1u << (cnt - i)) - 1), list + w * cap + i);
+        y = _mm512_gf2p8affine_epi64_epi8(id, _mm512_permutexvar_epi8(tr, y),
+                                          0);
+        acc[w] = _mm512_adds_epu8(acc[w], _mm512_popcnt_epi8(y));
+      }
   for (int w = 0; w < W; w++)
     _mm512_storeu_si512(g + 8 * w, acc[w]);
 #else
@@ -1122,6 +1155,49 @@ static void SEARCH_REC(sstate_t *s, int d) {
     ucol[w] = cc[w] & ~rc[w];
   }
   int x = -1;
+#ifdef COUNT_BYTES
+  /* with byte counters, the fewest candidates directly: t = count - 1 for
+   * the unmatched cells (wrapping, so that a count of 0, which only
+   * --no-fc leaves, becomes 255 like the other cells), its minimum over
+   * all the cells, then the cells with that minimum. One pass instead of
+   * one per class up to the minimum (~7 classes on average at the searched
+   * nodes of bench/full.txt, with 4 loads and compares each, and a loop
+   * exit that is hard to predict): 2-3% less time on bench/prod.txt, 5% on
+   * bench/full.txt. */
+  if (s->opts.mrv) {
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i t[W], lo = _mm512_set1_epi8(-1);
+    for (int w = 0; w < W; w++) {
+      t[w] = _mm512_mask_sub_epi8(lo, _cvtu64_mask64(urow[w]),
+                                  _mm512_loadu_si512(gr + 8 * w), one);
+      t[w] = _mm512_mask_sub_epi8(t[w], _cvtu64_mask64(ucol[w]),
+                                  _mm512_loadu_si512(gc + 8 * w), one);
+      lo = _mm512_min_epu8(lo, t[w]);
+    }
+    const int mn = hmin_epu8(lo);
+    if (mn == 255) /* no unmatched cell with a candidate */
+      return;
+    const __m512i M = _mm512_set1_epi8((char)mn);
+    if (mn < NCLASS - 1) {
+      for (int w = 0; w < W; w++) {
+        const uint64_t k = _cvtmask64_u64(_mm512_cmpeq_epi8_mask(t[w], M));
+        if (k) {
+          x = w * 64 + __builtin_ctzll(k);
+          break;
+        }
+      }
+    } else {
+      /* >= NCLASS candidates (saturated): the largest label, see below */
+      for (int w = W - 1; w >= 0; w--) {
+        const uint64_t k = _cvtmask64_u64(_mm512_cmpeq_epi8_mask(t[w], M));
+        if (k) {
+          x = w * 64 + 63 - __builtin_clzll(k);
+          break;
+        }
+      }
+    }
+  }
+#else
   if (s->opts.mrv)
     for (int c = 0; c < NCLASS - 1 && x < 0; c++)
       for (int w = 0; w < W; w++) {
@@ -1132,11 +1208,14 @@ static void SEARCH_REC(sstate_t *s, int d) {
           break;
         }
       }
+#endif
   for (int w = W - 1; w >= 0 && x < 0; w--) {
     uint64_t cls = urow[w] | ucol[w];
+#ifndef COUNT_BYTES
     if (s->opts.mrv)
       cls = (urow[w] & IN_CLASS(gr, w, NCLASS - 1)) |
             (ucol[w] & IN_CLASS(gc, w, NCLASS - 1));
+#endif
     if (cls)
       x = w * 64 + 63 - __builtin_clzll(cls);
   }
@@ -1158,9 +1237,15 @@ static void SEARCH_REC(sstate_t *s, int d) {
   const __m512i xm = _mm512_set1_epi64((long long)xb);
   uint32_t nk = 0;
   for (uint32_t i = 0; i < cnt; i += 8) {
-    __mmask8 live = cnt - i >= 8 ? 0xff : (__mmask8)((1u << (cnt - i)) - 1);
-    __mmask8 keep = _mm512_mask_test_epi64_mask(
-        live, _mm512_maskz_loadu_epi64(live, in + xw * cap + i), xm);
+    /* (a lane mask only for the last group, see FILTER_STEP) */
+    __mmask8 keep =
+        cnt - i >= 8
+            ? _mm512_test_epi64_mask(_mm512_loadu_si512(in + xw * cap + i), xm)
+            : _mm512_mask_test_epi64_mask(
+                  (__mmask8)((1u << (cnt - i)) - 1),
+                  _mm512_maskz_loadu_epi64((__mmask8)((1u << (cnt - i)) - 1),
+                                           in + xw * cap + i),
+                  xm);
     /* (unmasked loads, which need not wait for keep: they may read up to 7
      * entries past the list, inside its array, which are then dropped) */
     for (int w = 0; w < W; w++)
@@ -1220,6 +1305,7 @@ static void SEARCH_ROOT(sstate_t *s) {
 #undef KEEP_COUNT
 #undef SUPPORT
 #undef FILTER_CARRY
+#undef FILTER_STEP
 #undef KEEP_CARRY
 #undef COUNT_CARRY
 #undef TRY_CHILD

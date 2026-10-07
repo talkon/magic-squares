@@ -114,8 +114,10 @@ versa), plus:
   `bench/full.txt`), elsewhere it cost more than it saved;
 - branching on the unmatched cell with the fewest candidates, ties broken by
   the smallest label; the counts are exact (saturating byte counters) with
-  AVX-512BW and up to 256 labels, and
-  bit-sliced otherwise (exact up to 7 with AVX-512, 3 in plain C);
+  AVX-512BW and up to 256 labels, where the cell is found with one masked
+  minimum over the counters (3-5% less time than scanning the counts class
+  by class), and bit-sliced otherwise (exact up to 7 with AVX-512, 3 in
+  plain C);
 - the axis whose cells usually lose all candidates is filtered first, so
   most dead children are discarded after one pass; the forward check and the
   support filter only need the union of each candidate list, so the full
@@ -142,7 +144,12 @@ versa), plus:
   without VPOPCNTDQ or VBMI/GFNI/BITALG (Skylake-X, Cascade Lake) use
   fallbacks, and are also much faster than with the matrices (built with
   -march=cascadelake, run on Sapphire Rapids: 8.8 s -> 5.2 s); build with
-  -DCARRY_MAX_W=0 to use the matrices instead;
+  -DCARRY_MAX_W=0 to use the matrices instead. The filter loops run on the
+  full groups of 8 entries without a lane mask, then on the last group
+  (4-5% less time), and |u & v| = 1 is tested on one word: the words of
+  u & v rotated into one, with rotations that keep the words of v disjoint
+  (one vpopcntq, or without VPOPCNTDQ one exactly-one-bit test instead of
+  a test per word and across words: 5% less time with -march=cascadelake);
 - otherwise (more than 256 labels, or no AVX-512BW), the candidate lists are
   indices filtered with N x N intersection bit matrices: with AVX-512, 16 at
   a time against a row of a matrix, looking the bits up with permutes from

@@ -787,3 +787,112 @@ At the (2,2) nodes:
 So above the (2,2) children the search is locally consistent, as far as
 these rules can tell at a cost below the subtree they would save; what is
 left is the cost of creating those children, not missing pruning.
+
+## Micro-optimizations and the build (October 2026, round 2)
+
+Per-node overheads on the carried path, and the build (pins, PGO, clang),
+re-measured on f61e719 with `bench/prod.txt` as the main target.
+
+How it was measured: the machine is shared (load 3-4.6 from other jobs),
+and the minimum of alternating runs drifted by 5-10% between rounds, so
+the comparisons below are paired: A and B started at the same time (so
+that they see the same load), user CPU time from `wait4`, the ratio B/A
+per round, median of 4-8 rounds (`bench/prod.txt`: 15 s per run). Rounds
+agree within 1-2%, and the binary started first gets ~1% (both orders
+were run where it mattered). There is no `perf` in the VM; profiles come
+from a sampler (a `timer_create` signal at 2.5 kHz recording the RIP,
+mapped with `addr2line -i`), which shows where the instructions are, not
+mispredicts or latency. All variants visit the same nodes (checked on
+`quick.txt` for every option set and build of the CMake tests) and find
+the same squares.
+
+Profile of f61e719 on `prod.txt` (native): FILTER_CARRY (inlined) 45%,
+CROSS_TEST 17%, CROSS_AXIS with or_lanes8 15%, KEEP_CARRY 7%, TRY_CHILD's
+own code 4%, COUNT_CARRY 3% (6% with -march=cascadelake), SUPPORT 3%,
+SEARCH_REC's own code (choice of the cell, selection of the children)
+3%, the root loop 0.01%.
+
+Kept (median paired ratios on `prod.txt`, native / -march=cascadelake):
+
+* The branching cell by a masked minimum over the byte counters (t =
+  count - 1 for the unmatched cells, 255 elsewhere; vpminub across the
+  words, a 64-byte horizontal minimum with phminposuw; then the first or,
+  for saturated counts, the last label with that t) instead of scanning
+  up to 254 classes (4 loads and compares per class, ~7 classes at the
+  searched nodes of `full.txt`, where the minimum count is 1-20). In the
+  final code, going back to the class scan costs +2.7% / +3.2% on
+  `prod.txt` and +5% on `full.txt`; on f61e719 alone it was -1.6% / 0%.
+  The sampler puts only ~1% of the time in the class scan, so most of the
+  gain is the hard-to-predict exit of that loop on the way to the
+  children.
+* Splitting the filter loops (FILTER_CARRY, KEEP_CARRY, COUNT_CARRY with
+  VBMI/GFNI, the selection of the children) into the full groups of 8
+  entries without a lane mask and a last masked group: the per-iteration
+  lane mask was ~8 scalar instructions plus masked loads in a ~35
+  instruction loop. This is what gcc's profile-guided build did to the
+  hottest loop (its FILTER_CARRY took 14% fewer samples). -4.3% / -5.2%
+  (on top of the previous item). Padding the lists with empty sets
+  instead (COUNT_CARRY, children) measured the same; a 64-byte padding
+  store just before loads that partly overlap it costs a store-forwarding
+  stall, so those loops are split too.
+* |u & v| = 1 on one word: word w of v is rotated by r_w so that the
+  rotated words are disjoint (always possible: n <= 8 labels in all, at
+  most 16 of the 64 rotations collide), and c = OR_w rot(u_w & v_w, r_w)
+  has |c| = |u & v|. For W = 2: and + vprolvq + vpternlogq + one test,
+  instead of a popcount per word and an add (VPOPCNTDQ: 5 instead of 6
+  vector instructions per 8 entries) or, without VPOPCNTDQ (Cascade Lake),
+  instead of a power-of-two test per word plus a min test across words (6
+  instead of 11). 1.003 native (no change) / -5.2% cascadelake.
+
+Total, f61e719 -> this (same nodes: quick 1.77M, full 15.0M, prod 50.4M):
+
+| | native, paired ratio | native, min wall | cascadelake, paired | cascadelake, min wall |
+| --- | ---: | ---: | ---: | ---: |
+| `quick.txt` | 0.920 | 0.302 -> 0.283 s | 0.887 | 0.339 -> 0.304 s |
+| `full.txt` | 0.919 | 3.64 -> 3.39 s | 0.903 | 4.17 -> 3.72 s |
+| `prod.txt` | 0.941 | 14.70 -> 13.58 s | 0.900 | 16.07 -> 14.66 s |
+
+Profile after (native, `prod.txt`): FILTER_CARRY 46%, CROSS_TEST 18%,
+CROSS_AXIS with or_lanes8 17%, TRY_CHILD 4%, CROSS 3%, KEEP_CARRY 3%,
+SUPPORT 3%, SEARCH_REC 3% (the new choice of the cell 0.3%), COUNT_CARRY
+2%. The filter loop is now bound
+by the vector ports: per 8 entries 2 vpcompressq (2 uops each on port 5),
+the test, 2 ors for the union.
+
+Not kept:
+
+* gcc PGO (gcc 13.3, -fprofile-use -fprofile-partial-training, LTO;
+  trained on sums disjoint from quick/full/prod: `6 | 11 6 4 2 1 | 688`,
+  `6 | 12 5 3 2 1 1 | 687`, `6 | 13 7 3 2 1 | 767`, `6 | 15 6 3 2 1 | 816`,
+  `6 | 11 7 3 2 1 0 1 | 897`, `6 | 12 6 4 2 0 1 1 | 1104`,
+  `6 | 14 6 3 2 1 0 1 | 1042`, `6 | 12 7 4 2 1 | 866` (N = 1636-1828,
+  96-104 labels, 1-5 squares each) plus `6 | 16 5 4 2 | 1200` (133
+  labels) and a 5x5 sum; expectations checked with the matrix build
+  without support or cross filters). On f61e719 it gave -4.8% native
+  on `prod.txt` (held out), mostly the loop split above. On the final code:
+  native 0.997, cascadelake 0.984 on `prod.txt` (both orders, corrected
+  for the start-order bias), 0.99-1.00 on `full.txt`, and the sampler sees
+  the same total. The default build of this code is also 1% (native) and
+  4.6% (cascadelake) faster than f61e719 with PGO. Not worth a two-pass
+  build on the cluster, so no MAGIC_PGO option; the build there
+  (build-sc.sh, -march=native) is unchanged.
+* Pins: SEARCH_REC noinline gives the same binary as without it, with
+  and without PGO: gcc 13 already keeps search_rec out of line with
+  TRY_CHILD inlined (always_inline on the carried path since e9a0540),
+  and the PGO build kept that layout too (it out-of-lines FILTER_CARRY and
+  COUNT_CARRY at their cold call sites and inlines SUPPORT; forcing those
+  back changed nothing). Forcing SUPPORT and KEEP_CARRY inline into
+  TRY_CHILD in the default build: 1.0005 / 1.002.
+* clang 18 (-O3 -flto): 6% / 7% slower than gcc 13 on the final code.
+* -fno-stack-protector -fcf-protection=none (Ubuntu's hardening
+  defaults, which put a canary check in search_rec, cross_axis, support):
+  0.989 / 0.989, within the noise.
+* The union of a filter pass from the loaded entries (masked or with
+  keep) instead of from the compressed ones, in FILTER_STEP and
+  CROSS_TEST: -1..-2% native, +0.4% cascadelake. Removing the two
+  register copies of the accumulators that gcc emits in the split loop
+  (same, or a precomputed loop bound): no change.
+* Not retried: one OR reduction for both words of the unions (no change
+  before, see above). The root loop (N^2 / 2 entries filtered per sum, a
+  few ms at N = 3000), copying the cells and the cross-support sampling
+  in TRY_CHILD are too small to measure.

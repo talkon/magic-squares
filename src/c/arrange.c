@@ -200,6 +200,20 @@ static inline bool bit_get(const uint64_t *row, uint32_t u) {
   return (row[u >> 6] >> (u & 63)) & 1;
 }
 
+#ifdef __AVX512BW__
+/* the minimum of the 64 unsigned bytes of v: halving to 16 bytes, then
+ * phminposuw on the minima of their pairs (the high byte of each 16-bit
+ * lane is then 0) */
+static inline int hmin_epu8(__m512i v) {
+  __m256i a = _mm256_min_epu8(_mm512_castsi512_si256(v),
+                              _mm512_extracti64x4_epi64(v, 1));
+  __m128i b = _mm_min_epu8(_mm256_castsi256_si128(a),
+                           _mm256_extracti128_si256(a, 1));
+  b = _mm_min_epu8(b, _mm_srli_epi16(b, 8));
+  return _mm_cvtsi128_si32(_mm_minpos_epu16(b)) & 0xffff;
+}
+#endif
+
 /*
  * Filtering a candidate list by a row of one of the bit matrices (inters0,
  * inters1, has_label): with AVX-512, 16 entries at a time, looking up the
@@ -393,6 +407,11 @@ static inline uint64_t nth_bit(uint64_t y, int k) {
     y &= y - 1;
   return y & -y;
 #endif
+}
+
+/* y rotated left by r (0 <= r < 64) */
+static inline uint64_t rotl64(uint64_t y, int r) {
+  return r ? y << r | y >> (64 - r) : y;
 }
 
 /* lane j of the result: the or of the 8 lanes of a[j] */
