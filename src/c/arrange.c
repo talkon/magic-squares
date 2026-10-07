@@ -67,10 +67,12 @@ typedef struct {
   uint64_t IW;          /* words per row of the intersection matrices */
   uint64_t *inters0;    /* bit u of row v: u, v disjoint */
   uint64_t *inters1;    /* bit u of row v: |u & v| == 1 */
+  uint64_t *has_label;  /* bit v of row x: vector v contains label x */
   uint64_t *bits;       /* bits[v * W ...]: label bitset of vector v */
 
   uint32_t *valid[MAXD][2];
   uint32_t nvalid[MAXD][2];
+  uint32_t *kids[MAXD];     /* candidates through the branching cell */
   uint64_t *cells[MAXD][2]; /* W words each: union of placed rows / cols */
   uint64_t *cnt[MAXD][2];   /* NSLICE * W words each: labels in >= 1, 2, ...
                                of the candidates valid[d][a] */
@@ -435,6 +437,14 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     free(inter);
     free(touched);
   }
+  /* the same layout for label -> vectors, so that the children of a node
+   * (the candidates through the branching cell) are selected with the same
+   * vectorized filter as the candidate lists, instead of a scalar loop with
+   * an unpredictable branch per candidate */
+  s.has_label = calloc((L + 1) * s.IW, sizeof(uint64_t));
+  for (size_t v = 0; v < count; v++)
+    for (int p = 0; p < n; p++)
+      s.has_label[s.lab[v][p] * s.IW + v / 64] |= (uint64_t)1 << (v % 64);
 
   int maxd = 2 * n + 1;
   for (int a = 0; a < 2; a++)
@@ -443,6 +453,8 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
       s.cells[d][a] = calloc(W_, sizeof(uint64_t));
       s.cnt[d][a] = calloc(NSLICE * W_, sizeof(uint64_t));
     }
+  for (int d = 0; d <= maxd; d++)
+    s.kids[d] = malloc((count + 64) * sizeof(uint32_t));
   double t1 = wall_time();
 
   switch (W_) {
@@ -479,8 +491,11 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
       free(s.cells[d][a]);
       free(s.cnt[d][a]);
     }
+  for (int d = 0; d <= maxd; d++)
+    free(s.kids[d]);
   free(s.inters0);
   free(s.inters1);
+  free(s.has_label);
   free(s.bits);
   free(s.lab);
   free(s.label_val);

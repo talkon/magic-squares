@@ -177,13 +177,13 @@ static void SEARCH_REC(sstate_t *s, int d) {
   /* a row-unmatched cell is covered by a col, and vice versa */
   const int b = (urow[xw] & xb) ? COL : ROW;
 
-  const uint32_t *val = s->valid[d][b];
-  uint32_t cnt = s->nvalid[d][b];
-  for (uint32_t i = 0; i < cnt && !s->stop; i++) {
-    uint32_t v = val[i];
-    if (s->bits[(uint64_t)v * W + xw] & xb)
-      TRY_CHILD(s, d, b, v, 0);
-  }
+  /* the children are the candidates on axis b through cell x; select them
+   * all first (vectorized, no branch per candidate), then search them */
+  uint32_t *kids = s->kids[d];
+  uint32_t nk = filter_list(s->valid[d][b], s->nvalid[d][b],
+                            s->has_label + (uint64_t)x * s->IW, 0, kids);
+  for (uint32_t i = 0; i < nk && !s->stop; i++)
+    TRY_CHILD(s, d, b, kids[i], 0);
 }
 
 /* the first row r1 is the lowest-index vector of the square, so it contains
