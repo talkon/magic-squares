@@ -135,8 +135,9 @@ same estimate applied to its 758,949 squares), i.e. ~60x more per CPU-hour,
 from the faster search and from staying close to S_min. That pace cannot be
 kept up forever, since every P has only a short stretch of good sums: the
 scheduler's model forecasts ~2.7e-6 per CPU-hour averaged over the next 600
-CPU-hours (`scheduler.py forecast`), i.e. on the order of 40 CPU-years per
-magic square, versus ~280 for the first search under the same model. These
+CPU-hours and ~1.8e-6 over the next 2000 (`scheduler.py forecast`), i.e. on
+the order of 40-65 CPU-years per magic square, versus ~280 for the first
+search under the same model. These
 estimates assume the two diagonals behave independently given their
 traversal probabilities, so treat them as rough.
 
