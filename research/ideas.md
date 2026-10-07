@@ -445,6 +445,11 @@ Result (bench wall time, min of alternating runs; e9a0540 -> this):
 | P = 12 6 3 2 1 0 1, S = 900 | 59.1M -> 19.8M | 9.05 -> 6.93 s | 10.08 -> 7.35 s |
 | P = 16 5 4 2, S = 1200 | 3.62M -> 3.44M | 0.93 -> 0.95 s | 1.09 -> 1.07 s |
 
+On the time-weighted sample of production sums (`bench/prod.txt`, added
+on the integration branch in 10df892: nine sums, N = 1491-2994): 128.9M ->
+50.4M nodes, 18.9 -> 14.9 s native, 21.5 -> 16.5 s cascadelake (-21% /
+-23%; per sum -6% (P = 10 4 2 2 1 1, S = 460) to -28%).
+
 Of this, the forced inlining is ~6% on `quick.txt` and ~3% on `full.txt`
 (e9a0540 with it: 0.302 s, 4.15 s), nothing on prod. On the matrix path
 (-DCARRY_MAX_W=0, byte counters), the branch's code as it was: `quick.txt`

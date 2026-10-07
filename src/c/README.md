@@ -104,9 +104,9 @@ versa), plus:
   nearly all of these children, cross support is cheaper after it, on the
   few it lets through, so the search estimates that kill rate as it goes
   (on one child in 16) and switches. 41% fewer nodes and ~10% less time on
-  `bench/full.txt`, 65% fewer nodes and 25-30% less time on
-  production-sized instances (N = 2000-3000, built with -march=native or
-  -march=cascadelake). With the carried bitsets, a pass builds the unions
+  `bench/full.txt`, 61% fewer nodes and 21-23% less time on the
+  production-like sums of `bench/prod.txt` (built with -march=native or
+  -march=cascadelake; 24-27% on the three with N = 2161-2994). With the carried bitsets, a pass builds the unions
   8 cells at a time (8 entries of the other list: a test per cell and a
   masked or per word, then one transposing reduction) and tests 8
   candidates at a time against all of them; with the matrices it runs
