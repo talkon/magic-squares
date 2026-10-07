@@ -454,3 +454,79 @@ Of this, the forced inlining is ~6% on `quick.txt` and ~3% on `full.txt`
 (e9a0540 with it: 0.302 s, 4.15 s), nothing on prod. On the matrix path
 (-DCARRY_MAX_W=0, byte counters), the branch's code as it was: `quick.txt`
 -6%, `full.txt` -22% (8.15 -> 6.37 s CPU).
+## Diagonal-first search (October 2026, second look)
+
+A square has a vector d as a traversal (a possible diagonal) iff every row
+and col meets d in exactly one number, so the squares with d as a traversal
+are exactly the semi-magic squares that can be built from
+V_d = { v : |v & d| = 1 }. Running the semi-magic search once per d on V_d
+("d-first", `bin/dsearch`, src/c/dsearch.c) finds every (square, SP
+traversal) pair exactly once (checked on the three SP-type squares of the
+October runs: P = 13 5 3 2 0 1 / S = 632, 16 5 4 2 / 849, 12 6 3 2 1 0 1 /
+836), and only those, which is what a magic square needs twice. The
+restricted searches are cheap (|V_d| ~ 0.25 N, ~1000-50000 nodes each),
+but there are N of them, and the same (r1, c1) is re-explored under every d
+meeting both: nodes relative to the plain search (same P, S; the plain
+search then still has to check the diagonals, which is negligible):
+
+| P | S | N | plain nodes | d-first nodes | ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10 4 3 2 | 327 | 452 | 8.7K | 118K | 13.6 |
+| 13 6 3 2 | 517 | 976 | 409K | 1.72M | 4.2 |
+| 12 6 4 2 1 1 | 994 | 1153 | 663K | 2.41M | 3.6 |
+| 10 6 3 1 0 1 | 648 | 1682 | 1.02M | 3.78M | 3.7 |
+| 12 6 4 2 1 1 | 1026 | 1996 | 10.9M | 16.0M | 1.46 |
+| 14 7 5 3 | 1488 | 2450 | 22.5M | 26.3M | 1.17 |
+| 14 7 5 3 | 1560 | 3018 | 59.2M | 52.0M | 0.88 |
+| 14 7 5 3 | 1656 | 3787 | 161M | 106M | 0.66 |
+| 14 7 5 3 | 1760 | 4510 | 289M | 169M | 0.58 |
+| 14 7 5 3 | 1900 | 5251 | 371M | 217M | 0.59 |
+| 14 7 5 3 | 2050 | 6206 | 608M | 324M | 0.53 |
+
+(time ratios are within 10% of the node ratios, with per-d setup included
+in the d-first time). So d-first only wins beyond N ~ 3000, and then by at
+most ~2x: the ratio flattens at 0.5-0.6, because past N ~ 4000 the plain
+search's nodes grow only like N^2.7 at this P (S/S_min = 1.5-1.9), not the
+N^5 seen near S_min. Large N is also where the squares are least likely to
+be magic: for a fixed P, squares per sum grow like N^4 near S_min
+(S/S_min < 1.2, big-tau P) but only like N^1.5 at S/S_min ~ 1.5-1.9, while
+p_S and p_P fall with S (e.g. P = 14 8 5 3 1 1: p_P 4.6e-4 at N ~ 1200 ->
+1.7e-4 at N ~ 3500, p_S 1.6e-3 -> 6.9e-4), so the predicted magic squares
+per CPU-hour at N > 4000 are 5-100x below the near-S_min values. Fixing
+both diagonals first (N^2/4 roots, V_{d1,d2} ~ 0.04 N) has the same
+redundancy with a worse constant (the 15x of the earlier note at N ~ 900),
+and pruning the plain search by "some vector disjoint from d1 still meets
+every placed vector once" only bites below the depths where the nodes are.
+Conclusion: not a lever for the search as scheduled (N ~ 1000-2500 near
+S_min); kept as an experiment driver only.
+
+Traversal counts per square (5024 squares of the October runs, N ~
+1000-3500): s_count is close to Poisson(0.98) (0: 1990, 1: 1759, 2: 830,
+3: 314, 4: 105, 5: 20, 6: 5, 7: 1), p_count close to Poisson(0.23)
+(0: 4021, 1: 860, 2: 126, 3: 13, 4: 4), and sum s*p/720 = 1.46 against 5
+SP traversals observed (rho ~ 2-3 with large error bars). The legacy
+hSS = sum C(s, 2) per P is also within ~20% of the Poisson value. So there
+is no visible class of "structured" squares with many S- or P-traversals
+to target: a square's chance of being magic is just 5400 (rho p_S p_P)^2.
+
+3-prime P (2^a 3^b 5^c, tau 765-2275) have fewer than 600 vectors up to
+1.5 S_min (S_min 486-4332), where squares essentially never occur, so the
+higher p_P one would expect with fewer primes is not reachable there.
+
+Model check on fresh P (October 2026): with the model refit on the legacy
+totals plus ~3 CPU-hours of new runs, `plan` ranked P = 12 9 4 2, 14 6 5 2
+and 11 6 5 3 at the top with 10,600-13,300 predicted squares per CPU-hour
+(optimistic scores, i.e. with the exploration bonus). Running each for 15
+minutes from S_min gave 1700-2000 squares per CPU-hour (0.8-1.0 per sum
+over ~500 sums), so the top of the ranking over-predicts the semi-magic
+rate by ~6x: the ranking selects the P with the largest positive model
+error (winner's curse), on top of the bonus. The refit model's 600-hour
+forecast (19 CPU-years per magic square, 2e-5 magic/CPU-hour at the start
+decaying ~3x by 600 hours) should be read with that in mind; the direct
+estimate from the new runs (25 SP-type squares in 20 CPU-hours, each with
+P(magic) ~ 15 rho p_S p_P ~ 1e-5) is ~1.5e-5 magic/CPU-hour, i.e. ~8
+CPU-years at a rate that cannot be sustained once the best sums of the best
+P are used up. Wider candidate families (no factor 7, 11^2 / 13^2, prime
+23, exponents beyond gen_candidates' ranges: scripts/cand_explore.py,
+samples of 1500 and 1200 P) put no new P in the model's top 200 and ~1% of
+the score mass in the top 1000, so the candidate space is not the limit.
