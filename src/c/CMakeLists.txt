@@ -83,6 +83,25 @@ add_test(NAME fast_bench_quick_no_support COMMAND bench --no-support ${BENCH_DIR
 # msearch finds Morgenstern's square (P = 2^10 3^4 5^3 7^2, S = 327)
 add_test(NAME fast_msearch_327 COMMAND sh -c
   "$<TARGET_FILE:msearch> --sums 327 10 4 3 2 | grep -c '\"type\":\"square\"' | grep -qx 1")
+# differential test against a brute-force oracle on random synthetic
+# families (n = 3..8, all label widths, every option set), in the native
+# build and without AVX-512
+add_executable(fuzz_arrange fuzz_arrange.c enumerate.c arrange.c square.c)
+target_link_libraries(fuzz_arrange m)
+add_test(NAME fast_fuzz_arrange COMMAND fuzz_arrange 1 150
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+if (HAVE_FLAG_portable)
+  add_executable(fuzz_arrange_portable fuzz_arrange.c enumerate.c arrange.c square.c)
+  target_compile_options(fuzz_arrange_portable PRIVATE -mno-avx512f)
+  target_link_libraries(fuzz_arrange_portable m)
+  add_test(NAME fast_fuzz_arrange_portable COMMAND fuzz_arrange_portable 1000 60
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endif()
+add_executable(fuzz_arrange_matrices fuzz_arrange.c enumerate.c arrange.c square.c)
+target_compile_definitions(fuzz_arrange_matrices PRIVATE CARRY_MAX_W=0)
+target_link_libraries(fuzz_arrange_matrices m)
+add_test(NAME fast_fuzz_arrange_matrices COMMAND fuzz_arrange_matrices 2000 60
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 # n = 8 (SQ_MAX_N) searches run (they used to overflow the per-depth state)
 add_test(NAME fast_msearch_n8 COMMAND sh -c
   "$<TARGET_FILE:msearch> --vec-size 8 --min-sum 320 --max-sum 325 12 6 3 2 1 1 | grep -c '\"type\":\"sum\"' | grep -qx 6")
