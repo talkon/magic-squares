@@ -393,6 +393,11 @@ def fit_lsq(X, y, ridge=1e-6):
     return [float(b) for b in beta], float(resid.std())
 
 
+# a unit of work ends where its predicted density (magic squares per
+# CPU-second) falls below this fraction of its best (see Scorer.next_unit;
+# --unit-drop; 0 = only by --unit-time, the default while it is evaluated)
+UNIT_DROP = 0.0
+
 # version of msearch's search (its "engine" field; records without it are
 # version 1): the time model uses only timings of the newest version
 ENGINE = 2
@@ -725,14 +730,25 @@ class Scorer:
                 best = max(best, self.score(P, S, N)[0])
         return best
 
-    def next_unit(self, P, unit_time, max_sums=2000):
+    def next_unit(self, P, unit_time, max_sums=2000, drop=None):
         """the next chunk of sums of P (about unit_time CPU-seconds), with its
         predicted CPU time, semi-magic squares and magic squares; its score
-        is the predicted magic squares per CPU-second"""
+        is the predicted magic squares per CPU-second.
+
+        The chunk also ends where the predicted magic squares per CPU-second
+        of the next sum fall below `drop` times the best of the chunk so far:
+        past a P's best sums the density falls fast (time grows like N^5.5,
+        P(magic) falls like S^-8), and the rest of the stretch should compete
+        again with the other values of P rather than ride along (in forecasts,
+        units of a fixed 600 s collected ~20% less than ideal at 2000
+        CPU-hours, and 3600 s ~55% less)."""
+        if drop is None:
+            drop = UNIT_DROP
         lo = self.results.frontier(P, self.pinfo)
         stop = self.results.next_covered(P, lo)  # fill a gap, don't redo
         counts = self.pinfo.counts(P, lo, lo + 200)
         total_t, total_sq, total_m, S = 0.0, 0.0, 0.0, lo
+        best = 0.0
         hi = lo
         while stop is None or S < stop:
             if S not in counts:
@@ -743,6 +759,9 @@ class Scorer:
                 m, rate, _ = self.score(P, S, N)
                 if total_t > 0 and total_t + t > unit_time:
                     break
+                if total_t > 0 and m < drop * best:
+                    break
+                best = max(best, m)
                 total_t += t
                 total_sq += rate * t
                 total_m += m * t
@@ -1197,6 +1216,9 @@ def main():
         p.add_argument("--workers", type=int, default=os.cpu_count() or 1)
         p.add_argument("--unit-time", type=float, default=120,
                        help="target CPU-seconds per unit of work")
+        p.add_argument("--unit-drop", type=float, default=UNIT_DROP,
+                       help="also end a unit where the predicted magic squares "
+                            "per CPU-second fall below this fraction of its best")
         p.add_argument("--node-limit", type=int, default=20_000_000_000,
                        help="give up on a single sum after this many nodes")
         p.add_argument("--tau-min", type=int, default=800,
@@ -1251,6 +1273,8 @@ def main():
     p.set_defaults(func=cmd_import_legacy)
 
     args = ap.parse_args()
+    global UNIT_DROP
+    UNIT_DROP = getattr(args, "unit_drop", UNIT_DROP)
     args.func(args)
 
 
