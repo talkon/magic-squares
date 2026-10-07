@@ -409,26 +409,34 @@ static void SEARCH_REC(sstate_t *s, int d) {
   const uint64_t *gr = s->cnt[d][COL], *gc = s->cnt[d][ROW];
 
   /* branch on the unmatched cell with the fewest candidates (exactly 1, 2,
-   * ..., or >= NCLASS), ties broken by the largest label */
+   * ..., or >= NCLASS), ties broken by the smallest label (the most frequent
+   * number; ~0.5% fewer nodes than the largest). Among cells with >= NCLASS
+   * candidates, and without MRV, by the largest label instead, which is a
+   * much better stand-in for the fewest candidates there (with 8 bit-sliced
+   * classes, the smallest label gives 4x more nodes). */
   uint64_t urow[W], ucol[W];
   for (int w = 0; w < W; w++) {
     urow[w] = rc[w] & ~cc[w];
     ucol[w] = cc[w] & ~rc[w];
   }
   int x = -1;
-  for (int c = s->opts.mrv ? 0 : NCLASS - 1; c < NCLASS && x < 0; c++) {
-    for (int w = W - 1; w >= 0; w--) {
-      uint64_t cls;
-      if (!s->opts.mrv) {
-        cls = urow[w] | ucol[w];
-      } else {
-        cls = (urow[w] & IN_CLASS(gr, w, c)) | (ucol[w] & IN_CLASS(gc, w, c));
+  if (s->opts.mrv)
+    for (int c = 0; c < NCLASS - 1 && x < 0; c++)
+      for (int w = 0; w < W; w++) {
+        uint64_t cls =
+            (urow[w] & IN_CLASS(gr, w, c)) | (ucol[w] & IN_CLASS(gc, w, c));
+        if (cls) {
+          x = w * 64 + __builtin_ctzll(cls);
+          break;
+        }
       }
-      if (cls) {
-        x = w * 64 + 63 - __builtin_clzll(cls);
-        break;
-      }
-    }
+  for (int w = W - 1; w >= 0 && x < 0; w--) {
+    uint64_t cls = urow[w] | ucol[w];
+    if (s->opts.mrv)
+      cls = (urow[w] & IN_CLASS(gr, w, NCLASS - 1)) |
+            (ucol[w] & IN_CLASS(gc, w, NCLASS - 1));
+    if (cls)
+      x = w * 64 + 63 - __builtin_clzll(cls);
   }
   if (x < 0)
     return;
