@@ -107,6 +107,17 @@ target_compile_definitions(fuzz_arrange_matrices PRIVATE CARRY_MAX_W=0)
 target_link_libraries(fuzz_arrange_matrices m)
 add_test(NAME fast_fuzz_arrange_matrices COMMAND fuzz_arrange_matrices 2000 60
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+# saturated byte counters at the node below r1 (every unmatched cell in
+# >= 255 candidates, so the cell is chosen among the saturated counts; the
+# oracle is too slow there, so the variants are compared with each other,
+# with MRV off and with bit-sliced counters, and must find the planted
+# square), with carried bitsets and with the matrices
+add_test(NAME fast_fuzz_arrange_saturated COMMAND fuzz_arrange --mode 6
+  --noracle --variants default,nomrv,w3,w4,w8 1 2
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME fast_fuzz_arrange_matrices_saturated COMMAND fuzz_arrange_matrices
+  --mode 6 --noracle --variants default,nomrv,w4,w8 3 1
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 # n = 8 (SQ_MAX_N) searches run (they used to overflow the per-depth state)
 add_test(NAME fast_msearch_n8 COMMAND sh -c
   "$<TARGET_FILE:msearch> --vec-size 8 --min-sum 320 --max-sum 325 12 6 3 2 1 1 | grep -c '\"type\":\"sum\"' | grep -qx 6")

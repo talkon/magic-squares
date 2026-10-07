@@ -1163,12 +1163,17 @@ static void SEARCH_REC(sstate_t *s, int d) {
    * one per class up to the minimum (~7 classes on average at the searched
    * nodes of bench/full.txt, with 4 loads and compares each, and a loop
    * exit that is hard to predict): 2-3% less time on bench/prod.txt, 5% on
-   * bench/full.txt. */
+   * bench/full.txt. The cells that are not unmatched must read 255 in
+   * every word (the source of the masked subtraction is a constant, not
+   * the running minimum: otherwise they would carry the counts of other
+   * words' cells, and the scan for the largest saturated label below could
+   * pick one of them, which is not an unmatched cell, and drop the
+   * subtree; fuzz_arrange --mode 6 tests that case). */
   if (s->opts.mrv) {
-    const __m512i one = _mm512_set1_epi8(1);
-    __m512i t[W], lo = _mm512_set1_epi8(-1);
+    const __m512i one = _mm512_set1_epi8(1), ff = _mm512_set1_epi8(-1);
+    __m512i t[W], lo = ff;
     for (int w = 0; w < W; w++) {
-      t[w] = _mm512_mask_sub_epi8(lo, _cvtu64_mask64(urow[w]),
+      t[w] = _mm512_mask_sub_epi8(ff, _cvtu64_mask64(urow[w]),
                                   _mm512_loadu_si512(gr + 8 * w), one);
       t[w] = _mm512_mask_sub_epi8(t[w], _cvtu64_mask64(ucol[w]),
                                   _mm512_loadu_si512(gc + 8 * w), one);

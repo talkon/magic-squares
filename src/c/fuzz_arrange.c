@@ -10,13 +10,15 @@
  * n-sets (planted squares with Latin-square alternates, random transversals,
  * mutants and noise; random dense families; overlapping grids; wide label
  * universes up to W = 16; large sparse families; hubs with more than 255
- * vectors through one number), find all semi-magic squares with a simple
+ * vectors through one number; saturated counts at every unmatched cell,
+ * --mode 6), find all semi-magic squares with a simple
  * backtracking oracle (r1 -> one col per cell of r1 -> exact cover by rows),
  * canonicalize them (up to transposition and row/col order), and compare
  * with what search_vectors reports for each option set in variants[] (and
  * check that every reported square is valid). --cross also checks the oracle
  * against a second, clique-based one; --diff compares the variants with
- * each other where the oracle exceeds its budget. Exit status is nonzero on
+ * each other where the oracle exceeds its budget (--noracle: always; the
+ * first selected variant is the reference). Exit status is nonzero on
  * any mismatch, and the failing family is written to fail_<seed>.txt.
  *
  * Written for the code review of October 2026 (3000 seeds x 16 variants x 5
@@ -234,8 +236,93 @@ static void make_values(void) {
   }
 }
 
+/*
+ * Mode 6: saturated counts at the node below r1. The n numbers of a vector
+ * r1 are the rarest of the family, so that they take the top labels and r1
+ * is the first row of the squares through it, and each of them is in more
+ * than 255 vectors meeting r1 only there: with r1 placed, every unmatched
+ * cell has a saturated byte counter (>= 255 candidates), so MRV picks the
+ * cell among the saturated ones (by the largest label). Every square goes
+ * through r1, and there is a planted one. Ids: r1 = 0 .. n-1, a core K of
+ * 11 numbers, and E: n groups of n - 1 numbers. Vectors: a random ~60-90%
+ * of the n-sets with one number of r1 and n - 1 of K (the cols through the
+ * cells of r1: at least 262 per cell), all n-sets of K (rows for the
+ * support filter, and to make K common), the planted square (r1, the cols
+ * {r1_i} + group i, the rows taking the k-th number of every group), and
+ * random n-sets of E, enough to make the numbers of E more common than
+ * those of r1 (these also make more squares through r1, with the E rows
+ * that take one number of each group). n = 5 (or 6 with --n 6), < 64
+ * labels: the bug this catches (October 2026: the masked minimum of the
+ * cell choice carried other words' counts into the lanes of cells that
+ * are not unmatched, and the scan for the largest saturated label could
+ * then pick one of those, dropping the whole subtree) shows with the words
+ * past the labels, with every --min-words.
+ */
+static int sat_rows[MAXN][MAXN], sat_cols[MAXN][MAXN]; /* planted, ids */
+static void gen_saturated(void) {
+  const int K = 11, E = n * (n - 1);
+  U = n + K + E;
+  int v[MAXN];
+  /* the cols through the cells of r1: for each cell i, target of the
+   * C(11, n - 1) sets of n - 1 numbers of K, chosen at random */
+  static int masks[512];
+  int nm = 0;
+  for (int m = 0; m < 1 << K; m++)
+    if (__builtin_popcount(m) == n - 1)
+      masks[nm++] = m;
+  const int target = rint_(262, 300);
+  for (int i = 0; i < n; i++) {
+    shuffle_int(masks, nm);
+    for (int t = 0; t < target; t++) {
+      int k = 0;
+      v[k++] = i;
+      for (int b = 0; b < K; b++)
+        if (masks[t] >> b & 1)
+          v[k++] = n + b;
+      add_vec(v);
+    }
+  }
+  /* the n-sets of K */
+  for (int m = 0; m < 1 << K; m++) {
+    if (__builtin_popcount(m) != n)
+      continue;
+    int k = 0;
+    for (int b = 0; b < K; b++)
+      if (m >> b & 1)
+        v[k++] = n + b;
+    add_vec(v);
+  }
+  const int e0 = n + K;
+  /* the planted square: r1, the cols {i} + group i, the rows k */
+  for (int i = 0; i < n; i++)
+    v[i] = sat_rows[0][i] = i;
+  add_vec(v);
+  for (int i = 0; i < n; i++) {
+    v[0] = i;
+    for (int k = 0; k < n - 1; k++)
+      v[1 + k] = e0 + i * (n - 1) + k;
+    memcpy(sat_cols[i], v, sizeof(v));
+    add_vec(v);
+  }
+  for (int k = 0; k < n - 1; k++) {
+    for (int i = 0; i < n; i++)
+      v[i] = e0 + i * (n - 1) + k;
+    memcpy(sat_rows[1 + k], v, sizeof(v));
+    add_vec(v);
+  }
+  /* each number of E in ~ N n / E = N / (n - 1) of them (a few percent
+   * fewer after dedupe): 100-160 more than a number of r1 has */
+  const int N = (target + rint_(100, 160)) * (n - 1);
+  for (int t = 0; t < N; t++) {
+    random_subset(v, n, e0, U);
+    add_vec(v);
+  }
+}
+
 /* modes: 0 = one dense grid + transversals, 1 = many planted grids (wide),
- * 2 = random dense, 3 = a few grids overlapping in a small universe */
+ * 2 = random dense, 3 = a few grids overlapping in a small universe; only
+ * with --mode: 4 = large sparse, 5 = hubs, 6 = saturated counts (see
+ * gen_saturated) */
 static int gen(uint64_t seed, int force_mode, int force_n) {
   rs = seed * 0x2545F4914F6CDD1Dull + 12345;
   nv = 0;
@@ -364,6 +451,9 @@ static int gen(uint64_t seed, int force_mode, int force_n) {
         add_vec(v);
       }
     }
+  } else if (mode == 6) {
+    n = force_n == 6 ? 6 : 5;
+    gen_saturated();
   } else if (mode == 2) {
     U = n * n + rint_(0, 2 * n);
     int N = rint_(2 * n, n == 3 ? 60 : n == 4 ? 160 : 260);
@@ -887,8 +977,6 @@ int main(int argc, char **argv) {
       }
     }
     ran++;
-    total_sq += oracle_out.k;
-    inst_with_sq += oracle_out.k > 0;
     vec_list_t l;
     vec_list_init(&l, n);
     for (int v = 0; v < nv; v++) {
@@ -902,6 +990,18 @@ int main(int argc, char **argv) {
         e[n - 1 - i] = t;
       }
       vec_list_push(&l, e);
+    }
+    /* mode 6 (where the oracle is too slow): every variant must find the
+     * planted square, besides agreeing with the others */
+    canon_t planted;
+    if (mode == 6) {
+      uint64_t rows[MAXN][MAXN], cols[MAXN][MAXN];
+      for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) {
+          rows[i][j] = uval[sat_rows[i][j]];
+          cols[i][j] = uval[sat_cols[i][j]];
+        }
+      canonicalize(rows, cols, &planted);
     }
     int labels = -1;
     for (int vi = 0; vi < NVAR; vi++) {
@@ -938,18 +1038,26 @@ int main(int argc, char **argv) {
       bool same = found.k == oracle_out.k && !st.truncated && !invalid;
       for (int i = 0; i < found.k && same; i++)
         same = cmp_canon(&found.a[i], &oracle_out.a[i]) == 0;
-      if (!same) {
+      const bool lost =
+          mode == 6 &&
+          !bsearch(&planted, found.a, found.k, sizeof(canon_t), cmp_canon);
+      if (!same || lost) {
         fails++;
         printf("MISMATCH seed %lu mode %d n %d nv %d labels %d variant %s: "
-               "search %d oracle %d truncated %d invalid %d ref %s\n",
+               "search %d oracle %d truncated %d invalid %d ref %s%s\n",
                (unsigned long)seed, mode, n, nv, st.num_labels, V->name,
-               found.k, oracle_out.k, st.truncated, invalid, have_oracle == 2 ? "diff" : "oracle");
+               found.k, oracle_out.k, st.truncated, invalid,
+               have_oracle == 2 ? "diff" : "oracle",
+               lost ? " (planted square missing)" : "");
         char path[256];
         snprintf(path, sizeof(path), "fail_%lu.txt", (unsigned long)seed);
         dump(path, seed);
         fflush(stdout);
       }
     }
+    /* (the oracle's squares, or the reference variant's with --diff) */
+    total_sq += oracle_out.k;
+    inst_with_sq += oracle_out.k > 0;
     int b = labels <= 128 ? 0 : labels <= 192 ? 1 : labels <= 256 ? 2 : labels <= 512 ? 3 : 4;
     Lhist[b]++;
     vec_list_free(&l);
