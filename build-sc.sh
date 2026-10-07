@@ -5,6 +5,7 @@
 #   D: debug build (-O0)
 #   c: clean after building
 #   t: test after building, no enum tests (requires enum tests to have been run once for enum files)
+#      (ctest -R fast_ runs only the fast tests of the new pipeline)
 #   T: test after building, includes enum tests
 # Note that the first run of the test cases might be slow, as enumeration files will be generated
 
@@ -54,7 +55,7 @@ fi
 
 if [[ $* == *t* ]]; then
   mkdir -p tests
-  ctest --test-dir $CMAKE_DIR -R P
+  ctest --test-dir $CMAKE_DIR -R "P_|fast_"
 fi
 
 if [[ $* == *T* ]]; then

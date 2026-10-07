@@ -302,9 +302,11 @@ static int vec_cmp_by_sum(const void *a, const void *b) {
   }
   if (sx != sy)
     return (sx > sy) - (sx < sy);
-  for (int i = 0; i < n_global_for_cmp; i++)
+  /* same order as enumeration.cpp: lexicographic on the elements in
+   * ascending order (vectors are stored descending) */
+  for (int i = n_global_for_cmp - 1; i >= 0; i--)
     if (x[i] != y[i])
-      return (x[i] < y[i]) - (x[i] > y[i]);
+      return (x[i] > y[i]) - (x[i] < y[i]);
   return 0;
 }
 

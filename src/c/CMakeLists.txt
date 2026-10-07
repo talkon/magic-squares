@@ -29,3 +29,18 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 add_executable(enumeration enumeration.cpp)
+
+# Tests of the new pipeline (fast; run with `ctest -R fast_`).
+set(BENCH_DIR ${PROJECT_SOURCE_DIR}/bench)
+add_test(NAME fast_bench_quick COMMAND bench ${BENCH_DIR}/quick.txt)
+# the same instances, with wider label bitsets than needed
+add_test(NAME fast_bench_quick_wide3 COMMAND bench --min-words 3 ${BENCH_DIR}/quick.txt)
+add_test(NAME fast_bench_quick_wide8 COMMAND bench --min-words 8 ${BENCH_DIR}/quick.txt)
+add_test(NAME fast_bench_quick_no_fc COMMAND bench --no-fc --no-mrv ${BENCH_DIR}/quick.txt)
+# msearch finds Morgenstern's square (P = 2^10 3^4 5^3 7^2, S = 327)
+add_test(NAME fast_msearch_327 COMMAND sh -c
+  "$<TARGET_FILE:msearch> --sums 327 10 4 3 2 | grep -c '\"type\":\"square\"' | grep -qx 1")
+# the new enumerator writes exactly what the old one did
+add_test(NAME fast_enumerate_matches_cpp COMMAND sh -c
+  "$<TARGET_FILE:enumeration> old_10_4_3_2.txt 10 4 3 2 > /dev/null && $<TARGET_FILE:enumerate> --file new_10_4_3_2.txt 10 4 3 2 2> /dev/null && cmp old_10_4_3_2.txt new_10_4_3_2.txt"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

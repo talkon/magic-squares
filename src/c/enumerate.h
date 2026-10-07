@@ -66,7 +66,8 @@ uint64_t enum_min_sum(const prime_exps_t *p, int n);
 
 /*
  * Enumerate all vectors with sum in [sum_min, sum_max] and append them to
- * `out`, sorted by (sum, then lexicographically descending elements).
+ * `out`, sorted by sum, then like enumeration.cpp (lexicographically on the
+ * elements taken in ascending order).
  * Returns number of DFS nodes visited (for profiling).
  */
 uint64_t enum_vectors(const prime_exps_t *p, int n, uint64_t sum_min,
