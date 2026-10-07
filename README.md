@@ -110,6 +110,36 @@ Arrangement benchmark (single core, Intel Xeon with AVX-512):
 The new search visits 4-5x fewer nodes than the legacy search (7.5M vs 31.7M on
 `quick.txt`, 126M vs 598M on `full.txt`), at a somewhat higher cost per node.
 
+## Status (October 2026)
+
+In a few CPU-hours of testing near S_min (36 values of P searched from S_min
+for 4 minutes each, then 40 units chosen by the scheduler), the new pipeline
+found 5,821 semi-magic squares, including 12 SP-type, one SP+S-type
+(P = 2^12 3^6 5^3 7^2 11 17, S = 836) and one SP+P-type square
+(P = 2^16 3^5 5^4 7^2, S = 849; the first search found one SP+P square in
+total):
+
+```
+ 324  120    7  128  200   70
+  25   64  216  420   40   84
+ 300  147   50   48   16  288
+ 112    8  180  175   54  320
+  32  360  140   18  224   75
+  56  150  256   60  315   12
+```
+
+Estimating the chance that each square is magic from the observed rates of
+S- and P-traversals, these runs found magic-square "probability mass" at
+~2.5-3e-5 per CPU-hour, versus ~4e-7 per CPU-hour for the first search (the
+same estimate applied to its 758,949 squares), i.e. ~60x more per CPU-hour,
+from the faster search and from staying close to S_min. That pace cannot be
+kept up forever, since every P has only a short stretch of good sums: the
+scheduler's model forecasts ~2.7e-6 per CPU-hour averaged over the next 600
+CPU-hours (`scheduler.py forecast`), i.e. on the order of 40 CPU-years per
+magic square, versus ~280 for the first search under the same model. These
+estimates assume the two diagonals behave independently given their
+traversal probabilities, so treat them as rough.
+
 ## Directory structure
 
 ```
