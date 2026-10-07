@@ -43,6 +43,7 @@ void search_opts_default(search_opts_t *o) {
   o->mrv = 1;
   o->min_words = 0;
   o->gather = 0;
+  o->support = 1;
 }
 
 /*
@@ -77,6 +78,14 @@ void search_opts_default(search_opts_t *o) {
 #else
 #define NSLICE 4
 #endif
+#endif
+/* with bit-sliced counters, nodes from this depth on (two rows and two cols
+ * placed, for n = 6) are mostly pruned by the support filter, which needs
+ * only the union of each candidate list, so the full counts for choosing the
+ * branching cell are computed only for the nodes that are actually searched
+ * (byte counters cost no more than the unions, so they are always full) */
+#ifndef LAZY_DEPTH
+#define LAZY_DEPTH 4
 #endif
 /* words of cnt[d][a] per word of labels, for either kind of counters */
 #define CNT_WORDS (NSLICE > 8 ? NSLICE : 8)
@@ -220,6 +229,62 @@ static inline void count_slices_simd_w8(const uint64_t *bits,
   }
   for (int t = 0; t < NSLICE; t++)
     _mm512_storeu_si512(g + 8 * t, A[t]);
+}
+
+/* the same, over the vectors of list[0..k) disjoint from bad, which are moved
+ * to the front of list (in place); returns their number. A vector meeting
+ * bad is counted as the empty set. */
+static inline uint32_t keep_count_simd_w8(const uint64_t *bits, uint32_t *list,
+                                          uint32_t k, const uint64_t *bad,
+                                          uint64_t *g) {
+  const __m512i b = _mm512_loadu_si512(bad);
+  __m512i A[NSLICE];
+  for (int t = 0; t < NSLICE; t++)
+    A[t] = _mm512_setzero_si512();
+  uint32_t kk = 0;
+  for (uint32_t i = 0; i < k; i++) {
+    uint32_t u = list[i];
+    __m512i x = _mm512_loadu_si512(bits + 8 * (uint64_t)u);
+    int keep = _mm512_test_epi64_mask(x, b) == 0;
+    __m512i m = _mm512_maskz_mov_epi64((__mmask8)-keep, x);
+    for (int t = NSLICE - 1; t > 0; t--)
+      A[t] = _mm512_ternarylogic_epi64(A[t], A[t - 1], m, 0xF8);
+    A[0] = _mm512_or_si512(A[0], m);
+    list[kk] = u;
+    kk += (uint32_t)keep;
+  }
+  for (int t = 0; t < NSLICE; t++)
+    _mm512_storeu_si512(g + 8 * t, A[t]);
+  return kk;
+}
+
+/* only slice 0 (the union), of all of list[0..k) or of the vectors disjoint
+ * from bad (in place, as above) */
+static inline void union_simd_w8(const uint64_t *bits, const uint32_t *list,
+                                 uint32_t k, uint64_t *g) {
+  __m512i acc = _mm512_setzero_si512();
+  for (uint32_t i = 0; i < k; i++)
+    acc = _mm512_or_si512(acc,
+                          _mm512_loadu_si512(bits + 8 * (uint64_t)list[i]));
+  _mm512_storeu_si512(g, acc);
+}
+
+static inline uint32_t keep_union_simd_w8(const uint64_t *bits, uint32_t *list,
+                                          uint32_t k, const uint64_t *bad,
+                                          uint64_t *g) {
+  const __m512i b = _mm512_loadu_si512(bad);
+  __m512i acc = _mm512_setzero_si512();
+  uint32_t kk = 0;
+  for (uint32_t i = 0; i < k; i++) {
+    uint32_t u = list[i];
+    __m512i x = _mm512_loadu_si512(bits + 8 * (uint64_t)u);
+    int keep = _mm512_test_epi64_mask(x, b) == 0;
+    acc = _mm512_mask_or_epi64(acc, (__mmask8)-keep, acc, x);
+    list[kk] = u;
+    kk += (uint32_t)keep;
+  }
+  _mm512_storeu_si512(g, acc);
+  return kk;
 }
 #define HAVE_SIMD_COUNT_W8 1
 #endif

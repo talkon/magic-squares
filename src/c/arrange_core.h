@@ -2,11 +2,14 @@
  * Recursive search, specialized for a label-bitset width of W 64-bit words.
  * Included from arrange.c once per width.
  *
- * Invariant on entering SEARCH_REC(s, d): the candidate lists valid[d][a] and
- * their label counts cnt[d][a] are filled in, every unmatched cell
- * has at least one candidate, and each axis has enough candidates left. The
- * parent does this work while creating the child (see TRY_CHILD), so that
- * children which would be pruned are discarded as cheaply as possible.
+ * Invariant on entering SEARCH_REC(s, d): the candidate lists valid[d][a]
+ * and their label counts cnt[d][a] are filled in, every unmatched cell has
+ * at least one candidate, each axis has enough candidates left, and the
+ * lists are closed under the support filter (see SUPPORT). With bit-sliced
+ * counters, from LAZY_DEPTH on only the union (slice 0) of each list is
+ * filled in, and SEARCH_REC computes the other slices itself. The parent does
+ * this work while creating the child (see TRY_CHILD), so that children which
+ * would be pruned are discarded as cheaply as possible.
  */
 #ifndef W
 #error "define W before including arrange_core.h"
@@ -16,7 +19,11 @@
 #define CAT(a, b) CAT_(a, b)
 #define SEARCH_REC CAT(search_rec, W)
 #define SEARCH_ROOT CAT(search_root, W)
-#define FILTER_COUNT CAT(filter_count, W)
+#define COUNT_LIST CAT(count_list, W)
+#define UNION_LIST CAT(union_list, W)
+#define STORE_UNION CAT(store_union, W)
+#define KEEP_COUNT CAT(keep_count, W)
+#define SUPPORT CAT(support, W)
 #define TRY_CHILD CAT(try_child, W)
 #define COVERED CAT(covered, W)
 #define IN_CLASS CAT(in_class, W)
@@ -65,14 +72,11 @@ static inline uint64_t IN_CLASS(const uint64_t *g, int w, int c) {
 }
 
 /*
- * out = { u in in[0..cnt) : u >= min_v and bit u of row is set }, and the
- * counts g (see COVERED / IN_CLASS) of each label over out. Returns |out|.
+ * The counts g (see COVERED / IN_CLASS) of each label over list[0..k). The
+ * list must have room for 4 entries past its end.
  */
-static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint32_t *in,
-                                    uint32_t cnt, const uint64_t *row,
-                                    uint32_t min_v, uint32_t *out,
-                                    uint64_t *g /* [CNT_WORDS * W] */) {
-  uint32_t k = filter_list(in, cnt, row, min_v, s->nseg, out);
+static inline void COUNT_LIST(const sstate_t *s, uint32_t *list, uint32_t k,
+                              uint64_t *g /* [CNT_WORDS * W] */) {
 #ifdef COUNT_BYTES
   /* 4 vectors per iteration (fewer iterations, so fewer mispredicted loop
    * exits), padding the list with the empty vector N. With W = 2, even and
@@ -84,10 +88,10 @@ static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint32_t *in,
   for (int w = 0; w < W; w++)
     acc[0][w] = acc[1][w] = _mm512_setzero_si512();
   for (int j = 0; j < 4; j++)
-    out[k + j] = s->N;
+    list[k + j] = s->N;
   for (uint32_t i = 0; i < k; i += 4)
     for (int j = 0; j < 4; j++) {
-      const uint64_t *m = s->bits + (uint64_t)out[i + j] * W;
+      const uint64_t *m = s->bits + (uint64_t)list[i + j] * W;
       __m512i *a = acc[j % nacc];
       for (int w = 0; w < W; w++)
         a[w] = _mm512_mask_adds_epu8(a[w], _cvtu64_mask64(m[w]), a[w], one);
@@ -96,21 +100,20 @@ static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint32_t *in,
     _mm512_storeu_si512(g + 8 * w, nacc == 2
                                        ? _mm512_adds_epu8(acc[0][w], acc[1][w])
                                        : acc[0][w]);
-  return k;
 #else
 #ifdef HAVE_SIMD_COUNT_W8
   if (W == 8) {
-    count_slices_simd_w8(s->bits, out, k, g);
-    return k;
+    count_slices_simd_w8(s->bits, list, k, g);
+    return;
   }
 #endif
-  /* thermometer code: gg[t] = labels in more than t of the kept vectors */
+  /* thermometer code: gg[t] = labels in more than t of the vectors */
   uint64_t gg[NSLICE][W];
   for (int t = 0; t < NSLICE; t++)
     for (int w = 0; w < W; w++)
       gg[t][w] = 0;
   for (uint32_t i = 0; i < k; i++) {
-    const uint64_t *m = s->bits + (uint64_t)out[i] * W;
+    const uint64_t *m = s->bits + (uint64_t)list[i] * W;
     for (int w = 0; w < W; w++) {
       for (int t = NSLICE - 1; t > 0; t--)
         gg[t][w] |= gg[t - 1][w] & m[w];
@@ -120,8 +123,180 @@ static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint32_t *in,
   for (int t = 0; t < NSLICE; t++)
     for (int w = 0; w < W; w++)
       g[t * W + w] = gg[t][w];
-  return k;
 #endif
+}
+
+/*
+ * Store the union u (W words) of a list as its counts g, for COVERED only:
+ * slice 0 of bit-sliced counters, or byte counters of 0 or 255.
+ */
+static inline void STORE_UNION(uint64_t *g, const uint64_t *u) {
+#ifdef COUNT_BYTES
+  for (int w = 0; w < W; w++)
+    _mm512_storeu_si512(g + 8 * w, _mm512_movm_epi8(_cvtu64_mask64(u[w])));
+#else
+  for (int w = 0; w < W; w++)
+    g[w] = u[w];
+#endif
+}
+
+/* only the union of list[0..k), as counts readable by COVERED */
+static inline void UNION_LIST(const sstate_t *s, const uint32_t *list,
+                              uint32_t k, uint64_t *g) {
+#ifdef HAVE_SIMD_COUNT_W8
+  if (W == 8) {
+    union_simd_w8(s->bits, list, k, g);
+    return;
+  }
+#endif
+  uint64_t acc[W];
+  for (int w = 0; w < W; w++)
+    acc[w] = 0;
+  for (uint32_t i = 0; i < k; i++) {
+    const uint64_t *m = s->bits + (uint64_t)list[i] * W;
+    for (int w = 0; w < W; w++)
+      acc[w] |= m[w];
+  }
+  STORE_UNION(g, acc);
+}
+
+/*
+ * Keep the vectors of list[0..k) disjoint from bad (moved to the front of
+ * list, in place), compute their counts g (with bit-sliced counters and
+ * union_only, only slice 0), and return their number. A vector meeting bad
+ * is counted as the empty set, so there is no branch per vector.
+ */
+static inline uint32_t KEEP_COUNT(const sstate_t *s, uint32_t *list,
+                                  uint32_t k, const uint64_t *bad,
+                                  uint64_t *g, int union_only) {
+  uint32_t kk = 0;
+#ifdef COUNT_BYTES
+  if (union_only) {
+    uint64_t acc[W];
+    for (int w = 0; w < W; w++)
+      acc[w] = 0;
+    for (uint32_t i = 0; i < k; i++) {
+      uint32_t u = list[i];
+      const uint64_t *m = s->bits + (uint64_t)u * W;
+      uint64_t hit = 0;
+      for (int w = 0; w < W; w++)
+        hit |= m[w] & bad[w];
+      const uint64_t keep = (uint64_t)0 - (hit == 0);
+      for (int w = 0; w < W; w++)
+        acc[w] |= m[w] & keep;
+      list[kk] = u;
+      kk += (uint32_t)(keep & 1);
+    }
+    STORE_UNION(g, acc);
+    return kk;
+  }
+  const int nacc = W <= 2 ? 2 : 1;
+  const __m512i one = _mm512_set1_epi8(1);
+  __m512i acc[2][W];
+  for (int w = 0; w < W; w++)
+    acc[0][w] = acc[1][w] = _mm512_setzero_si512();
+  for (uint32_t i = 0; i < k; i++) {
+    uint32_t u = list[i];
+    const uint64_t *m = s->bits + (uint64_t)u * W;
+    uint64_t hit = 0;
+    for (int w = 0; w < W; w++)
+      hit |= m[w] & bad[w];
+    const uint64_t keep = (uint64_t)0 - (hit == 0);
+    __m512i *a = acc[i % nacc];
+    for (int w = 0; w < W; w++)
+      a[w] = _mm512_mask_adds_epu8(a[w], _cvtu64_mask64(m[w] & keep), a[w],
+                                   one);
+    list[kk] = u;
+    kk += (uint32_t)(keep & 1);
+  }
+  for (int w = 0; w < W; w++)
+    _mm512_storeu_si512(g + 8 * w, nacc == 2
+                                       ? _mm512_adds_epu8(acc[0][w], acc[1][w])
+                                       : acc[0][w]);
+#else
+#ifdef HAVE_SIMD_COUNT_W8
+  if (W == 8)
+    return union_only ? keep_union_simd_w8(s->bits, list, k, bad, g)
+                      : keep_count_simd_w8(s->bits, list, k, bad, g);
+#endif
+  const int nsl = union_only ? 1 : NSLICE;
+  uint64_t gg[NSLICE][W];
+  for (int t = 0; t < nsl; t++)
+    for (int w = 0; w < W; w++)
+      gg[t][w] = 0;
+  for (uint32_t i = 0; i < k; i++) {
+    uint32_t u = list[i];
+    const uint64_t *m = s->bits + (uint64_t)u * W;
+    uint64_t hit = 0;
+    for (int w = 0; w < W; w++)
+      hit |= m[w] & bad[w];
+    const uint64_t keep = (uint64_t)0 - (hit == 0);
+    for (int w = 0; w < W; w++) {
+      const uint64_t mw = m[w] & keep;
+      for (int t = nsl - 1; t > 0; t--)
+        gg[t][w] |= gg[t - 1][w] & mw;
+      gg[0][w] |= mw;
+    }
+    list[kk] = u;
+    kk += (uint32_t)(keep & 1);
+  }
+  for (int t = 0; t < nsl; t++)
+    for (int w = 0; w < W; w++)
+      g[t * W + w] = gg[t][w];
+#endif
+  return kk;
+}
+
+/*
+ * Support filter. In any completion of a node, every cell of a remaining col
+ * lies in some row of the square: in a placed row, or in a remaining row,
+ * which is one of the row candidates. So a candidate col with a cell that is
+ * neither in a placed row nor in any candidate row can be dropped, and vice
+ * versa. Forward checking asks this only of the unmatched cells; asking it
+ * of every cell of every candidate (in particular of the cells in no placed
+ * vector) is much stronger: about 85% of the nodes with two rows and two
+ * cols placed that pass forward checking are dead by this test, and nearly
+ * all of those one level deeper.
+ *
+ * The union of a list (COVERED) tells whether it needs filtering at all:
+ * only when the union has a cell outside the other axis' support, and then
+ * at least one candidate goes. Dropping candidates shrinks the support of
+ * the other axis, so the two axes are filtered in turn, axis a first, until
+ * neither changes. Filters valid[d][*] in place, recounts cnt[d][*] (only
+ * the unions if union_only), and returns nonzero if the node is dead (an
+ * unmatched cell without a candidate, or too few candidates).
+ */
+static int SUPPORT(sstate_t *s, int d, int a, int union_only) {
+  const int n = s->n;
+  int quiet = 0; /* axes in a row found closed */
+  while (quiet < 2) {
+    const uint64_t *C = s->cells[d][1 - a], *G = s->cnt[d][1 - a];
+    uint64_t *g = s->cnt[d][a];
+    uint64_t bad[W], any = 0;
+    for (int w = 0; w < W; w++) {
+      bad[w] = COVERED(g, w) & ~(C[w] | COVERED(G, w));
+      any |= bad[w];
+    }
+    if (!any) {
+      quiet++;
+    } else {
+      quiet = 1;
+      uint32_t k =
+          KEEP_COUNT(s, s->valid[d][a], s->nvalid[d][a], bad, g, union_only);
+      s->nvalid[d][a] = k;
+      if (s->np[a] + (int)k < n)
+        return 1;
+      /* forward checking: the unmatched cells of the other axis */
+      const uint64_t *Ca = s->cells[d][a];
+      uint64_t dead = 0;
+      for (int w = 0; w < W; w++)
+        dead |= C[w] & ~Ca[w] & ~COVERED(g, w);
+      if (dead)
+        return 1;
+    }
+    a = 1 - a;
+  }
+  return 0;
 }
 
 static void SEARCH_REC(sstate_t *s, int d);
@@ -153,15 +328,24 @@ static inline void TRY_CHILD(sstate_t *s, int d, int b, uint32_t v,
   }
   const uint64_t *ncell_b = b == ROW ? nrc : ncc;
   const uint64_t *ncell_o = b == ROW ? ncc : nrc;
+  const int sup = s->opts.support && s->opts.forward_check;
+  /* deep children are mostly pruned by the support filter, which needs only
+   * the unions: leave the full counts to SEARCH_REC */
+  const int lazy = sup && d + 1 >= LAZY_DEPTH;
 
   /* candidates on the other axis must meet v exactly once; they cover the
    * unmatched cells on axis b (including v's own new cells), which is where
    * most dead ends show up, so check those first */
   const int o = 1 - b;
   uint64_t *go = s->cnt[d + 1][o];
-  uint32_t ko = FILTER_COUNT(s, s->valid[d][o], s->nvalid[d][o],
-                             s->inters1 + (uint64_t)v * s->IW, min_v,
-                             s->valid[d + 1][o], go);
+  uint32_t *lo = s->valid[d + 1][o];
+  uint32_t ko = filter_list(s->valid[d][o], s->nvalid[d][o],
+                            s->inters1 + (uint64_t)v * s->IW, min_v, s->nseg,
+                            lo);
+  if (lazy)
+    UNION_LIST(s, lo, ko, go);
+  else
+    COUNT_LIST(s, lo, ko, go);
   s->nvalid[d + 1][o] = ko;
   uint64_t dead = 0;
   if (s->np[o] + (int)ko < n)
@@ -171,17 +355,31 @@ static inline void TRY_CHILD(sstate_t *s, int d, int b, uint32_t v,
       dead |= ncell_b[w] & ~ncell_o[w] & ~COVERED(go, w);
   if (!dead) {
     /* candidates on axis b must be disjoint from v; they cover the unmatched
-     * cells on the other axis */
+     * cells on the other axis. With the support filter, they must also lie
+     * within the placed vectors and the candidates of the other axis, which
+     * costs nothing extra here. */
     uint64_t *gb = s->cnt[d + 1][b];
-    uint32_t kb = FILTER_COUNT(s, s->valid[d][b], s->nvalid[d][b],
-                               s->inters0 + (uint64_t)v * s->IW, min_v,
-                               s->valid[d + 1][b], gb);
+    uint32_t *lb = s->valid[d + 1][b];
+    uint32_t kb = filter_list(s->valid[d][b], s->nvalid[d][b],
+                              s->inters0 + (uint64_t)v * s->IW, min_v, s->nseg,
+                              lb);
+    if (sup) {
+      uint64_t bad[W];
+      for (int w = 0; w < W; w++)
+        bad[w] = ~(ncell_o[w] | COVERED(go, w));
+      kb = KEEP_COUNT(s, lb, kb, bad, gb, lazy);
+    } else {
+      COUNT_LIST(s, lb, kb, gb);
+    }
     s->nvalid[d + 1][b] = kb;
     if (s->np[b] + (int)kb < n)
       dead = 1;
     if (s->opts.forward_check)
       for (int w = 0; w < W; w++)
         dead |= ncell_o[w] & ~ncell_b[w] & ~COVERED(gb, w);
+    /* the b candidates are closed already, the o candidates may not be */
+    if (!dead && sup)
+      dead = SUPPORT(s, d + 1, o, lazy);
     if (!dead)
       SEARCH_REC(s, d + 1);
   }
@@ -200,6 +398,11 @@ static void SEARCH_REC(sstate_t *s, int d) {
 #endif
   if (s->stop)
     return;
+  if (d >= LAZY_DEPTH && s->opts.support && s->opts.forward_check &&
+      s->opts.mrv) {
+    COUNT_LIST(s, s->valid[d][ROW], s->nvalid[d][ROW], s->cnt[d][ROW]);
+    COUNT_LIST(s, s->valid[d][COL], s->nvalid[d][COL], s->cnt[d][COL]);
+  }
   const uint64_t *rc = s->cells[d][ROW], *cc = s->cells[d][COL];
   /* candidates on axis a cover unmatched cells of axis 1-a, so cells of
    * placed rows are classified by the counts over candidate cols */
@@ -262,7 +465,11 @@ static void SEARCH_ROOT(sstate_t *s) {
 
 #undef SEARCH_REC
 #undef SEARCH_ROOT
-#undef FILTER_COUNT
+#undef COUNT_LIST
+#undef UNION_LIST
+#undef STORE_UNION
+#undef KEEP_COUNT
+#undef SUPPORT
 #undef TRY_CHILD
 #undef COVERED
 #undef IN_CLASS

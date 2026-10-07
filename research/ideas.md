@@ -77,3 +77,52 @@ or `bench/full.txt`):
   survive the "every diagonal number has a row and a col candidate" filter,
   and each costs a small search. So for exhaustive search per (P, S), the
   semi-magic search followed by the diagonal check is the cheaper route.
+
+## End-game shortcuts and the support filter (October 2026)
+
+Where the nodes are (search as above, `bench/full.txt`, 126M nodes, by rows
+and cols placed after the step): (2,2) 13%, (2,3) 36%, (3,2) 19%, (3,3) 25%,
+(1,2) 2%. Most nodes four to six vectors deep die as soon as they are
+created. The literal end-game (one axis complete, or one row/col missing) is
+negligible: about 250 nodes have all rows or all cols placed and ~5000 have
+8 or more vectors placed, out of 126M. So shortcuts there (looking up the
+last row/col, which is determined by the unmatched cells; exact covers when
+one axis is complete) cannot save anything measurable.
+
+* One-axis feasibility check (did not pay off): the remaining rows must be
+  n - r pairwise disjoint candidates, each taking one unmatched cell of every
+  placed col, so a node is dead if no such set exists. Exact, and it kills
+  ~83% of the (2,3)/(3,2) nodes that pass forward checking (12.6% fewer nodes
+  on `quick.txt`, 20% on `full.txt`), but those nodes would have died one
+  level down anyway, and the check costs ~300 cycles however it is done
+  (recursive filtering of the list with the intersection matrices; a clique
+  search on 64-bit masks over the local candidate list; one class of
+  candidates per unmatched cell of a placed vector, with AVX-512 disjointness
+  masks): 1.13 s -> 1.14-1.15 s on `quick.txt`.
+* Support filter (kept, the big win): every cell of a candidate col must be
+  in a placed row or in some candidate row, and vice versa, iterated to a
+  fixpoint. It kills ~85% of the (2,2) nodes that pass forward checking and
+  virtually all deeper ones. Nodes 7.5M -> 2.3M (`quick.txt`), 126M -> 31M
+  (`full.txt`); time 1.12 s -> 0.67 s and 18.3 s -> 9.2 s. Cheap because the
+  union of a list (slice 0 of the counts) says whether filtering is needed at
+  all, and the first pass is fused into the filtering of the second axis.
+  Variants: stopping after 1-6 passes instead of at the fixpoint is slower;
+  filtering the disjoint axis first in deep children is 5% slower; computing
+  only the unions while creating children (full counts only for searched
+  nodes) helps from depth 4 on (3%) but not above; SIMD loops for the unions
+  and the in-place filtering: 8%.
+* Pairwise support (not kept): a col is kept only if every cell of it is
+  covered by a row candidate meeting it exactly once. On top of the support
+  filter it kills 39% of the searched (1,2) nodes and 99% of the searched
+  (2,2) nodes (nodes 2.3M -> 1.6M on `quick.txt`), but done naively (one
+  filtered list per candidate) the search is 8x slower; it would need a much
+  cheaper formulation. Similarly, among the row completions of a (2,2) node
+  (sets of 4 disjoint candidate rows, ~90 on average), only ~0.6 of its ~30
+  candidate cols meet every row of some completion exactly once.
+* The cheap special case of pairwise support (not kept): if a number is in
+  exactly one row candidate r (count 1 in the bit-sliced counts), every col
+  candidate containing it must meet r exactly once. Iterated together with
+  the support filter it kills 28% of the searched (1,2) nodes and 97% of the
+  searched (2,2) nodes, but a single pass kills only 4% / 29%: the power is
+  in the cascade, which needs recounting both lists several times. 2.8x
+  slower at the (1,2) nodes, 13% slower at the (2,2) nodes only.

@@ -16,7 +16,7 @@ Options: `--vec-size N` (5, 6, 7), `--min-sum`, `--max-sum`, `--sums`,
 `--node-limit X` (per sum; the record is marked `truncated`), `--total-nodes X`
 and `--time-limit T` (stop after the sum during which the limit is reached),
 `--out FILE` (append), `--format legacy`, `--reduce strong`, and `--no-fc` /
-`--no-mrv` to disable the search heuristics.
+`--no-mrv` / `--no-support` to disable the search heuristics.
 
 Output is JSON lines, flushed as it goes: one `square` record per semi-magic
 square (with its traversal counts, the best pair of diagonals, and the square
@@ -36,6 +36,7 @@ bin/bench bench/quick.txt              # ~1 s
 bin/bench --repeat 3 bench/full.txt    # ~20 s, closer to production sizes
 bin/bench --only "S=648" bench/full.txt
 bin/bench --no-fc --no-mrv bench/quick.txt   # compare search variants
+bin/bench --no-support bench/quick.txt
 bin/bench --min-words 8 --gather bench/quick.txt   # test the paths for more labels / larger N
 bin/bench --update bench/quick.txt     # print instances with observed values
 ```
@@ -71,13 +72,21 @@ versa), plus:
   operations;
 - forward checking: a node is pruned as soon as some unmatched cell has no
   remaining candidate through it;
+- support filter: every cell of a candidate column must lie in a placed row
+  or in some candidate row (the row of the square through it), and vice
+  versa, so candidates using a number that no candidate of the other axis
+  covers are dropped, repeatedly until both lists are closed. This prunes most
+  nodes with two rows and two columns placed, which forward checking lets
+  through: 4x fewer nodes and ~30% less time on `bench/full.txt`;
 - branching on the unmatched cell with the fewest candidates, ties broken by
   the largest label; the counts are exact (saturating byte counters, one
   masked add per 64 labels) with AVX-512BW and up to 256 labels, and
   bit-sliced otherwise (exact up to 7 with AVX-512, 3 in plain C);
 - the counts are computed while filtering the candidate lists, filtering first
   the axis whose cells usually lose all candidates, so most dead children are
-  discarded after one pass;
+  discarded after one pass; from depth 4 on, where most children are pruned
+  by the support filter, only the unions are computed while filtering, and
+  the full counts only for the nodes that are searched;
 - the children of a node (the candidates through the branching cell) are
   selected with the same filter as the candidate lists, from a label ->
   vectors bit matrix, rather than tested one by one;

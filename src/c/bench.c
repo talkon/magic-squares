@@ -1,8 +1,8 @@
 /*
  * Arrangement benchmark.
  *
- * usage: bench [--repeat K] [--only SUBSTR] [--no-fc] [--no-mrv] [--update]
- *              [--min-words K] [--gather] instances.txt
+ * usage: bench [--repeat K] [--only SUBSTR] [--no-fc] [--no-mrv] [--no-support]
+ *              [--update] [--min-words K] [--gather] instances.txt
  *
  * Each instance line is
  *     n | e1 e2 ... | S | expected_squares | expected_hash
@@ -13,9 +13,9 @@
  * unknown expectations, and --update to print instance lines with the
  * observed values filled in.
  *
- * --no-fc, --no-mrv, --min-words and --gather change the search (to compare
- * variants, or to test the code paths for wider label bitsets or larger N
- * on small instances).
+ * --no-fc, --no-mrv, --no-support, --min-words and --gather change the
+ * search (to compare variants, or to test the code paths for wider label
+ * bitsets or larger N on small instances).
  *
  * Exit status is nonzero if any instance does not match.
  */
@@ -64,9 +64,10 @@ int main(int argc, char *argv[]) {
                                          {"update", no_argument, 0, 'u'},
                                          {"min-words", required_argument, 0, 'w'},
                                          {"gather", no_argument, 0, 'g'},
+                                         {"no-support", no_argument, 0, 's'},
                                          {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "r:o:fmuw:g", long_options, NULL)) !=
+  while ((opt = getopt_long(argc, argv, "r:o:fmuw:gs", long_options, NULL)) !=
          -1) {
     switch (opt) {
     case 'r':
@@ -90,13 +91,17 @@ int main(int argc, char *argv[]) {
     case 'g':
       opts.gather = 1;
       break;
+    case 's':
+      opts.support = 0;
+      break;
     default:
       return 2;
     }
   }
   if (optind >= argc) {
     fprintf(stderr, "usage: bench [--repeat K] [--only SUBSTR] [--no-fc] "
-                    "[--no-mrv] [--update] [--min-words K] [--gather] "
+                    "[--no-mrv] [--no-support] [--update] [--min-words K] "
+                    "[--gather] "
                     "instances.txt\n");
     return 2;
   }

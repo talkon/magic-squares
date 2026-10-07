@@ -17,6 +17,7 @@
  *                     use with postprocess.py
  *   --reduce strong   use the stronger (slower) vector reduction
  *   --no-fc/--no-mrv  disable forward checking / most-constrained branching
+ *   --no-support      disable the support filter (see arrange_core.h)
  *
  * Output (JSON lines, one record per searched sum, flushed immediately so a
  * killed run keeps all completed sums):
@@ -152,9 +153,10 @@ int main(int argc, char *argv[]) {
       {"reduce", required_argument, 0, 'r'},
       {"no-fc", no_argument, 0, 'f'},
       {"no-mrv", no_argument, 0, 'm'},
+      {"no-support", no_argument, 0, 'S'},
       {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "n:a:b:s:l:t:T:o:F:r:fm", long_options,
+  while ((opt = getopt_long(argc, argv, "n:a:b:s:l:t:T:o:F:r:fmS", long_options,
                             NULL)) != -1) {
     switch (opt) {
     case 'n':
@@ -198,6 +200,9 @@ int main(int argc, char *argv[]) {
       break;
     case 'm':
       opts.mrv = 0;
+      break;
+    case 'S':
+      opts.support = 0;
       break;
     default:
       return 2;
