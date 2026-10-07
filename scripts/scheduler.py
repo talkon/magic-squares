@@ -395,8 +395,11 @@ def fit_lsq(X, y, ridge=1e-6):
 
 # a unit of work ends where its predicted density (magic squares per
 # CPU-second) falls below this fraction of its best (see Scorer.next_unit;
-# --unit-drop; 0 = only by --unit-time, the default while it is evaluated)
-UNIT_DROP = 0.0
+# --unit-drop; 0 = only by --unit-time). In 50-hour forecast simulations,
+# 0.5 made the result nearly independent of --unit-time: with 600-s units it
+# collected 1.4-2.1x more than without, with 120-s units about the same
+# (+18-25% in the first 15 hours, -3% at 50 hours).
+UNIT_DROP = 0.5
 
 # version of msearch's search (its "engine" field; records without it are
 # version 1): the time model uses only timings of the newest version
