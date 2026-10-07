@@ -42,6 +42,7 @@ void search_opts_default(search_opts_t *o) {
   o->forward_check = 1;
   o->mrv = 1;
   o->min_words = 0;
+  o->gather = 0;
 }
 
 /*
@@ -90,7 +91,9 @@ typedef struct {
   uint32_t N, L;
   uint16_t (*lab)[8];   /* lab[v][p], descending */
   uint64_t *label_val;  /* label -> number */
-  uint64_t IW;          /* words per row of the intersection matrices */
+  uint64_t IW;          /* words per row of the bit matrices below */
+  uint32_t nseg;        /* 1024-bit segments covering a row (N bits), or 0
+                           to always gather */
   uint64_t *inters0;    /* bit u of row v: u, v disjoint */
   uint64_t *inters1;    /* bit u of row v: |u & v| == 1 */
   uint64_t *has_label;  /* bit v of row x: vector v contains label x */
@@ -119,36 +122,82 @@ static inline bool bit_get(const uint64_t *row, uint32_t u) {
   return (row[u >> 6] >> (u & 63)) & 1;
 }
 
-/* out = { u in in[0..cnt) : u >= min_v and bit u of row is set };
- * returns |out|. */
-static inline uint32_t filter_list(const uint32_t *in, uint32_t cnt,
-                                   const uint64_t *row, uint32_t min_v,
-                                   uint32_t *out) {
-  uint32_t k = 0, i = 0;
+/*
+ * Filtering a candidate list by a row of one of the bit matrices (inters0,
+ * inters1, has_label): with AVX-512, 16 entries at a time, looking up the
+ * dword holding bit u of the row for every entry u. For N <= 3072 (rows of
+ * at most PERM_SEGS 1024-bit segments, which covers nearly all production
+ * searches) the row is loaded into registers once and the dwords are picked
+ * with one permute per segment: 10-15% faster overall than a gather, whose
+ * long latency is exposed after every mispredicted branch. Beyond that the
+ * permutes cost more than the gather, which is used instead.
+ */
+#ifndef PERM_SEGS
+#define PERM_SEGS 3 /* at most 3; 0 always gathers (for testing) */
+#endif
+
 #ifdef __AVX512F__
+static inline __attribute__((always_inline)) uint32_t
+filter_list_seg(const uint32_t *in, uint32_t cnt, const uint64_t *row,
+                uint32_t min_v, uint32_t *out,
+                const int nseg /* 1..3, or 0 for a gather */) {
+  __m512i T[6];
+  for (int t = 0; t < 2 * nseg; t++)
+    T[t] = _mm512_loadu_si512(row + 8 * t);
   const __m512i minv = _mm512_set1_epi32((int)min_v);
   const __m512i low5 = _mm512_set1_epi32(31);
   const __m512i one = _mm512_set1_epi32(1);
-  for (; i < cnt; i += 16) {
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < cnt; i += 16) {
     __mmask16 live = cnt - i >= 16 ? 0xffff : (__mmask16)((1u << (cnt - i)) - 1);
     __m512i u = _mm512_maskz_loadu_epi32(live, in + i);
-    live &= _mm512_cmpge_epu32_mask(u, minv);
+    if (min_v)
+      live &= _mm512_cmpge_epu32_mask(u, minv);
     /* dword containing bit u, then the bit itself */
-    __m512i words = _mm512_mask_i32gather_epi32(
-        _mm512_setzero_si512(), live, _mm512_srli_epi32(u, 5), row, 4);
+    __m512i widx = _mm512_srli_epi32(u, 5), words;
+    if (nseg == 0) {
+      words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), live, widx,
+                                          row, 4);
+    } else {
+      /* a permute picks among 32 dwords (index bits 0-4) */
+      words = _mm512_permutex2var_epi32(T[0], widx, T[1]);
+      for (int sg = 1; sg < nseg; sg++)
+        words = _mm512_mask_mov_epi32(
+            words, _mm512_cmpge_epu32_mask(widx, _mm512_set1_epi32(32 * sg)),
+            _mm512_permutex2var_epi32(T[2 * sg], widx, T[2 * sg + 1]));
+    }
     __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(u, low5));
     __mmask16 keep = _mm512_mask_test_epi32_mask(live, bits, one);
     _mm512_mask_compressstoreu_epi32(out + k, keep, u);
     k += (uint32_t)__builtin_popcount(keep);
   }
+  return k;
+}
+#endif
+
+/* out = { u in in[0..cnt) : u >= min_v and bit u of row is set };
+ * returns |out|. nseg = number of 1024-bit segments of the rows. */
+static inline uint32_t filter_list(const uint32_t *in, uint32_t cnt,
+                                   const uint64_t *row, uint32_t min_v,
+                                   uint32_t nseg, uint32_t *out) {
+#ifdef __AVX512F__
+  if (nseg == 1 && PERM_SEGS >= 1)
+    return filter_list_seg(in, cnt, row, min_v, out, 1);
+  if (nseg == 2 && PERM_SEGS >= 2)
+    return filter_list_seg(in, cnt, row, min_v, out, 2);
+  if (nseg == 3 && PERM_SEGS >= 3)
+    return filter_list_seg(in, cnt, row, min_v, out, 3);
+  return filter_list_seg(in, cnt, row, min_v, out, 0);
 #else
-  for (; i < cnt; i++) {
+  (void)nseg;
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < cnt; i++) {
     uint32_t u = in[i];
     out[k] = u;
     k += (u >= min_v) & bit_get(row, u);
   }
-#endif
   return k;
+#endif
 }
 
 #if defined(__AVX512F__) && NSLICE == 8
@@ -365,8 +414,10 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
 
   /* intersection bit matrices */
   s.IW = (count + 63) / 64 + 1;
-  s.inters0 = calloc(count * s.IW, sizeof(uint64_t));
-  s.inters1 = calloc(count * s.IW, sizeof(uint64_t));
+  s.nseg = opts->gather ? 0 : (uint32_t)((count + 1023) / 1024);
+  /* + 16: filter_list may read whole segments past the end of a row */
+  s.inters0 = calloc(count * s.IW + 16, sizeof(uint64_t));
+  s.inters1 = calloc(count * s.IW + 16, sizeof(uint64_t));
   {
     uint32_t *deg = calloc(L + 2, sizeof(uint32_t));
     for (size_t v = 0; v < count; v++)
@@ -414,7 +465,7 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
    * (the candidates through the branching cell) are selected with the same
    * vectorized filter as the candidate lists, instead of a scalar loop with
    * an unpredictable branch per candidate */
-  s.has_label = calloc((L + 1) * s.IW, sizeof(uint64_t));
+  s.has_label = calloc((L + 1) * s.IW + 16, sizeof(uint64_t));
   for (size_t v = 0; v < count; v++)
     for (int p = 0; p < n; p++)
       s.has_label[s.lab[v][p] * s.IW + v / 64] |= (uint64_t)1 << (v % 64);

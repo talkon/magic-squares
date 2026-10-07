@@ -42,6 +42,8 @@ typedef struct {
   int mrv;             /* branch on the most constrained cell (default 1) */
   int min_words;       /* use label bitsets of at least this many 64-bit
                           words (for testing; default 0 = smallest that fits) */
+  int gather;          /* filter candidate lists with gathers even when N is
+                          small enough for permutes (for testing; default 0) */
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);

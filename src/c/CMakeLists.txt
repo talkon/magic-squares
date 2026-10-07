@@ -36,6 +36,8 @@ add_test(NAME fast_bench_quick COMMAND bench ${BENCH_DIR}/quick.txt)
 # the same instances, with wider label bitsets than needed
 add_test(NAME fast_bench_quick_wide3 COMMAND bench --min-words 3 ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_wide8 COMMAND bench --min-words 8 ${BENCH_DIR}/quick.txt)
+# the same instances, filtering with gathers as for N > 3072
+add_test(NAME fast_bench_quick_gather COMMAND bench --gather ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_no_fc COMMAND bench --no-fc --no-mrv ${BENCH_DIR}/quick.txt)
 # msearch finds Morgenstern's square (P = 2^10 3^4 5^3 7^2, S = 327)
 add_test(NAME fast_msearch_327 COMMAND sh -c

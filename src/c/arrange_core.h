@@ -72,7 +72,7 @@ static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint32_t *in,
                                     uint32_t cnt, const uint64_t *row,
                                     uint32_t min_v, uint32_t *out,
                                     uint64_t *g /* [CNT_WORDS * W] */) {
-  uint32_t k = filter_list(in, cnt, row, min_v, out);
+  uint32_t k = filter_list(in, cnt, row, min_v, s->nseg, out);
 #ifdef COUNT_BYTES
   /* 4 vectors per iteration (fewer iterations, so fewer mispredicted loop
    * exits), padding the list with the empty vector N */
@@ -233,7 +233,8 @@ static void SEARCH_REC(sstate_t *s, int d) {
    * all first (vectorized, no branch per candidate), then search them */
   uint32_t *kids = s->kids[d];
   uint32_t nk = filter_list(s->valid[d][b], s->nvalid[d][b],
-                            s->has_label + (uint64_t)x * s->IW, 0, kids);
+                            s->has_label + (uint64_t)x * s->IW, 0, s->nseg,
+                            kids);
   for (uint32_t i = 0; i < nk && !s->stop; i++)
     TRY_CHILD(s, d, b, kids[i], 0);
 }

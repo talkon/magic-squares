@@ -36,6 +36,7 @@ bin/bench bench/quick.txt              # ~1 s
 bin/bench --repeat 3 bench/full.txt    # ~20 s, closer to production sizes
 bin/bench --only "S=648" bench/full.txt
 bin/bench --no-fc --no-mrv bench/quick.txt   # compare search variants
+bin/bench --min-words 8 --gather bench/quick.txt   # test the paths for more labels / larger N
 bin/bench --update bench/quick.txt     # print instances with observed values
 ```
 
@@ -80,8 +81,10 @@ versa), plus:
 - the children of a node (the candidates through the branching cell) are
   selected with the same filter as the candidate lists, from a label ->
   vectors bit matrix, rather than tested one by one;
-- AVX-512 gather/compress for filtering and vectorized counting when
-  available; plain C otherwise.
+- with AVX-512, the candidate lists are filtered 16 at a time against a row
+  of a bit matrix, looking the bits up with permutes from the row held in
+  registers when N <= 3072 (gathers otherwise), and compressed; vectorized
+  counting; plain C otherwise.
 
 ## Legacy arrangement program
 
