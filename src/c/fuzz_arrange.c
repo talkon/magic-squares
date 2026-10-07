@@ -796,17 +796,21 @@ static int cb(const square_t *sq, void *ctx) {
 
 typedef struct {
   const char *name;
-  int fc, mrv, support, min_words, gather;
+  int fc, mrv, support, min_words, gather, cross;
 } variant_t;
 static const variant_t variants[] = {
-    {"default", 1, 1, 1, 0, 0},  {"nofc", 0, 1, 1, 0, 0},
-    {"nomrv", 1, 0, 1, 0, 0},    {"nosup", 1, 1, 0, 0, 0},
-    {"nofc_nomrv", 0, 0, 1, 0, 0}, {"w3", 1, 1, 1, 3, 0},
-    {"w4", 1, 1, 1, 4, 0},       {"w8", 1, 1, 1, 8, 0},
-    {"w8g", 1, 1, 1, 8, 1},      {"w16", 1, 1, 1, 16, 0},
-    {"w64", 1, 1, 1, 64, 0},     {"w8_nosup", 1, 1, 0, 8, 0},
-    {"w16_nomrv", 1, 0, 1, 16, 0}, {"w4_nosup", 1, 1, 0, 4, 0},
-    {"w3_nomrv", 1, 0, 1, 3, 0}, {"w8_nofc", 0, 1, 1, 8, 0},
+    {"default", 1, 1, 1, 0, 0, 1},  {"nofc", 0, 1, 1, 0, 0, 1},
+    {"nomrv", 1, 0, 1, 0, 0, 1},    {"nosup", 1, 1, 0, 0, 0, 1},
+    {"nofc_nomrv", 0, 0, 1, 0, 0, 1}, {"w3", 1, 1, 1, 3, 0, 1},
+    {"w4", 1, 1, 1, 4, 0, 1},       {"w8", 1, 1, 1, 8, 0, 1},
+    {"w8g", 1, 1, 1, 8, 1, 1},      {"w16", 1, 1, 1, 16, 0, 1},
+    {"w64", 1, 1, 1, 64, 0, 1},     {"w8_nosup", 1, 1, 0, 8, 0, 1},
+    {"w16_nomrv", 1, 0, 1, 16, 0, 1}, {"w4_nosup", 1, 1, 0, 4, 0, 1},
+    {"w3_nomrv", 1, 0, 1, 3, 0, 1}, {"w8_nofc", 0, 1, 1, 8, 0, 1},
+    {"nocross", 1, 1, 1, 0, 0, 0},  {"xcross", 1, 1, 1, 0, 0, 2},
+    {"xcross_nomrv", 1, 0, 1, 0, 0, 2}, {"xcross_w3", 1, 1, 1, 3, 0, 2},
+    {"xcross_w4", 1, 1, 1, 4, 0, 2}, {"xcross_w8", 1, 1, 1, 8, 0, 2},
+    {"xcross_w16", 1, 1, 1, 16, 0, 2},
 };
 #define NVAR (int)(sizeof(variants) / sizeof(variants[0]))
 
@@ -911,6 +915,7 @@ int main(int argc, char **argv) {
       o.support = V->support;
       o.min_words = V->min_words;
       o.gather = V->gather;
+      o.cross = V->cross;
       found.k = 0;
       invalid = 0;
       double t1 = now();
