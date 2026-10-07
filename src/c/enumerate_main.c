@@ -92,7 +92,7 @@ int main(int argc, char *argv[]) {
         uint64_t hi = lo + chunk - 1 < end ? lo + chunk - 1 : end;
         vec_list_t l;
         vec_list_init(&l, n);
-        enum_vectors(&p, n, lo, hi, &l);
+        enum_vectors_grouped(&p, n, lo, hi, &l); /* counts only */
         for (size_t i = 0; i < l.count;) {
           uint64_t S = vec_list_sum(&l, i);
           size_t j = i;
@@ -120,7 +120,9 @@ int main(int argc, char *argv[]) {
 
   vec_list_t all;
   vec_list_init(&all, n);
-  uint64_t nodes = enum_vectors(&p, n, sum_min, sum_max, &all);
+  /* the order within a sum only matters when writing the vectors */
+  uint64_t nodes = counts ? enum_vectors_grouped(&p, n, sum_min, sum_max, &all)
+                          : enum_vectors(&p, n, sum_min, sum_max, &all);
   fprintf(stderr, ">>> (enum) %zu %d-vecs with sum in range (%lu dfs nodes)\n",
           all.count, n, (unsigned long)nodes);
 

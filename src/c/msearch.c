@@ -266,7 +266,7 @@ int main(int argc, char *argv[]) {
     vec_list_t all, red;
     vec_list_init(&all, n);
     vec_list_init(&red, n);
-    enum_vectors(&p, n, lo, hi, &all);
+    enum_vectors_grouped(&p, n, lo, hi, &all);
     double enum_time = wall_time() - te;
     size_t i = 0;
     for (uint64_t S = lo; S <= hi && !stop; S++) {

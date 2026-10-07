@@ -310,9 +310,19 @@ static int vec_cmp_by_sum(const void *a, const void *b) {
   return 0;
 }
 
-/* sort vectors [from, count) by sum, then lexicographically descending */
+/* the same order, for vectors known to have the same sum (no summing) */
+static int vec_cmp_same_sum(const void *a, const void *b) {
+  const uint64_t *x = a, *y = b;
+  for (int i = n_global_for_cmp - 1; i >= 0; i--)
+    if (x[i] != y[i])
+      return (x[i] > y[i]) - (x[i] < y[i]);
+  return 0;
+}
+
+/* sort vectors [from, count) by sum, then (if ordered) lexicographically
+ * descending */
 static void sort_by_sum(vec_list_t *l, size_t from, uint64_t sum_min,
-                        uint64_t sum_max) {
+                        uint64_t sum_max, int ordered) {
   int n = l->n;
   size_t m = l->count - from;
   if (m < 2)
@@ -336,11 +346,11 @@ static void sort_by_sum(vec_list_t *l, size_t from, uint64_t sum_min,
   }
   /* start[b] now holds the end of bucket b */
   size_t lo = 0;
-  for (size_t b = 0; b + 1 < nb; b++) {
+  for (size_t b = 0; ordered && b + 1 < nb; b++) {
     size_t hi = start[b];
     if (hi - lo > 1)
       qsort(tmp + lo * n, hi - lo, (size_t)n * sizeof(uint64_t),
-            vec_cmp_by_sum);
+            vec_cmp_same_sum);
     lo = hi;
   }
   memcpy(base, tmp, m * (size_t)n * sizeof(uint64_t));
@@ -348,8 +358,9 @@ static void sort_by_sum(vec_list_t *l, size_t from, uint64_t sum_min,
   free(start);
 }
 
-uint64_t enum_vectors(const prime_exps_t *p, int n, uint64_t sum_min,
-                      uint64_t sum_max, vec_list_t *out) {
+static uint64_t enum_vectors_(const prime_exps_t *p, int n, uint64_t sum_min,
+                              uint64_t sum_max, vec_list_t *out,
+                              int ordered) {
   if (n < 1 || n > ENUM_MAX_N || pexp_value(p) == 0)
     return 0;
   size_t num_divs;
@@ -370,8 +381,18 @@ uint64_t enum_vectors(const prime_exps_t *p, int n, uint64_t sum_min,
   enum_rec(&st, n, pexp_value(p), pk, UINT64_MAX, 0);
   free(divs);
 
-  sort_by_sum(out, before, sum_min, sum_max);
+  sort_by_sum(out, before, sum_min, sum_max, ordered);
   return st.nodes;
+}
+
+uint64_t enum_vectors(const prime_exps_t *p, int n, uint64_t sum_min,
+                      uint64_t sum_max, vec_list_t *out) {
+  return enum_vectors_(p, n, sum_min, sum_max, out, 1);
+}
+
+uint64_t enum_vectors_grouped(const prime_exps_t *p, int n, uint64_t sum_min,
+                              uint64_t sum_max, vec_list_t *out) {
+  return enum_vectors_(p, n, sum_min, sum_max, out, 0);
 }
 
 uint64_t enum_min_sum(const prime_exps_t *p, int n) {
@@ -383,7 +404,7 @@ uint64_t enum_min_sum(const prime_exps_t *p, int n) {
   for (int attempt = 0; attempt < 60; attempt++) {
     vec_list_t l;
     vec_list_init(&l, n);
-    enum_vectors(p, n, 0, hi, &l);
+    enum_vectors_grouped(p, n, 0, hi, &l);
     if (l.count > 0) {
       uint64_t best = vec_list_sum(&l, 0); /* sorted by sum */
       vec_list_free(&l);
@@ -396,12 +417,54 @@ uint64_t enum_min_sum(const prime_exps_t *p, int n) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* reduction                                                               */
+/* relabelling                                                             */
 
-static int u64_cmp(const void *a, const void *b) {
-  uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-  return (x > y) - (x < y);
+size_t dense_ids(const uint64_t *elts, size_t ne, uint32_t *ids,
+                 uint64_t *vals) {
+  /* open addressing with linear probing, at most half full; a slot holds
+   * id + 1, or 0 if empty. The first table (4 KB, enough for 512 values)
+   * is on the stack: a (P, S) near S_min has ~20-200 distinct values */
+  uint32_t local[1024];
+  uint32_t *slot = local;
+  int bits = 10;
+  memset(local, 0, sizeof(local));
+  size_t L = 0;
+  for (size_t i = 0; i < ne; i++) {
+    uint64_t v = elts[i];
+    size_t mask = ((size_t)1 << bits) - 1;
+    size_t h = (size_t)((v * 0x9E3779B97F4A7C15ull) >> (64 - bits));
+    uint32_t e;
+    while ((e = slot[h]) && vals[e - 1] != v)
+      h = (h + 1) & mask;
+    if (!e) {
+      vals[L] = v;
+      e = (uint32_t)++L;
+      slot[h] = e;
+      if (2 * L > mask) {
+        /* rehash into a table twice as large */
+        bits++;
+        mask = ((size_t)1 << bits) - 1;
+        uint32_t *t = calloc(mask + 1, sizeof(uint32_t));
+        for (size_t x = 0; x < L; x++) {
+          size_t g = (size_t)((vals[x] * 0x9E3779B97F4A7C15ull) >> (64 - bits));
+          while (t[g])
+            g = (g + 1) & mask;
+          t[g] = (uint32_t)(x + 1);
+        }
+        if (slot != local)
+          free(slot);
+        slot = t;
+      }
+    }
+    ids[i] = e - 1;
+  }
+  if (slot != local)
+    free(slot);
+  return L;
 }
+
+/* ---------------------------------------------------------------------- */
+/* reduction                                                               */
 
 size_t reduce_vectors(const vec_list_t *l, size_t start, size_t count,
                       vec_list_t *out, int strong) {
@@ -409,44 +472,33 @@ size_t reduce_vectors(const vec_list_t *l, size_t start, size_t count,
   if (count < (size_t)(2 * n))
     return 0;
 
-  /* relabel elements densely */
+  /* relabel elements densely (any labelling will do: the labels only index
+   * the per-element arrays below) */
   size_t ne = count * n;
   uint64_t *vals = malloc(ne * sizeof(uint64_t));
-  memcpy(vals, vec_list_get(l, start), ne * sizeof(uint64_t));
-  qsort(vals, ne, sizeof(uint64_t), u64_cmp);
-  size_t nlabels = 0;
-  for (size_t i = 0; i < ne; i++)
-    if (i == 0 || vals[i] != vals[i - 1])
-      vals[nlabels++] = vals[i];
-
   uint32_t *lab = malloc(ne * sizeof(uint32_t)); /* lab[v*n + j] */
-  for (size_t v = 0; v < count; v++) {
-    const uint64_t *vec = vec_list_get(l, start + v);
-    for (int j = 0; j < n; j++) {
-      size_t lo = 0, hi = nlabels;
-      while (lo < hi) {
-        size_t mid = (lo + hi) / 2;
-        if (vals[mid] < vec[j])
-          lo = mid + 1;
-        else
-          hi = mid;
-      }
-      lab[v * n + j] = (uint32_t)lo;
-    }
-  }
+  size_t nlabels = dense_ids(vec_list_get(l, start), ne, lab, vals);
 
-  /* element -> list of vectors containing it (CSR) */
+  /* number of vectors containing each element, and (for the strong
+   * reduction only) the lists of those vectors (CSR) */
   uint32_t *deg = calloc(nlabels + 1, sizeof(uint32_t));
   for (size_t i = 0; i < ne; i++)
     deg[lab[i] + 1]++;
   for (size_t x = 0; x < nlabels; x++)
     deg[x + 1] += deg[x];
-  uint32_t *occ = malloc(ne * sizeof(uint32_t));
-  uint32_t *fill = malloc(nlabels * sizeof(uint32_t));
-  memcpy(fill, deg, nlabels * sizeof(uint32_t));
-  for (size_t v = 0; v < count; v++)
-    for (int j = 0; j < n; j++)
-      occ[fill[lab[v * n + j]]++] = (uint32_t)v;
+  uint32_t *occ = NULL, *fill = NULL;
+  uint8_t *inter = NULL;
+  uint32_t *touched = NULL;
+  if (strong) {
+    occ = malloc(ne * sizeof(uint32_t));
+    fill = malloc(nlabels * sizeof(uint32_t));
+    memcpy(fill, deg, nlabels * sizeof(uint32_t));
+    for (size_t v = 0; v < count; v++)
+      for (int j = 0; j < n; j++)
+        occ[fill[lab[v * n + j]]++] = (uint32_t)v;
+    inter = calloc(count, 1);
+    touched = malloc(count * sizeof(uint32_t));
+  }
 
   bool *alive = malloc(count);
   memset(alive, 1, count);
@@ -454,9 +506,6 @@ size_t reduce_vectors(const vec_list_t *l, size_t start, size_t count,
   uint32_t *alive_deg = malloc(nlabels * sizeof(uint32_t));
   for (size_t x = 0; x < nlabels; x++)
     alive_deg[x] = deg[x + 1] - deg[x];
-
-  uint8_t *inter = calloc(count, 1);
-  uint32_t *touched = malloc(count * sizeof(uint32_t));
 
   bool changed = true;
   while (changed && num_alive >= (size_t)(2 * n)) {

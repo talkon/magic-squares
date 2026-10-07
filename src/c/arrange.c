@@ -512,9 +512,14 @@ static void assign_labels(int n, size_t count, size_t L, const uint32_t *rk,
   free(done);
 }
 
-static int u64_cmp(const void *a, const void *b) {
-  uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-  return (x > y) - (x < y);
+typedef struct {
+  uint64_t val;
+  uint32_t id; /* dense id of val (see dense_ids) */
+} vid_t;
+
+static int vid_cmp(const void *a, const void *b) {
+  const vid_t *x = a, *y = b;
+  return (x->val > y->val) - (x->val < y->val);
 }
 
 static int lab_cmp_n;
@@ -544,43 +549,40 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   s.cb = cb;
   s.ctx = ctx;
 
-  /* distinct values (ascending), and the rank of every element among them */
+  /* distinct values (dense ids, see dense_ids: hashing rather than sorting
+   * all count * n elements, which was half of the setup), and the rank of
+   * every element among them in ascending order (sorting only the L
+   * distinct values) */
   size_t ne = count * n;
   uint64_t *vals = malloc(ne * sizeof(uint64_t));
-  memcpy(vals, vec_list_get(l, start), ne * sizeof(uint64_t));
-  qsort(vals, ne, sizeof(uint64_t), u64_cmp);
-  size_t L = 0;
-  for (size_t i = 0; i < ne; i++)
-    if (i == 0 || vals[i] != vals[i - 1])
-      vals[L++] = vals[i];
+  uint32_t *ids = malloc(ne * sizeof(uint32_t));
+  size_t L = dense_ids(vec_list_get(l, start), ne, ids, vals);
   if (L > 64 * 64) {
     /* would need wider bitsets; not expected for realistic inputs */
     free(vals);
+    free(ids);
     st.num_labels = (int)L;
     st.truncated = 1;
     return st;
   }
-  uint32_t *rk = malloc(ne * sizeof(uint32_t));
-  for (size_t v = 0; v < count; v++) {
-    const uint64_t *vec = vec_list_get(l, start + v);
-    for (int p = 0; p < n; p++) {
-      size_t lo = 0, hi = L;
-      while (lo < hi) {
-        size_t mid = (lo + hi) / 2;
-        if (vals[mid] < vec[p])
-          lo = mid + 1;
-        else
-          hi = mid;
-      }
-      rk[v * n + p] = (uint32_t)lo;
-    }
+  vid_t *vi = malloc(L * sizeof(vid_t));
+  for (size_t i = 0; i < L; i++) {
+    vi[i].val = vals[i];
+    vi[i].id = (uint32_t)i;
   }
-  uint32_t *lab_of = malloc(L * sizeof(uint32_t)); /* by rank in vals */
+  qsort(vi, L, sizeof(vid_t), vid_cmp);
+  uint32_t *rank_of_id = malloc(L * sizeof(uint32_t));
+  for (size_t i = 0; i < L; i++)
+    rank_of_id[vi[i].id] = (uint32_t)i;
+  uint32_t *rk = malloc(ne * sizeof(uint32_t));
+  for (size_t i = 0; i < ne; i++)
+    rk[i] = rank_of_id[ids[i]];
+  uint32_t *lab_of = malloc(L * sizeof(uint32_t)); /* by rank */
   assign_labels(n, count, L, rk, lab_of);
   s.L = (uint32_t)L;
   s.label_val = malloc((L + 1) * sizeof(uint64_t));
   for (size_t i = 0; i < L; i++)
-    s.label_val[lab_of[i]] = vals[i];
+    s.label_val[lab_of[i]] = vi[i].val;
   s.label_val[L] = 0;
 
   s.lab = malloc(count * sizeof(*s.lab));
@@ -597,10 +599,54 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   }
   free(rk);
   free(lab_of);
+  free(rank_of_id);
+  free(vi);
+  free(ids);
   free(vals);
-  lab_cmp_n = n;
   /* sort by descending labels: the vector with the largest label first */
-  qsort(s.lab, count, sizeof(*s.lab), lab_cmp);
+  int kb = 1; /* bits per label in a packed key */
+  while (((size_t)1 << kb) < L)
+    kb++;
+  if (n * kb <= 64) {
+    /* the labels of a vector packed into one integer, largest first, sort
+     * the same way as the labels and determine the vector: radix sort the
+     * keys, then unpack them (a qsort of the label arrays with a
+     * comparator was most of the setup time left after dense_ids) */
+    uint64_t *key = malloc(count * sizeof(uint64_t));
+    uint64_t *tmp = malloc(count * sizeof(uint64_t));
+    for (size_t v = 0; v < count; v++) {
+      uint64_t k = 0;
+      for (int p = 0; p < n; p++)
+        k = k << kb | s.lab[v][p];
+      key[v] = k;
+    }
+    for (int shift = 0; shift < n * kb; shift += 8) {
+      size_t pos[256] = {0};
+      for (size_t v = 0; v < count; v++)
+        pos[(key[v] >> shift) & 255]++;
+      for (size_t c = 0, t = 0; c < 256; c++) {
+        size_t m = pos[c];
+        pos[c] = t;
+        t += m;
+      }
+      for (size_t v = 0; v < count; v++)
+        tmp[pos[(key[v] >> shift) & 255]++] = key[v];
+      uint64_t *sw = key;
+      key = tmp;
+      tmp = sw;
+    }
+    const uint64_t kmask = ((uint64_t)1 << kb) - 1;
+    for (size_t v = 0; v < count; v++) {
+      uint64_t k = key[count - 1 - v]; /* descending */
+      for (int p = n - 1; p >= 0; p--, k >>= kb)
+        s.lab[v][p] = (uint16_t)(k & kmask);
+    }
+    free(key);
+    free(tmp);
+  } else {
+    lab_cmp_n = n;
+    qsort(s.lab, count, sizeof(*s.lab), lab_cmp);
+  }
 
   /* bitset width */
   size_t Lw = L > 64 * (size_t)opts->min_words ? L : 64 * (size_t)opts->min_words;

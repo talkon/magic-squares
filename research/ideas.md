@@ -247,3 +247,46 @@ bookkeeping and the mispredicted "dead?" branch after a child's first pass.
 Not ported: since the lists carry their bitsets, the matrix path only runs
 for more than 256 labels or without AVX-512BW, and batching the children's
 first pass on the carried lists was 14% slower (see above).
+
+## msearch overhead outside the search (October 2026)
+
+Time split of `msearch` units near S_min (instrumented build, one core,
+noisy machine; "overhead" = enumeration + reduction + per-sum setup +
+output, everything but `search_root`):
+
+| unit | sums | search | overhead before | overhead after |
+| --- | ---: | ---: | ---: | ---: |
+| P = 13 6 5 2, S = 595-760 (N <= 890) | 157 | 0.57 s | 0.100 s (15%) | 0.022 s (3.6%) |
+| P = 9 5 4 2 1, S = 356-470 (N <= 1135) | 111 | 1.05 s | 0.091 s (8%) | 0.022 s (2.1%) |
+| P = 13 6 5 2, S = 595-889 (N <= 1700) | 286 | 26 s | 0.38 s (1.4%) | 0.077 s (0.3%) |
+
+Before, the overhead was (first unit) the reduction 0.035 s, the search
+setup 0.046 s and the enumeration 0.018 s; in the reduction and the setup,
+nearly all of it was sorting: a qsort of all 6N elements to find the ~20-200
+distinct values (then a binary search per element), and a qsort of the N
+label arrays with a comparator. Now the values get dense ids from a small
+hash table (`dense_ids`, enumerate.c), the label arrays are packed into
+64-bit keys (n labels of ceil(log2 L) bits, when that fits: always for
+n = 6 and L <= 1024) and radix sorted, the weak reduction no longer builds
+the vector lists only the strong one uses, and msearch enumerates with
+`enum_vectors_grouped`, which skips the per-sum sort that only the
+`enumerate` file output needs (a third of the enumeration). The output is
+identical (same squares in the same order, same node counts), since the
+labels and the vector order of the search are the same.
+
+What is left: enumeration 0.010 s (the divisor DFS and first-touch page
+faults of the vector lists), relabelling + key sort 0.005 s, allocations
+0.001 s, output 0.001 s. Wall time of the first unit 0.687 s -> 0.606 s,
+second 1.148 s -> 1.118 s (min of 9 alternating runs; the second is within
+the noise of the shared machine). For the units the scheduler runs (about
+two minutes, dominated by the sums with N = 1000-2500) the gain is ~1%: the
+search is 99.7% of the time, and the sums with small N, where the overhead
+mattered, are cheap anyway. Not done, as they would gain < 0.3% of a real
+unit: reusing the search allocations across sums, a faster enumeration DFS
+(pow() per node), skipping sums with small N (not provably square-free, and
+they cost nothing). The weak reduction removes almost nothing near S_min
+(184 of 222,070 vectors on the third unit), and the strong one 3% of the
+vectors but only 0.2% of the nodes (the search discards those vectors at
+the first level anyway) and costs more than it saves (first unit: 0.30 s
+of setup + reduction instead of 0.08 s before this change), so it stays
+off.

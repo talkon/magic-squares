@@ -27,7 +27,10 @@ completed sum. A best diagonal score of 14 is a magic square, and is also
 announced on stderr.
 
 The vectors are enumerated in-process (`enumerate.c`), only for the requested
-sums, so there are no intermediate files and memory stays small.
+sums, so there are no intermediate files and memory stays small. Everything
+but the search itself (enumeration, reduction, relabelling, output) takes
+~0.3% of a unit near S_min (N up to ~1700), and ~3% of a short unit whose
+sums all have N < 1000 (see research/ideas.md, "msearch overhead").
 
 ## bench: arrangement benchmark
 

@@ -73,6 +73,23 @@ uint64_t enum_min_sum(const prime_exps_t *p, int n);
 uint64_t enum_vectors(const prime_exps_t *p, int n, uint64_t sum_min,
                       uint64_t sum_max, vec_list_t *out);
 
+/* the same, sorted by sum only (the order of the vectors of one sum is
+ * unspecified): enough for the search, which relabels and sorts them
+ * anyway, and saves the per-sum sort (a third of the enumeration time) */
+uint64_t enum_vectors_grouped(const prime_exps_t *p, int n, uint64_t sum_min,
+                              uint64_t sum_max, vec_list_t *out);
+
+/*
+ * Dense ids for the values elts[0..ne): ids[i] is the id of elts[i], the ids
+ * being numbered by first appearance, and vals[id] its value (vals needs
+ * room for ne entries). Returns the number of distinct values. Used to
+ * relabel the vectors of one sum, which have only ~20-200 distinct values
+ * among thousands of elements: a small hash table, instead of sorting all
+ * the elements to find the distinct values.
+ */
+size_t dense_ids(const uint64_t *elts, size_t ne, uint32_t *ids,
+                 uint64_t *vals);
+
 /*
  * Given the vectors with one fixed sum (contiguous in `l` from `start`,
  * `count` long), remove vectors that cannot appear in any n x n semi-magic
