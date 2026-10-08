@@ -1174,12 +1174,20 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
       st.est_seconds += k * s.r1s[h].t;
       st.est_squares += k * s.r1s[h].q;
       st.est_nodes += k * s.r1s[h].nodes;
-      if (m >= 2 && !s.r1_list) {
-        /* N_h^2 (1 - m / N_h) s_h^2 / m (none for a list of r1: the
-         * estimates are then the sampled totals) */
+      if (s.r1_list) {
+        /* (no standard error for a list of r1: the estimates are then the
+         * sampled totals) */
+      } else if (m >= 2) {
+        /* N_h^2 (1 - m / N_h) s_h^2 / m */
         const double f = Nh * Nh * (1 - m / Nh) / m / (m - 1);
         vt += f * (s.r1s[h].t2 - s.r1s[h].t * s.r1s[h].t / m);
         vq += f * (s.r1s[h].q2 - s.r1s[h].q * s.r1s[h].q / m);
+      } else if (m < Nh) {
+        /* fewer than 2 of the stratum's r1 sampled (and not all of them):
+         * its variance cannot be estimated, so the standard errors leave it
+         * out (they are too small), and with none sampled the estimates
+         * have nothing of it either; counted, so callers can flag it */
+        st.r1_strata_nose++;
       }
     }
     st.est_nodes += 1; /* the root */

@@ -233,9 +233,11 @@ int main(int argc, char *argv[]) {
     if (st.r1_sampled)
       fprintf(stderr,
               "%s: r1 sampled %lu, est. squares %.1f +- %.1f, nodes %.4g, "
-              "CPU-s %.2f +- %.2f\n",
+              "CPU-s %.2f +- %.2f%s\n",
               name, (unsigned long)st.r1_sampled, st.est_squares,
-              st.se_squares, st.est_nodes, st.est_seconds, st.se_seconds);
+              st.se_squares, st.est_nodes, st.est_seconds, st.se_seconds,
+              st.r1_strata_nose ? " (a stratum with < 2 r1: SE too small)"
+                                : "");
     int ok = (!have_count || exp_count == h.count) &&
              (!have_hash || exp_hash == h.hash);
     const char *check = !ok ? "FAIL" : (have_count || have_hash) ? "ok" : "-";

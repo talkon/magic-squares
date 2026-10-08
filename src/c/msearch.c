@@ -90,7 +90,8 @@
  * where pairs is the number of (square, SP traversal) pairs (what a magic
  * square needs twice). Sampled plain searches (--calib-r1-stride, --r1-*)
  * write "csquare" records (the squares of the sampled r1) and a "csum"
- * record with est_squares, se_squares, est_time, se_time.
+ * record with est_squares, se_squares, est_time, se_time (se_strata_missing:
+ * the strata with fewer than 2 sampled r1, left out of the se_*).
  */
 #include <getopt.h>
 #include <math.h>
@@ -308,15 +309,15 @@ static uint64_t run_sampled(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           "\"p_trav\":%lu,\"nodes\":%lu,\"time\":%.6f,\"cpu\":%.6f,"
           "\"setup_time\":%.6f,\"est_squares\":%.6g,\"se_squares\":%.6g,"
           "\"est_sp_pairs\":%.6g,\"est_nodes\":%.6g,\"est_time\":%.6g,"
-          "\"se_time\":%.6g,\"enum_time\":%.6f,\"reduce_time\":%.6f,"
-          "\"truncated\":%d,\"engine\":%d}\n",
+          "\"se_time\":%.6g,\"se_strata_missing\":%d,\"enum_time\":%.6f,"
+          "\"reduce_time\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
           (unsigned long)st.r1_sampled, (unsigned long)st.squares,
           (unsigned long)ctx->sp_pairs, (unsigned long)ctx->s_trav,
           (unsigned long)ctx->p_trav, (unsigned long)st.nodes, st.seconds, cpu,
           st.setup_seconds, st.est_squares, st.se_squares,
           ctx->weight > 0 ? ctx->weight * (double)ctx->sp_pairs : -1.0,
-          st.est_nodes, st.est_seconds, st.se_seconds, enum_share,
-          reduce_time, st.truncated, ENGINE_VERSION);
+          st.est_nodes, st.est_seconds, st.se_seconds, st.r1_strata_nose,
+          enum_share, reduce_time, st.truncated, ENGINE_VERSION);
   fflush(out);
   return st.nodes;
 }

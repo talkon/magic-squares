@@ -35,9 +35,14 @@ typedef struct {
    * rows searched, and unbiased estimates of the full search's totals
    * (sum over the sampled r1 of stride x value) with their standard errors
    * (stratified simple-random-sampling formula, conservative for the
-   * systematic samples taken here); seconds are thread CPU time */
+   * systematic samples taken here); seconds are thread CPU time.
+   * r1_strata_nose: the strata with fewer than 2 sampled r1 (out of more),
+   * whose variance cannot be estimated and is missing from se_* (which
+   * are then too small; with 0 sampled, the stratum is also missing from
+   * est_*): use more r1 per stratum, or fewer strata, when it is not 0 */
   uint64_t r1_sampled;
   double est_nodes, est_squares, se_squares, est_seconds, se_seconds;
+  int r1_strata_nose;
 } search_stats_t;
 
 /* called on every square found; return nonzero to stop the search */
