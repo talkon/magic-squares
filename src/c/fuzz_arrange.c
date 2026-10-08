@@ -27,6 +27,8 @@
  * builds, plus builds with other LAZY_DEPTH, PERM_SEGS, NSLICE, CARRY_MAX_W:
  * no mismatch); ctest runs a few hundred seeds.
  */
+/* clock_gettime and the CPU-time clocks also under a strict -std=c17 */
+#define _POSIX_C_SOURCE 200809L
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>

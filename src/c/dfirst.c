@@ -1,6 +1,8 @@
 /*
  * Diagonal-first search: see dfirst.h.
  */
+/* clock_gettime and the CPU-time clocks also under a strict -std=c17 */
+#define _POSIX_C_SOURCE 200809L
 #include "dfirst.h"
 
 #include <stdlib.h>
@@ -64,6 +66,8 @@ struct dfirst_s {
   int ninv;
   int inv[DF_MAX_INV][SQ_MAX_N];
   int top_root; /* see dfirst_set_top_root */
+  /* per-d scratch of vd_labels: a stamp per number id */
+  uint32_t *lstamp, lcur;
 };
 
 void dfirst_set_top_root(dfirst_t *df, int on) { df->top_root = on; }
@@ -221,6 +225,7 @@ void dfirst_free(dfirst_t *df) {
   free(df->mark);
   free(df->dsorted);
   free(df->sidx);
+  free(df->lstamp);
   free(df);
 }
 
@@ -278,6 +283,41 @@ size_t dfirst_vd(dfirst_t *df, size_t i, vec_list_t *out) {
       m &= m - 1;
       vec_list_push(out, vec_list_get(df->vecs, df->vstart + v));
       k++;
+    }
+  }
+  return k;
+}
+
+/* the top-label root pays with the carried bitsets and with the matrices
+ * of up to 4 words (0.64x and 0.68x the CPU of the plain root at 159
+ * labels), not with the matrices of 8 words (257-512 labels without
+ * AVX-512BW, or with CARRY_MAX_W < 8: 1.27x, as the top labels then cost
+ * more nodes there than on the carried path; research/ideas.md) */
+static int top_root_pays(uint32_t labels, const search_opts_t *opts) {
+  const uint32_t lw = labels > 64u * (uint32_t)opts->min_words
+                          ? labels
+                          : 64u * (uint32_t)opts->min_words;
+  return lw <= 256 || search_carries(labels, opts);
+}
+
+/* the distinct numbers of V_d (only computed when the sum's labels do not
+ * decide top_root_pays) */
+static uint32_t vd_labels(dfirst_t *df, const vec_list_t *sub) {
+  if (!df->lstamp)
+    df->lstamp = calloc(df->L + 1, sizeof(uint32_t));
+  if (++df->lcur == 0) {
+    memset(df->lstamp, 0, (df->L + 1) * sizeof(uint32_t));
+    df->lcur = 1;
+  }
+  uint32_t k = 0;
+  for (size_t v = 0; v < sub->count; v++) {
+    const uint64_t *e = vec_list_get(sub, v);
+    for (int p = 0; p < df->n; p++) {
+      const int64_t id = num_id(df, e[p]);
+      if (id >= 0 && df->lstamp[id] != df->lcur) {
+        df->lstamp[id] = df->lcur;
+        k++;
+      }
     }
   }
   return k;
@@ -392,7 +432,10 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
     memset(&ss, 0, sizeof(ss));
     search_opts_t o = *opts;
     uint64_t top[SQ_MAX_N];
-    if (df->top_root) {
+    /* the top-label root, where it pays (see dfirst_set_top_root): every
+     * V_d of the sum, or else this V_d by its own labels */
+    if (df->top_root && (top_root_pays(df->L, opts) ||
+                         top_root_pays(vd_labels(df, &sub), opts))) {
       /* d's numbers by the number of vectors of V_d through them */
       const uint64_t *d = ic.d;
       size_t cnt[SQ_MAX_N] = {0};
@@ -424,6 +467,7 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
     st.search_seconds += ss.seconds;
     st.truncated |= ss.truncated;
     const double cd = thread_cpu() - ci;
+    st.d_cpu += cd;
     st.d_cpu2 += cd * cd;
     st.d_pairs2 += (double)ic.pairs * (double)ic.pairs;
     if (dlog)

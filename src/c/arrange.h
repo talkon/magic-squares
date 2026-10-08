@@ -32,8 +32,12 @@ typedef struct {
   int num_labels;      /* distinct numbers among the vectors */
   int truncated;       /* 1 if the node limit was hit */
   /* r1 sampling (search_opts_t r1_*; all 0 otherwise): the number of first
-   * rows searched, and unbiased estimates of the full search's totals
-   * (sum over the sampled r1 of stride x value) with their standard errors
+   * rows searched, and estimates of the full search's totals (sum over the
+   * sampled r1 of stride x value) with their standard errors. est_squares
+   * is unbiased; est_nodes and est_seconds are unbiased up to the adaptive
+   * cross-support state, which carries over from one r1 to the next (so a
+   * sampled r1 can take +-1 node from its history: ~1e-5 relative; exact
+   * with opts.cross = 0)
    * (stratified simple-random-sampling formula, conservative for the
    * systematic samples taken here); seconds are thread CPU time.
    * r1_strata_nose: the strata with fewer than 2 sampled r1 (out of more),
@@ -75,7 +79,8 @@ typedef struct {
                           nodes and squares; candidate lists that carry their
                           bitsets only; 0 = never; default 5, i.e. from the
                           (2,3)/(3,2) children on) */
-  /* r1 sampling (for measurements; default: every r1): search only the
+  /* r1 sampling (for measurements; default r1_stride 0: every r1, no
+   * plan; stride 1: every r1 with the sampling statistics): search only the
    * first rows r1 = r1_offset, r1_offset + r1_stride, ... of the root list
    * (r1 is the square's lowest-index vector, so each r1 is an independent
    * subproblem and stride x the sampled totals is unbiased for the sum),
@@ -103,6 +108,11 @@ typedef struct {
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);
+
+/* will a search of `labels` distinct numbers with opts carry its bitsets
+ * in the candidate lists (1), or use the N x N intersection matrices (0)?
+ * (see CARRY_MAX_W in arrange.c) */
+int search_carries(uint32_t labels, const search_opts_t *opts);
 
 /*
  * Search vectors l[start, start+count). All vectors must have l->n elements.

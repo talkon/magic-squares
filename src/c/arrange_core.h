@@ -254,6 +254,15 @@ static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint64_t *in,
     acc[w] = _mm512_setzero_si512();
     tw[w] = W <= 2 || t;
   }
+#ifdef ARRANGE_DEBUG
+  for (int w = 0; w < W; w++)
+    for (uint32_t i = cnt; i < ((cnt + 7) & ~7u); i++)
+      if (in[w * cap + i] != ~(uint64_t)0) {
+        fprintf(stderr, "FILTER_COUNT: list not padded (W = %d, %u)\n", W,
+                cnt);
+        abort();
+      }
+#endif
   uint32_t k = 0;
   for (uint32_t i = 0; i < cnt; i += 8) {
     __m512i x[W];

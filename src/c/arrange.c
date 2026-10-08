@@ -29,6 +29,8 @@
  * them (from LAZY_DEPTH on with the N x N intersection matrices, always
  * when the candidate lists carry their bitsets, see CARRY_MAX_W below).
  */
+/* clock_gettime and the CPU-time clocks also under a strict -std=c17 */
+#define _POSIX_C_SOURCE 200809L
 #include "arrange.h"
 
 #include <limits.h>
@@ -876,6 +878,22 @@ static int lab_cmp(const void *a, const void *b) {
   return 0;
 }
 
+int search_carries(uint32_t labels, const search_opts_t *opts) {
+  /* as the choice of W_ in search_vectors */
+  const size_t Lw = labels > 64 * (size_t)opts->min_words
+                        ? labels
+                        : 64 * (size_t)opts->min_words;
+  int W_ = Lw <= 128    ? 2
+           : Lw <= 192  ? 3
+           : Lw <= 256  ? 4
+           : Lw <= 512  ? 8
+           : Lw <= 1024 ? 16
+                        : 64;
+  if ((Lw + 63) / 64 <= CARRY_MAX_W && W_ > 4)
+    W_ = (int)((Lw + 63) / 64);
+  return W_ <= CARRY_MAX_W;
+}
+
 search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
                               const search_opts_t *opts, square_cb cb,
                               void *ctx) {
@@ -1032,7 +1050,9 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     for (uint32_t i = 0; i < opts->r1_nlist; i++)
       if (!s.r1_nlist || s.r1_list[i] != s.r1_list[s.r1_nlist - 1])
         s.r1_list[s.r1_nlist++] = s.r1_list[i];
-  } else if (opts->r1_nstrata > 0 || opts->r1_stride > 1 || opts->r1_log) {
+  } else if (opts->r1_nstrata > 0 || opts->r1_stride >= 1 || opts->r1_log) {
+    /* (r1_stride 1, which msearch's --calib-r1-stride 1 sets, is a plan
+     * with every r1: exact "estimates"; the default 0 is no plan) */
     const int K = opts->r1_nstrata > 0
                       ? (opts->r1_nstrata < 8 ? opts->r1_nstrata : 8)
                       : 1;

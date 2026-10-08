@@ -52,8 +52,9 @@ typedef struct {
   double vd_seconds, setup_seconds, search_seconds; /* V_d, search setup,
                                                         search (wall) */
   double cpu_seconds; /* thread CPU time of the whole loop */
-  double d_cpu2, d_pairs2; /* sums over d of the squares of the per-d CPU
-                              seconds and pairs (for standard errors) */
+  double d_cpu, d_cpu2, d_pairs2; /* sums over d of the per-d CPU seconds,
+                                     their squares and the squares of the
+                                     pairs (for standard errors) */
   int truncated;      /* some V_d search hit opts->node_limit */
   int stopped;        /* the callback asked to stop */
 } dfirst_stats_t;
@@ -79,6 +80,10 @@ size_t dfirst_vd(dfirst_t *df, size_t i, vec_list_t *out);
  * it are searched (top_root_only): the roots are that class of V_d (~1/n
  * of it) instead of all of V_d. 0.6-0.7x the nodes and time of the plain
  * root (on = 0, as bin/dsearch). The (square, d) pairs are the same.
+ * With on = 1, a V_d searched with the intersection matrices of 8 words
+ * (257-512 labels without AVX-512BW or past CARRY_MAX_W) gets the plain
+ * root: the top root took 1.27x its CPU there (and 0.68x with the
+ * matrices of up to 4 words; research/ideas.md).
  */
 void dfirst_set_top_root(dfirst_t *df, int on);
 
