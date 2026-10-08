@@ -64,6 +64,33 @@ int main(int argc, char *argv[]) {
   const char *only = NULL;
   search_opts_t opts;
   search_opts_default(&opts);
+  /* r1 sampling for timing large instances (as on cx/profile): env
+   * SAMPLE_STRIDE, SAMPLE_OFFSET, SAMPLE_LOG, or SAMPLE_LIST (the r1 by
+   * their global index, comma-separated, as -DR1_SAMPLE on cx/wide); the
+   * estimates go to stderr */
+  uint32_t *r1_list = NULL;
+  {
+    const char *es = getenv("SAMPLE_STRIDE"), *eo = getenv("SAMPLE_OFFSET"),
+               *el = getenv("SAMPLE_LOG"), *ls = getenv("SAMPLE_LIST");
+    if (es && atoi(es) > 1)
+      opts.r1_stride = (uint32_t)atoi(es);
+    if (eo)
+      opts.r1_offset = (uint32_t)atoi(eo);
+    if (el)
+      opts.r1_log = fopen(el, "a");
+    if (ls && *ls) {
+      r1_list = malloc((strlen(ls) / 2 + 2) * sizeof(uint32_t));
+      for (const char *p = ls; *p;) {
+        char *e;
+        const unsigned long r = strtoul(p, &e, 10);
+        if (e == p)
+          break;
+        r1_list[opts.r1_nlist++] = (uint32_t)r;
+        p = *e == ',' ? e + 1 : e;
+      }
+      opts.r1_list = r1_list;
+    }
+  }
 
   static struct option long_options[] = {{"repeat", required_argument, 0, 'r'},
                                          {"only", required_argument, 0, 'o'},
@@ -203,6 +230,12 @@ int main(int argc, char *argv[]) {
       if (st.seconds < best)
         best = st.seconds;
     }
+    if (st.r1_sampled)
+      fprintf(stderr,
+              "%s: r1 sampled %lu, est. squares %.1f +- %.1f, nodes %.4g, "
+              "CPU-s %.2f +- %.2f\n",
+              name, (unsigned long)st.r1_sampled, st.est_squares,
+              st.se_squares, st.est_nodes, st.est_seconds, st.se_seconds);
     int ok = (!have_count || exp_count == h.count) &&
              (!have_hash || exp_hash == h.hash);
     const char *check = !ok ? "FAIL" : (have_count || have_hash) ? "ok" : "-";
@@ -229,5 +262,6 @@ int main(int argc, char *argv[]) {
     if (failures)
       printf("%d of %d instances FAILED\n", failures, ran);
   }
+  free(r1_list);
   return failures ? 1 : 0;
 }

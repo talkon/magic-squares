@@ -31,6 +31,13 @@ typedef struct {
   double setup_seconds;/* relabelling + intersection tables */
   int num_labels;      /* distinct numbers among the vectors */
   int truncated;       /* 1 if the node limit was hit */
+  /* r1 sampling (search_opts_t r1_*; all 0 otherwise): the number of first
+   * rows searched, and unbiased estimates of the full search's totals
+   * (sum over the sampled r1 of stride x value) with their standard errors
+   * (stratified simple-random-sampling formula, conservative for the
+   * systematic samples taken here); seconds are thread CPU time */
+  uint64_t r1_sampled;
+  double est_nodes, est_squares, se_squares, est_seconds, se_seconds;
 } search_stats_t;
 
 /* called on every square found; return nonzero to stop the search */
@@ -63,6 +70,31 @@ typedef struct {
                           nodes and squares; candidate lists that carry their
                           bitsets only; 0 = never; default 5, i.e. from the
                           (2,3)/(3,2) children on) */
+  /* r1 sampling (for measurements; default: every r1): search only the
+   * first rows r1 = r1_offset, r1_offset + r1_stride, ... of the root list
+   * (r1 is the square's lowest-index vector, so each r1 is an independent
+   * subproblem and stride x the sampled totals is unbiased for the sum),
+   * or with r1_nstrata > 0, split the root list into r1_nstrata equal
+   * index ranges and sample range h with r1_sstride[h] from r1_soffset[h]
+   * (stratified: the early r1, whose universes are the largest, hold most
+   * of the time), or with r1_nlist > 0, exactly the r1 of r1_list (for
+   * paired measurements; the estimates are then the sampled totals). The
+   * root list is [0, N), or with top_root_only its prefix of roots; the r1
+   * are indices into it, whatever width each is searched at (r1_width).
+   * r1_log: one line per sampled r1 (see arrange.c). */
+  uint32_t r1_stride, r1_offset;
+  int r1_nstrata;
+  uint32_t r1_sstride[8], r1_soffset[8];
+  FILE *r1_log;
+  const uint32_t *r1_list;
+  uint32_t r1_nlist;
+  /* for the diagonal-first search (dfirst.c): give these numbers the
+   * largest labels, the first the largest (the others by the usual order,
+   * ignoring them), and with top_root_only search only the first rows r1
+   * through the largest label: exact when every square contains
+   * top_numbers[0], as the squares of V_d all contain every number of d */
+  const uint64_t *top_numbers;
+  int n_top, top_root_only;
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);

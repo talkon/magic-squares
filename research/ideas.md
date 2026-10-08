@@ -1532,3 +1532,161 @@ missing from the union (359 failures, squares lost), and one lane
 dropped from the applied lists (from the first seed on).
 
 CPU used: ~1.3 CPU-hours (~10 minutes of it a runaway mutant).
+## Diagonal-first search in msearch (October 2026, branch cx/dfirst)
+
+`msearch --diag-first` (src/c/dfirst.c) searches the sums with at least
+`--diag-first-min-n` vectors (after reduction; default 3000) diagonal-first,
+as `bin/dsearch` did (see "Diagonal-first search (second look)" above): for
+every vector d of the sum's unreduced list, the semi-magic search on
+V_d = {v in the reduced list : |v & d| = 1} finds the squares with d as an
+SP traversal. So the loop over d finds every (square, SP traversal) pair
+once, and every magic square at least twice, once per diagonal (dedupe by
+`hash`). It does not enumerate the semi-magic squares, so `--calib-r1-stride`
+adds an r1-sampled plain search for the models.
+
+* V_d comes from a number -> reduced-vector posting index: a hit counter per
+  vector is bumped along the postings of d's 6 numbers, the vectors hit once
+  are kept (in list order, through a bitmap of the touched words), and only
+  the touched counters are cleared. That is O(sum of the posting lengths)
+  per d instead of dsearch's 36 compares per vector: 0.15 s instead of
+  0.24 s for the whole d loop on P = 10 6 3 1 0 1, S = 391, with the same
+  nodes. V_d plus the search's setup are 1.2% of the time at N = 7.6k and
+  0.2-0.3% at N = 15-23k.
+* d is processed in chunks of `--d-chunk` (256) indices, each followed by a
+  "dchunk" record, and `--d-range lo:hi` searches one range of d (units of a
+  sum, or a restart after the last completed chunk). `--d-stride k` with a
+  random `--d-offset` samples d; the "dsum" record then holds unbiased
+  estimates (`est_pairs`, `est_time`) and simple-random-sampling standard
+  errors. `--d-log` writes one line per d: |V_d|, labels, nodes, pairs and
+  the V_d, setup and search seconds.
+* The r1 sampling of cx/profile is now in search_opts_t (`r1_stride`,
+  `r1_offset`, and stratified `r1_nstrata` / `r1_sstride` / `r1_soffset`,
+  plus a per-r1 log). msearch exposes it as `--r1-stride`, `--r1-strata`,
+  `--r1-log` and the `SAMPLE_*` environment variables, and bench reads the
+  environment variables. A sampled plain sum writes a "csum" record with
+  `est_squares`, `se_squares`, `est_time` and `se_time`. The default root
+  loop is unchanged: the same nodes and hashes on quick/full/prod, and on
+  `bench/prod.txt` 13.70-13.87 s against 13.86-14.04 s for fdb77fc's
+  bench, in alternating runs.
+
+**The root of the V_d searches (new).** Every square of V_d contains all 6
+numbers of d: its rows meet d once each and are disjoint. So d's numbers get
+the top labels, with the one in the fewest vectors of V_d on top. Then every
+square's largest label is that number, and only the first rows through it
+(its class, ~1/6 of V_d) are roots, instead of all of V_d. On the same d,
+this cuts nodes to 0.51-0.57x and time to 0.64-0.70x at every N measured
+(4.1k-23k). The pairs are identical: gate (a) below on all five sums, and
+gates (b) and (c). `--d-plain-root` restores the plain root, which
+reproduces dsearch's nodes. The per-d cost varies more with the new root
+(CV 0.54-0.61 against 0.37-0.41: the size of the rarest class varies), but
+the top 10% of d still hold only 19-23% of the time.
+
+Correctness:
+
+* (a) With `--d-plain-root` and d-stride 1, msearch reproduces dsearch
+  exactly: 622,221 nodes on 10 6 3 1 0 1 / 391 and 1,723,937 on
+  13 6 3 2 / 517. It also gives the same nodes and the single SP pair on
+  13 5 3 2 0 1 / 632, 16 5 4 2 / 849 and 12 6 3 2 1 0 1 / 836. The new root
+  finds the same pairs.
+* (b) Differential test against the plain search on 39 sums with N = 450-3600
+  (bench quick/full/prod plus the 14 sums of the scheduler runs that have SP
+  squares): 125 squares and 15 SP pairs, the same multiset with both roots.
+  The expected multiset is {(hash, t)} over the plain squares' traversals t
+  with sum S and product P, computed in Python from their grids. On every
+  pair, `set_count == sp_count` and `partner == magic`. d-stride 3 (offsets
+  0, 1, 2), `--d-range` splits and chunk sizes add up to the same pairs and
+  nodes.
+* (c) `fuzz_arrange --dfirst`: random families with random candidate
+  diagonals, some outside the family, the oracle squares' random
+  traversals, sometimes the family's own vectors, and a planted pair (a
+  square's traversals on the diagonal and anti-diagonal together). Brute
+  force lists all (square, traversal in the set) pairs, with the number of
+  traversals in the set and the partner flag computed from all pairs of
+  them. The planted square must come twice, flagged both times. Both roots,
+  the default options plus one other option set per seed, and a d-stride 3
+  split. 1000 fresh seeds: 0 fails, with 53,639 pairs, 29,433 flagged and
+  1,426 planted squares. ctest runs it as `fast_fuzz_dfirst` and
+  `fast_fuzz_dfirst_matrices`. Mutations of the partner test and of the
+  bitmap scan fail 33 and 84 of 120 checks (60 seeds). One mutation,
+  keeping the vectors
+  that meet d more than once, is not caught, but it is equivalent: a square
+  of such vectors still has rows that meet d once each.
+* (d) `ctest -R fast_` passes (33 tests), the bench quick/full/prod hashes
+  and nodes are unchanged, and `fuzz_arrange` passes 1000 fresh seeds.
+
+Measurements (fdb77fc search code; thread CPU seconds per sum, estimated).
+Method:
+
+* Plain search: r1-sampled with 4 strata (r1-index quartiles, strides
+  k : 2k : 6k : 40k, after the per-quartile costs and CVs of the cx/profile
+  logs).
+* d-first: d-sampled; the plain root on the same d as the new root's first
+  replicate.
+* Two independent replicates of each, run alternately (d-first A, plain A,
+  plain-root A, plain B, d-first B) in one session, with one binary.
+* The machine was shared (load 4-8 on 4 cores) for both arms alike.
+* relSE: standard error / estimate, by the stratified (plain) or
+  simple-random-sampling (d) formula.
+
+| P | S | x | N | labels | plain CPU-s (relSE) | d-first (relSE) | ratio (relSE) | plain root | ratio | new / plain root, same d |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 13 7 4 3 1 1 | 1900 | 0.10 | 4,111 | 137 | 36 (2%) | 31 (3%) | 0.86 (4%) | 46 | 1.28 | 0.68 |
+| 13 7 4 3 1 1 | 1950 | 0.13 | 5,896 | 153 | 187 (4%) | 115 (3%) | 0.61 (5%) | 171 | 0.91 | 0.65 |
+| 12 6 3 2 1 1 | 988 | 0.34 | 6,671 | 159 | 274 (4%) | 156 (3%) | 0.57 (5%) | 229 | 0.84 | 0.69 |
+| 13 7 4 3 1 1 | 2000 | 0.15 | 7,593 | 168 | 509 (4%) | 282 (3%) | 0.56 (5%) | 416 | 0.82 | 0.68 |
+| 13 7 4 3 1 1 | 2100 | 0.20 | 11,306 | 192 | 2,978 (6%) | 1,019 (5%) | 0.34 (8%) | 1,513 | 0.51 | 0.64 |
+| 13 7 4 3 1 1 | 2200 | 0.25 | 15,199 | 211 | 9,395 (7%) | 3,242 (6%) | 0.35 (9%) | 4,659 | 0.50 | 0.66 |
+| 11 6 4 3 2 1 | 2174 | 0.25 | 16,424 | 220 | 11,598 (9%) | 4,262 (6%) | 0.37 (10%) | 6,280 | 0.54 | 0.70 |
+| 14 7 4 4 1 0 0 1 | 3648 | 0.25 | 20,538 | 252 | 18,031 (7%) | 4,825 (5%) | 0.27 (9%) | 7,442 | 0.41 | 0.64 |
+| 13 7 4 3 1 1 | 2400 | 0.33 | 22,992 | 245 | 45,614 (9%) | 12,672 (5%) | 0.28 (10%) | 20,476 | 0.45 | 0.64 |
+| 12 6 3 2 1 1 | 1200 | 0.53 | 11,697 | 199 | 2,188 (7%) | 1,012 (8%) | 0.46 | | | |
+| 12 6 3 2 1 1 | 1480 | 0.74 | 15,074 | 236 | 3,347 (7%) | 1,224 (7%) | 0.37 | | | |
+
+* **At N >= 15k, d-first costs 0.27-0.37x the plain search per sum**
+  (geometric mean 0.31). The design without the new root costs 0.41-0.54x
+  (geometric mean 0.47).
+* The cost per expected magic square is the ratio of the CPU per sum, since
+  both find every magic square. So it falls 2.7-3.7x at N = 15-23k, and
+  ~1.8x at N = 6-8k.
+* Measured against the cost per semi-magic square of the plain search
+  (4.2-33 CPU-s at N = 15-23k), d-first spends the equivalent of 1.4-8.8
+  CPU-s per square.
+* The ratio falls like N^-0.65. Fitting the new root's ratios at x <= 0.4
+  gives a crossover at **N ~ 3,000**. These are the table's first nine
+  rows, the d-first-only full runs of gate (b) at N = 2.2-3.6k (0.93-1.28)
+  and 13 7 4 3 1 1 / 1850 (N 2.5k, 1.2).
+* The plain root crosses over at N ~ 5,500.
+* `--diag-first-min-n` defaults to 3000. Small N with large x is the only
+  place where d-first loses badly (10 6 3 2 1 / 1360, N 3.1k: 2.6x), and
+  those sums essentially never have squares. At N = 11.7-15k with
+  x = 0.53-0.74 it still wins (0.46, 0.37).
+* The plain estimates agree with earlier runs: 1900 is exact (35.9 s), and
+  988 gives 274 s against 273-290 s. 2200 and 2400 give 9.4k and 45.6k,
+  against the cx/profile estimates of 10.2k and 42.4k (SE 15-34%).
+
+Caveats:
+
+* All of these sums have <= 256 labels (the carried path).
+* The search improvements in progress elsewhere (wider carried path,
+  cheaper (2,2) children) speed up the plain search and the V_d searches
+  alike, but not necessarily by the same factor: V_d's lists are ~6x
+  shorter. The ratios should be re-measured on the integrated binary.
+* d-first sums write "dsquare" / "dchunk" / "dsum" records, which the
+  scheduler does not read yet. It would need to mark them covered and to fit
+  its squares model to the calibration stream.
+
+Tried on top of the new root, not kept:
+
+* **Forward checking on d's numbers.** Every number of d that is in no
+  placed vector of an axis must be in a candidate of that axis. This is two
+  more masked tests per child, using the unions the forward check already
+  has. It pruned 1% of the nodes (P = 10 6 4 2 1 1 / 855: 15.27M -> 15.19M;
+  S = 2200, 20 d: 7.14M -> 7.06M), with time within noise (0.96x). The
+  generic forward check already catches nearly all of it, so the core was
+  left unchanged.
+* **Reducing V_d** (reduce_vectors on each V_d before its search). It
+  removes 0-0.05% of V_d with the default reduction and 1-2% with the
+  strong one, and nodes fall by 0.6% (S = 2200, 10 d). Slower.
+
+CPU used: ~31 min (gates ~6, experiments ~3, measurements ~19, the check of
+the plain path ~1.5).

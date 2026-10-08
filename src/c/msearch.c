@@ -22,6 +22,41 @@
  *   --pretest-min K   pretest the children with K or more vectors placed
  *                     (default 5; 0 = never; see search_opts_t)
  *
+ * Diagonal-first search (src/c/dfirst.h; research/ideas.md, "Diagonal-first
+ * search in msearch"):
+ *   --diag-first      search the sums with at least --diag-first-min-n
+ *                     vectors (after reduction) diagonal-first: for every
+ *                     vector d of the sum (unreduced), the semi-magic
+ *                     search on V_d = {v : |v & d| = 1} finds every
+ *                     (square, SP traversal) pair once, so every magic
+ *                     square (twice, once per diagonal); the other sums
+ *                     get the plain search
+ *   --diag-first-min-n N0   default 3000, where d-first and the plain
+ *                     search cost the same per sum at x = ln(S/S_min) <=
+ *                     0.4 (0.86x at N = 4.1k, 0.3x at N = 15-23k)
+ *   --d-stride k, --d-offset o   search only d = lo + o, lo + o + k, ...
+ *                     (an unbiased sample; o defaults to a random offset
+ *                     from --sample-seed)
+ *   --d-range lo:hi   only the d with index in [lo, hi) of the sum's
+ *                     unreduced list (for splitting a sum into units)
+ *   --d-chunk C       a "dchunk" checkpoint record every C indices of d
+ *                     (default 256)
+ *   --d-log FILE      one line per d (see dfirst_search)
+ *   --d-plain-root    search all of V_d's first rows, not only those through
+ *                     d's rarest number (as bin/dsearch; see
+ *                     dfirst_set_top_root)
+ *   --calib-r1-stride k   for each d-first sum, also run the plain search
+ *                     on every k-th first row r1 (random offset), which
+ *                     estimates the sum's semi-magic squares and plain time
+ *
+ * r1 sampling of the plain search (measurements; the squares and the sum
+ * record become "csquare" / "csum" records with estimates):
+ *   --r1-stride k, --r1-offset o, --r1-strata k1,k2,..   (see search_opts_t;
+ *                     strata: equal index ranges of the root list)
+ *   --r1-log FILE     one line per sampled r1
+ *   --sample-seed X   seed of the default random offsets (default 1)
+ *   (environment: SAMPLE_STRIDE, SAMPLE_OFFSET, SAMPLE_LOG as in cx/profile)
+ *
  * Output (JSON lines, one record per searched sum, flushed immediately so a
  * killed run keeps all completed sums):
  *   {"type":"sum","n":6,"P":[13,6,3,2],"Pval":...,"S":506,"nvecs":831,
@@ -41,8 +76,24 @@
  * says every sum in [min_sum, last_sum] was searched (sums with fewer than 2n
  * vectors after reduction cannot have a square and get no "sum" record); it
  * is omitted with --sums.
+ *
+ * d-first sums write, instead of "square" and "sum":
+ *   {"type":"dsquare",...,"d":i,"dvec":[...],"set_count":..,"sp_count":..,
+ *    "best_score":..,"magic":0|1,"partner":0|1,"hash":..,"grid":..}
+ * per (square, d) pair (a square appears once per SP traversal: dedupe by
+ * hash; set_count = its traversals among the sum's vectors = sp_count;
+ * partner: another of them fits on the other diagonal with d, i.e. magic),
+ *   {"type":"dchunk","S":..,"d_lo":..,"d_hi":..,"nd":..,"pairs":..,...}
+ * per completed chunk of d, and a final
+ *   {"type":"dsum",...,"nd":..,"d_stride":..,"pairs":..,"est_pairs":..,
+ *    "time":..,"est_time":..,...}
+ * where pairs is the number of (square, SP traversal) pairs (what a magic
+ * square needs twice). Sampled plain searches (--calib-r1-stride, --r1-*)
+ * write "csquare" records (the squares of the sampled r1) and a "csum"
+ * record with est_squares, se_squares, est_time, se_time.
  */
 #include <getopt.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +103,7 @@
 #include "enumerate.h"
 #include "arrange.h"
 #include "square.h"
+#include "dfirst.h"
 
 /* version of the search, written into every "sum" record: bump it whenever
  * the search time changes materially, since the scheduler fits its model of
@@ -81,7 +133,21 @@ typedef struct {
   const prime_exps_t *p;
   uint64_t S;
   int square_index;
+  /* sampled plain search: "csquare" records with this weight, and the
+   * traversal totals of its squares */
+  int sampled;
+  double weight;
+  uint64_t sp_pairs, s_trav, p_trav;
+  /* d-first: pairs with a magic best score */
+  uint64_t magic_pairs;
 } out_ctx_t;
+
+static uint64_t splitmix(uint64_t x) {
+  uint64_t z = x + 0x9E3779B97F4A7C15ull;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
 
 static void print_p_json(FILE *fp, const prime_exps_t *p) {
   fputc('[', fp);
@@ -111,8 +177,14 @@ static int square_found(const square_t *sq, void *vctx) {
   } else {
     diag_stats_t ds;
     square_diag_stats(sq, &ds);
-    fprintf(fp, "{\"type\":\"square\",\"n\":%d,\"P\":", sq->n);
+    ctx->sp_pairs += ds.sp_count;
+    ctx->s_trav += ds.s_count;
+    ctx->p_trav += ds.p_count;
+    fprintf(fp, "{\"type\":\"%s\",\"n\":%d,\"P\":",
+            ctx->sampled ? "csquare" : "square", sq->n);
     print_p_json(fp, ctx->p);
+    if (ctx->sampled)
+      fprintf(fp, ",\"weight\":%g", ctx->weight);
     fprintf(fp,
             ",\"S\":%lu,\"s_count\":%d,\"p_count\":%d,\"sp_count\":%d,"
             "\"best_score\":%d,\"hash\":\"%016lx\",\"grid\":",
@@ -127,6 +199,49 @@ static int square_found(const square_t *sq, void *vctx) {
   fflush(fp);
   ctx->square_index++;
   return 0;
+}
+
+static int dsquare_found(const dsquare_t *d, void *vctx) {
+  out_ctx_t *ctx = vctx;
+  FILE *fp = ctx->out;
+  const square_t *sq = d->sq;
+  diag_stats_t ds;
+  square_diag_stats(sq, &ds);
+  ctx->magic_pairs += ds.best_score >= 14;
+  fprintf(fp, "{\"type\":\"dsquare\",\"n\":%d,\"P\":", sq->n);
+  print_p_json(fp, ctx->p);
+  fprintf(fp, ",\"S\":%lu,\"d\":%zu,\"dvec\":[", (unsigned long)ctx->S,
+          d->d_index);
+  for (int i = 0; i < sq->n; i++)
+    fprintf(fp, i ? ",%lu" : "%lu", (unsigned long)d->d[i]);
+  fprintf(fp,
+          "],\"set_count\":%d,\"s_count\":%d,\"p_count\":%d,"
+          "\"sp_count\":%d,\"best_score\":%d,\"magic\":%d,\"partner\":%d,"
+          "\"hash\":\"%016lx\",\"grid\":",
+          d->set_count, ds.s_count, ds.p_count, ds.sp_count, ds.best_score,
+          ds.best_score >= 14, d->partner, (unsigned long)square_hash(sq));
+  grid_print_json(fp, &ds.best);
+  fprintf(fp, "}\n");
+  if (ds.best_score >= 14 || d->partner)
+    fprintf(stderr, "!!! MAGIC SQUARE FOUND (S=%lu, d-first) !!!\n",
+            (unsigned long)ctx->S);
+  fflush(fp);
+  return 0;
+}
+
+/* comma-separated unsigned list; returns the count (at most max) */
+static int parse_u32_list(const char *s, uint32_t *out, int max) {
+  int k = 0;
+  while (*s && k < max) {
+    char *end;
+    out[k++] = (uint32_t)strtoul(s, &end, 10);
+    if (end == s)
+      return -1;
+    s = end;
+    if (*s == ',')
+      s++;
+  }
+  return k;
 }
 
 static int parse_sums(const char *s, uint64_t **out) {
@@ -153,6 +268,167 @@ static int u64_cmp(const void *a, const void *b) {
   return (x > y) - (x < y);
 }
 
+
+/* a sampled plain search of one sum: "csquare" records and a "csum" */
+static uint64_t run_sampled(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+                            const prime_exps_t *p, uint64_t S, size_t raw,
+                            const vec_list_t *red, const search_opts_t *so,
+                            const char *mode, double enum_share,
+                            double reduce_time) {
+  ctx->S = S;
+  ctx->sampled = 1;
+  /* the weight of a square: the stride of its r1 (with strata, see the
+   * r1 log: 0 here) */
+  ctx->weight = so->r1_nstrata > 0 ? 0 : (so->r1_stride > 1 ? so->r1_stride : 1);
+  ctx->sp_pairs = ctx->s_trav = ctx->p_trav = 0;
+  const double c0 = cpu_time();
+  search_stats_t st =
+      search_vectors(red, 0, red->count, so, square_found, ctx);
+  const double cpu = cpu_time() - c0;
+  ctx->sampled = 0;
+  fprintf(out,
+          "{\"type\":\"csum\",\"mode\":\"%s\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,"
+          "\"S\":%lu,\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%d,",
+          mode, n, pstr, (unsigned long)pexp_value(p), (unsigned long)S,
+          red->count, raw, st.num_labels);
+  if (so->r1_nstrata > 0) {
+    fprintf(out, "\"r1_strata\":[");
+    for (int h = 0; h < so->r1_nstrata; h++)
+      fprintf(out, h ? ",%u" : "%u", so->r1_sstride[h]);
+    fprintf(out, "],\"r1_offsets\":[");
+    for (int h = 0; h < so->r1_nstrata; h++)
+      fprintf(out, h ? ",%u" : "%u", so->r1_soffset[h]);
+    fprintf(out, "],");
+  } else {
+    fprintf(out, "\"r1_stride\":%u,\"r1_offset\":%u,",
+            so->r1_stride > 1 ? so->r1_stride : 1, so->r1_offset);
+  }
+  fprintf(out,
+          "\"r1_sampled\":%lu,\"squares\":%lu,\"sp_pairs\":%lu,\"s_trav\":%lu,"
+          "\"p_trav\":%lu,\"nodes\":%lu,\"time\":%.6f,\"cpu\":%.6f,"
+          "\"setup_time\":%.6f,\"est_squares\":%.6g,\"se_squares\":%.6g,"
+          "\"est_sp_pairs\":%.6g,\"est_nodes\":%.6g,\"est_time\":%.6g,"
+          "\"se_time\":%.6g,\"enum_time\":%.6f,\"reduce_time\":%.6f,"
+          "\"truncated\":%d,\"engine\":%d}\n",
+          (unsigned long)st.r1_sampled, (unsigned long)st.squares,
+          (unsigned long)ctx->sp_pairs, (unsigned long)ctx->s_trav,
+          (unsigned long)ctx->p_trav, (unsigned long)st.nodes, st.seconds, cpu,
+          st.setup_seconds, st.est_squares, st.se_squares,
+          ctx->weight > 0 ? ctx->weight * (double)ctx->sp_pairs : -1.0,
+          st.est_nodes, st.est_seconds, st.se_seconds, enum_share,
+          reduce_time, st.truncated, ENGINE_VERSION);
+  fflush(out);
+  return st.nodes;
+}
+
+/* the d-first search of one sum (see the header comment) */
+static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+                           const prime_exps_t *p, uint64_t S,
+                           const vec_list_t *all, size_t start_i, size_t raw,
+                           const vec_list_t *red, const search_opts_t *opts,
+                           size_t d_stride, int64_t d_offset, uint64_t seed,
+                           size_t d_lo, size_t d_hi, size_t d_chunk,
+                           FILE *d_log, uint32_t calib_stride, int top_root,
+                           double enum_share, double reduce_time) {
+  const double c0 = cpu_time();
+  dfirst_t *df = dfirst_new(red, 0, red->count, all, start_i, raw);
+  dfirst_set_top_root(df, top_root);
+  const double t_index = cpu_time() - c0;
+  const uint64_t sd = splitmix(seed ^ (S * 0x9E3779B97F4A7C15ull));
+  const size_t off = d_offset >= 0 ? (size_t)d_offset % d_stride
+                                   : (size_t)(splitmix(sd + 101) % d_stride);
+  const size_t hi = d_hi < raw ? d_hi : raw, lo = d_lo < hi ? d_lo : hi;
+  ctx->S = S;
+  ctx->magic_pairs = 0;
+  if (d_log)
+    fprintf(d_log, "# S %lu N %zu Nred %zu stride %zu offset %zu\n",
+            (unsigned long)S, raw, red->count, d_stride, off);
+  dfirst_stats_t tot;
+  memset(&tot, 0, sizeof(tot));
+  const size_t base = lo + off;
+  for (size_t c = lo; c < hi; c += d_chunk) {
+    const size_t c2 = c + d_chunk < hi ? c + d_chunk : hi;
+    /* the first sampled index >= c */
+    const size_t i0 =
+        c <= base ? base : base + (c - base + d_stride - 1) / d_stride * d_stride;
+    dfirst_stats_t st;
+    memset(&st, 0, sizeof(st));
+    const double cc = cpu_time();
+    if (i0 < c2)
+      st = dfirst_search(df, i0, c2, d_stride, 0, opts, dsquare_found, ctx,
+                         d_log);
+    tot.nd += st.nd;
+    tot.vd_total += st.vd_total;
+    tot.nodes += st.nodes;
+    tot.pairs += st.pairs;
+    tot.partners += st.partners;
+    tot.vd_seconds += st.vd_seconds;
+    tot.setup_seconds += st.setup_seconds;
+    tot.search_seconds += st.search_seconds;
+    tot.d_cpu2 += st.d_cpu2;
+    tot.cpu_seconds += st.cpu_seconds;
+    tot.d_pairs2 += st.d_pairs2;
+    tot.truncated |= st.truncated;
+    fprintf(out,
+            "{\"type\":\"dchunk\",\"n\":%d,\"P\":[%s],\"S\":%lu,\"d_lo\":%zu,"
+            "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
+            "\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,\"time\":%.6f}\n",
+            n, pstr, (unsigned long)S, c, c2, d_stride, off,
+            (unsigned long)st.nd, (unsigned long)st.nodes,
+            (unsigned long)st.pairs, (unsigned long)st.partners,
+            cpu_time() - cc);
+    fflush(out);
+    if (st.stopped)
+      break;
+  }
+  const uint32_t labels = dfirst_num_labels(df);
+  dfirst_free(df);
+  const double cpu = cpu_time() - c0;
+  /* estimates for the d in [lo, hi): stride x the sampled totals, and the
+   * simple-random-sampling standard errors over the sampled d */
+  const double k = (double)d_stride, m = (double)tot.nd;
+  const double Nd = (double)(hi - lo);
+  double se_time = 0, se_pairs = 0;
+  if (m >= 2) {
+    const double f = Nd * Nd * (1 - m / Nd) / m / (m - 1);
+    const double ct = tot.cpu_seconds; /* the d loop */
+    const double vt = f * (tot.d_cpu2 - ct * ct / m);
+    const double vp =
+        f * (tot.d_pairs2 - (double)tot.pairs * (double)tot.pairs / m);
+    se_time = vt > 0 ? sqrt(vt) : 0;
+    se_pairs = vp > 0 ? sqrt(vp) : 0;
+  }
+  fprintf(out,
+          "{\"type\":\"dsum\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,\"S\":%lu,"
+          "\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%u,\"d_lo\":%zu,"
+          "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
+          "\"avg_vd\":%.1f,\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,"
+          "\"magic_pairs\":%lu,\"est_pairs\":%.6g,\"se_pairs\":%.6g,"
+          "\"est_nodes\":%.6g,\"time\":%.6f,\"index_time\":%.6f,"
+          "\"vd_time\":%.6f,\"setup_time\":%.6f,\"search_time\":%.6f,"
+          "\"est_time\":%.6g,\"se_time\":%.6g,\"enum_time\":%.6f,"
+          "\"reduce_time\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
+          n, pstr, (unsigned long)pexp_value(p), (unsigned long)S, red->count,
+          raw, labels, lo, hi, d_stride, off, (unsigned long)tot.nd,
+          tot.nd ? (double)tot.vd_total / (double)tot.nd : 0.0,
+          (unsigned long)tot.nodes, (unsigned long)tot.pairs,
+          (unsigned long)tot.partners, (unsigned long)ctx->magic_pairs,
+          k * (double)tot.pairs, se_pairs, k * (double)tot.nodes, cpu, t_index,
+          tot.vd_seconds, tot.setup_seconds, tot.search_seconds,
+          t_index + k * (cpu - t_index), se_time, enum_share, reduce_time,
+          tot.truncated, ENGINE_VERSION);
+  fflush(out);
+  uint64_t nodes = tot.nodes;
+  if (calib_stride > 0) {
+    search_opts_t so = *opts;
+    so.r1_stride = calib_stride;
+    so.r1_offset = (uint32_t)(splitmix(sd + 202) % calib_stride);
+    nodes += run_sampled(out, ctx, pstr, n, p, S, raw, red, &so, "calib",
+                         enum_share, reduce_time);
+  }
+  return nodes;
+}
+
 int main(int argc, char *argv[]) {
   int n = 6;
   uint64_t min_sum = 0, max_sum = 0;
@@ -165,8 +441,44 @@ int main(int argc, char *argv[]) {
   int legacy = 0, strong = 0;
   search_opts_t opts;
   search_opts_default(&opts);
+  /* d-first */
+  int diag_first = 0;
+  size_t dfirst_min_n = 3000, d_stride = 1, d_chunk = 256;
+  int64_t d_offset = -1; /* -1: random from the seed */
+  size_t d_range_lo = 0, d_range_hi = (size_t)-1;
+  const char *d_log_file = NULL;
+  uint32_t calib_stride = 0;
+  int d_top_root = 1; /* see dfirst_set_top_root */
+  /* r1 sampling of the plain search */
+  uint32_t r1_stride = 0, r1_strata[8];
+  int64_t r1_offset = -1;
+  int r1_nstrata = 0;
+  const char *r1_log_file = NULL;
+  uint64_t seed = 1;
+  {
+    const char *es = getenv("SAMPLE_STRIDE"), *eo = getenv("SAMPLE_OFFSET");
+    if (es && atoi(es) > 1)
+      r1_stride = (uint32_t)atoi(es);
+    if (eo)
+      r1_offset = atoi(eo);
+    r1_log_file = getenv("SAMPLE_LOG");
+  }
 
   static struct option long_options[] = {
+      {"diag-first", no_argument, 0, 1000},
+      {"diag-first-min-n", required_argument, 0, 1001},
+      {"d-stride", required_argument, 0, 1002},
+      {"d-offset", required_argument, 0, 1003},
+      {"d-range", required_argument, 0, 1004},
+      {"d-chunk", required_argument, 0, 1005},
+      {"d-log", required_argument, 0, 1006},
+      {"calib-r1-stride", required_argument, 0, 1007},
+      {"r1-stride", required_argument, 0, 1008},
+      {"r1-offset", required_argument, 0, 1009},
+      {"r1-strata", required_argument, 0, 1010},
+      {"r1-log", required_argument, 0, 1011},
+      {"sample-seed", required_argument, 0, 1012},
+      {"d-plain-root", no_argument, 0, 1013},
       {"vec-size", required_argument, 0, 'n'},
       {"min-sum", required_argument, 0, 'a'},
       {"max-sum", required_argument, 0, 'b'},
@@ -238,6 +550,59 @@ int main(int argc, char *argv[]) {
     case 'P':
       opts.pretest_min = atoi(optarg);
       break;
+    case 1000:
+      diag_first = 1;
+      break;
+    case 1001:
+      dfirst_min_n = strtoull(optarg, NULL, 10);
+      break;
+    case 1002:
+      d_stride = strtoull(optarg, NULL, 10);
+      if (d_stride < 1)
+        d_stride = 1;
+      break;
+    case 1003:
+      d_offset = strtoll(optarg, NULL, 10);
+      break;
+    case 1004: {
+      char *e;
+      d_range_lo = strtoull(optarg, &e, 10);
+      d_range_hi = *e == ':' && e[1] ? strtoull(e + 1, NULL, 10) : (size_t)-1;
+      break;
+    }
+    case 1005:
+      d_chunk = strtoull(optarg, NULL, 10);
+      if (d_chunk < 1)
+        d_chunk = 1;
+      break;
+    case 1006:
+      d_log_file = optarg;
+      break;
+    case 1007:
+      calib_stride = (uint32_t)strtoul(optarg, NULL, 10);
+      break;
+    case 1008:
+      r1_stride = (uint32_t)strtoul(optarg, NULL, 10);
+      break;
+    case 1009:
+      r1_offset = strtoll(optarg, NULL, 10);
+      break;
+    case 1010:
+      r1_nstrata = parse_u32_list(optarg, r1_strata, 8);
+      if (r1_nstrata <= 0) {
+        fprintf(stderr, "bad --r1-strata\n");
+        return 2;
+      }
+      break;
+    case 1011:
+      r1_log_file = optarg;
+      break;
+    case 1012:
+      seed = strtoull(optarg, NULL, 10);
+      break;
+    case 1013:
+      d_top_root = 0;
+      break;
     default:
       return 2;
     }
@@ -275,6 +640,13 @@ int main(int argc, char *argv[]) {
   }
 
   out_ctx_t ctx = {.out = out, .legacy = legacy, .p = &p};
+  FILE *d_log = d_log_file ? fopen(d_log_file, "a") : NULL;
+  FILE *r1_log = r1_log_file ? fopen(r1_log_file, "a") : NULL;
+  const int plain_sampled = r1_stride > 1 || r1_nstrata > 0 || r1_log;
+  if (legacy && (diag_first || plain_sampled)) {
+    fprintf(stderr, "--format legacy: no d-first or sampling\n");
+    return 2;
+  }
   uint64_t total_nodes = 0;
   double t_start = wall_time();
   int stop = 0, stop_nodes = 0; /* stop_nodes: by --total-nodes */
@@ -328,6 +700,50 @@ int main(int argc, char *argv[]) {
       ctx.S = S;
       if (legacy)
         fprintf(out, "sum %lu nvecs %zu\n", (unsigned long)S, red.count);
+      char pstr[64];
+      pexp_to_str(&p, pstr, ",");
+      if (diag_first && red.count >= dfirst_min_n) {
+        total_nodes += run_dfirst(out, &ctx, pstr, n, &p, S, &all, start_i,
+                                  raw, &red, &opts, d_stride, d_offset, seed,
+                                  d_range_lo, d_range_hi, d_chunk, d_log,
+                                  calib_stride, d_top_root,
+                                  enum_time * (double)raw /
+                                      (all.count ? all.count : 1),
+                                  reduce_time);
+        if (total_node_limit && total_nodes >= total_node_limit)
+          stop = stop_nodes = 1;
+        if (time_limit > 0 && wall_time() - t_start >= time_limit)
+          stop = 1;
+        continue;
+      }
+      if (plain_sampled) {
+        search_opts_t so = opts;
+        uint64_t sd = splitmix(seed ^ (S * 0x9E3779B97F4A7C15ull));
+        if (r1_nstrata > 0) {
+          so.r1_nstrata = r1_nstrata;
+          for (int h = 0; h < r1_nstrata; h++) {
+            so.r1_sstride[h] = r1_strata[h] ? r1_strata[h] : 1;
+            so.r1_soffset[h] = (uint32_t)(splitmix(sd + h) % so.r1_sstride[h]);
+          }
+        } else {
+          so.r1_stride = r1_stride > 1 ? r1_stride : 1;
+          so.r1_offset = r1_offset >= 0 ? (uint32_t)r1_offset
+                                        : (uint32_t)(sd % so.r1_stride);
+        }
+        so.r1_log = r1_log;
+        if (r1_log)
+          fprintf(r1_log, "# S %lu N %zu\n", (unsigned long)S, red.count);
+        total_nodes += run_sampled(out, &ctx, pstr, n, &p, S, raw, &red, &so,
+                                   "sampled",
+                                   enum_time * (double)raw /
+                                       (all.count ? all.count : 1),
+                                   reduce_time);
+        if (total_node_limit && total_nodes >= total_node_limit)
+          stop = stop_nodes = 1;
+        if (time_limit > 0 && wall_time() - t_start >= time_limit)
+          stop = 1;
+        continue;
+      }
       search_stats_t st =
           search_vectors(&red, 0, red.count, &opts, square_found, &ctx);
       total_nodes += st.nodes;
@@ -336,8 +752,6 @@ int main(int argc, char *argv[]) {
       if (legacy) {
         fprintf(out, "num searched: %lu\n", (unsigned long)st.nodes);
       } else {
-        char pstr[64];
-        pexp_to_str(&p, pstr, ",");
         fprintf(out,
                 "{\"type\":\"sum\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,\"S\":%lu,"
                 "\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%d,\"nodes\":%lu,"
@@ -381,6 +795,10 @@ int main(int argc, char *argv[]) {
   }
   if (out != stdout)
     fclose(out);
+  if (d_log)
+    fclose(d_log);
+  if (r1_log)
+    fclose(r1_log);
   free(sum_list);
   return 0;
 }

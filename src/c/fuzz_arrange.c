@@ -4,6 +4,7 @@
  *
  * usage: fuzz_arrange [-v] [--variants a,b,..] [--mode M] [--n N]
  *                     [--budget NODES] [--diff | --noracle] [--cross]
+ *                     [--dfirst]
  *                     seed0 count
  *
  * For every seed in [seed0, seed0 + count): generate a synthetic family of
@@ -18,7 +19,8 @@
  * check that every reported square is valid). --cross also checks the oracle
  * against a second, clique-based one; --diff compares the variants with
  * each other where the oracle exceeds its budget (--noracle: always; the
- * first selected variant is the reference). Exit status is nonzero on
+ * first selected variant is the reference). --dfirst tests the
+ * diagonal-first search instead (see dfirst_check). Exit status is nonzero on
  * any mismatch, and the failing family is written to fail_<seed>.txt.
  *
  * Written for the code review of October 2026 (3000 seeds x 16 variants x 5
@@ -36,6 +38,7 @@ static int verbose;
 
 #include "arrange.h"
 #include "enumerate.h"
+#include "dfirst.h"
 
 /* ------------------------------------------------------------------ rng */
 static uint64_t rs;
@@ -931,10 +934,347 @@ static void dump(const char *path, uint64_t seed) {
   fclose(f);
 }
 
+/* ------------------------------------------------------------ d-first */
+/*
+ * --dfirst: the diagonal-first search (dfirst.h) against brute force. A
+ * random set of candidate diagonals (random n-sets, numbers outside the
+ * family, traversals of the oracle's squares, sometimes the family's own
+ * vectors, and a planted pair: a square's traversals t1, t2 that fit on
+ * the diagonal and the anti-diagonal together); dfirst_search over the
+ * whole set must report exactly the multiset of (square, traversal in the
+ * set) pairs, with the number of the square's traversals in the set and
+ * the partner flag (another traversal in the set on the other diagonal),
+ * which brute force computes from all pairs of the square's traversals in
+ * the set. The planted square must be reported twice and flagged both
+ * times; a d-stride 3 split (offsets 0, 1, 2) must add up to the same.
+ */
+typedef struct {
+  canon_t sq;
+  uint64_t d[MAXN]; /* ascending */
+  int partner, set_count;
+} dpair_t;
+typedef struct {
+  dpair_t *a;
+  int k, cap;
+} dplist_t;
+static void dp_push(dplist_t *l, const dpair_t *p) {
+  if (l->k == l->cap) {
+    l->cap = l->cap ? 2 * l->cap : 64;
+    l->a = realloc(l->a, l->cap * sizeof(dpair_t));
+  }
+  l->a[l->k++] = *p;
+}
+static int cmp_dpair(const void *a, const void *b) {
+  const dpair_t *x = a, *y = b;
+  int c = cmp_canon(&x->sq, &y->sq);
+  if (c)
+    return c;
+  for (int i = 0; i < n; i++)
+    if (x->d[i] != y->d[i])
+      return (x->d[i] > y->d[i]) - (x->d[i] < y->d[i]);
+  if (x->partner != y->partner)
+    return x->partner - y->partner;
+  return x->set_count - y->set_count;
+}
+static uint64_t *dset; /* the diagonal set: ascending tuples, sorted */
+static int ndset, capdset;
+static bool in_dset(const uint64_t *t0) {
+  uint64_t t[MAXN];
+  memcpy(t, t0, n * 8);
+  qsort(t, n, 8, cmp_u64);
+  return ndset && bsearch(t, dset, ndset, n * 8, cmp_tuple) != NULL;
+}
+static void dset_add(const uint64_t *t0) {
+  uint64_t t[MAXN];
+  memcpy(t, t0, n * 8);
+  qsort(t, n, 8, cmp_u64);
+  for (int i = 0; i + 1 < n; i++)
+    if (t[i] == t[i + 1])
+      return; /* not an n-set */
+  if ((size_t)(ndset + 1) * n > (size_t)capdset) { /* capdset: words */
+    capdset = capdset ? 2 * capdset : 256 * MAXN;
+    while ((size_t)(ndset + 1) * n > (size_t)capdset)
+      capdset *= 2;
+    dset = realloc(dset, (size_t)capdset * 8);
+  }
+  memcpy(dset + (size_t)ndset * n, t, n * 8);
+  ndset++;
+}
+/* the grid of a canonical form: first block as rows, second as cols */
+static void canon_grid(const canon_t *c, uint64_t g[MAXN][MAXN]) {
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < n; j++) {
+      g[i][j] = 0;
+      for (int a = 0; a < n; a++)
+        for (int b = 0; b < n; b++)
+          if (c->v[i * n + a] == c->v[n * n + j * n + b])
+            g[i][j] = c->v[i * n + a];
+    }
+}
+static int next_perm_i(int *p, int k) {
+  int i = k - 2;
+  while (i >= 0 && p[i] >= p[i + 1])
+    i--;
+  if (i < 0)
+    return 0;
+  int j = k - 1;
+  while (p[j] <= p[i])
+    j--;
+  int t = p[i];
+  p[i] = p[j];
+  p[j] = t;
+  for (int a = i + 1, b = k - 1; a < b; a++, b--) {
+    t = p[a];
+    p[a] = p[b];
+    p[b] = t;
+  }
+  return 1;
+}
+/* can traversals p1, p2 (row -> col) be the diagonal and anti-diagonal
+ * after permuting rows and cols: p1^-1 p2 an involution with n mod 2 fixed
+ * points */
+static bool diag_pair(const int *p1, const int *p2) {
+  int inv1[MAXN], rel[MAXN], fixed = 0;
+  for (int i = 0; i < n; i++)
+    inv1[p1[i]] = i;
+  for (int r = 0; r < n; r++)
+    rel[r] = inv1[p2[r]];
+  for (int r = 0; r < n; r++) {
+    if (rel[rel[r]] != r)
+      return false;
+    fixed += rel[r] == r;
+  }
+  return fixed == n % 2;
+}
+static dplist_t d_brute, d_found;
+static int d_invalid;
+static void brute_pairs(void) {
+  d_brute.k = 0;
+  static int (*tp)[MAXN];
+  static int captp;
+  for (int s = 0; s < oracle_out.k; s++) {
+    uint64_t g[MAXN][MAXN];
+    canon_grid(&oracle_out.a[s], g);
+    int perm[MAXN], k = 0;
+    for (int i = 0; i < n; i++)
+      perm[i] = i;
+    do {
+      uint64_t t[MAXN];
+      for (int i = 0; i < n; i++)
+        t[i] = g[i][perm[i]];
+      if (in_dset(t)) {
+        if (k == captp) {
+          captp = captp ? 2 * captp : 64;
+          tp = realloc(tp, captp * sizeof(*tp));
+        }
+        memcpy(tp[k++], perm, sizeof(perm));
+      }
+    } while (next_perm_i(perm, n));
+    for (int a = 0; a < k; a++) {
+      dpair_t dp;
+      memset(&dp, 0, sizeof(dp));
+      dp.sq = oracle_out.a[s];
+      for (int i = 0; i < n; i++)
+        dp.d[i] = g[i][tp[a][i]];
+      qsort(dp.d, n, 8, cmp_u64);
+      dp.set_count = k;
+      for (int b = 0; b < k && !dp.partner; b++)
+        dp.partner = b != a && diag_pair(tp[a], tp[b]);
+      dp_push(&d_brute, &dp);
+    }
+  }
+  canon_len = 2 * n * n;
+  if (d_brute.k)
+    qsort(d_brute.a, d_brute.k, sizeof(dpair_t), cmp_dpair);
+}
+static int d_cb(const dsquare_t *ds, void *ctx) {
+  (void)ctx;
+  const square_t *sq = ds->sq;
+  uint64_t rows[MAXN][MAXN], cols[MAXN][MAXN];
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < n; j++) {
+      rows[i][j] = sq->rows[i][j];
+      cols[i][j] = sq->cols[i][j];
+    }
+  bool ok = sq->n == n && in_dset(ds->d);
+  for (int i = 0; i < n && ok; i++) {
+    ok = is_input(rows[i]) && is_input(cols[i]) &&
+         meet(rows[i], ds->d) == 1 && meet(cols[i], ds->d) == 1;
+    for (int j = 0; j < n && ok; j++) {
+      ok = meet(rows[i], cols[j]) == 1;
+      if (ok && j != i)
+        ok = meet(rows[i], rows[j]) == 0 && meet(cols[i], cols[j]) == 0;
+    }
+  }
+  if (!ok)
+    d_invalid++;
+  dpair_t dp;
+  memset(&dp, 0, sizeof(dp));
+  canonicalize(rows, cols, &dp.sq);
+  memcpy(dp.d, ds->d, n * 8);
+  qsort(dp.d, n, 8, cmp_u64);
+  dp.partner = ds->partner;
+  dp.set_count = ds->set_count;
+  dp_push(&d_found, &dp);
+  return 0;
+}
+static bool same_dpairs(void) {
+  canon_len = 2 * n * n;
+  if (d_found.k)
+    qsort(d_found.a, d_found.k, sizeof(dpair_t), cmp_dpair);
+  if (d_found.k != d_brute.k)
+    return false;
+  for (int i = 0; i < d_found.k; i++)
+    if (cmp_dpair(&d_found.a[i], &d_brute.a[i]))
+      return false;
+  return true;
+}
+static uint64_t d_pairs_total, d_partner_total, d_planted;
+/* returns the number of failures */
+static int dfirst_check(uint64_t seed, const vec_list_t *l,
+                        const search_opts_t *o, const char *vname,
+                        int top_root) {
+  /* the diagonal set */
+  ndset = 0;
+  const int nr = rint_(0, 2 * n);
+  for (int t = 0; t < nr; t++) {
+    int ids[MAXN];
+    uint64_t v[MAXN];
+    random_subset(ids, n, 0, U);
+    for (int i = 0; i < n; i++)
+      v[i] = uval[ids[i]];
+    if (rnd() % 4 == 0)
+      v[rint_(0, n - 1)] = rnd() | (1ull << 63); /* not in the family */
+    dset_add(v);
+  }
+  if (rnd() % 3 == 0)
+    for (int v = 0; v < nv; v++) {
+      uint64_t t[MAXN];
+      for (int i = 0; i < n; i++)
+        t[i] = uval[vec[v][i]];
+      dset_add(t);
+    }
+  int planted = -1;
+  uint64_t pt[2][MAXN];
+  for (int s = 0; s < oracle_out.k; s++) {
+    uint64_t g[MAXN][MAXN];
+    canon_grid(&oracle_out.a[s], g);
+    const int k = rint_(0, 2);
+    for (int t = 0; t < k; t++) {
+      int perm[MAXN];
+      for (int i = 0; i < n; i++)
+        perm[i] = i;
+      shuffle_int(perm, n);
+      uint64_t v[MAXN];
+      for (int i = 0; i < n; i++)
+        v[i] = g[i][perm[i]];
+      dset_add(v);
+    }
+  }
+  if (oracle_out.k) {
+    /* a planted diagonal pair: sigma and sigma o tau, tau an involution
+     * with n mod 2 fixed points */
+    planted = rint_(0, oracle_out.k - 1);
+    uint64_t g[MAXN][MAXN];
+    canon_grid(&oracle_out.a[planted], g);
+    int sigma[MAXN], ord[MAXN], tau[MAXN];
+    for (int i = 0; i < n; i++)
+      sigma[i] = ord[i] = i;
+    shuffle_int(sigma, n);
+    shuffle_int(ord, n);
+    for (int i = 0; i + 1 < n; i += 2) {
+      tau[ord[i]] = ord[i + 1];
+      tau[ord[i + 1]] = ord[i];
+    }
+    if (n % 2)
+      tau[ord[n - 1]] = ord[n - 1];
+    for (int i = 0; i < n; i++) {
+      pt[0][i] = g[i][sigma[i]];
+      pt[1][i] = g[i][sigma[tau[i]]];
+    }
+    dset_add(pt[0]);
+    dset_add(pt[1]);
+  }
+  qsort(dset, ndset, n * 8, cmp_tuple);
+  int k = 0;
+  for (int i = 0; i < ndset; i++)
+    if (!k || cmp_tuple(dset + (size_t)(k - 1) * n, dset + (size_t)i * n))
+      memmove(dset + (size_t)k++ * n, dset + (size_t)i * n, n * 8);
+  ndset = k;
+  /* the list given to dfirst: shuffled, each descending */
+  vec_list_t dl;
+  vec_list_init(&dl, n);
+  int *ord = malloc((ndset + 1) * sizeof(int));
+  for (int i = 0; i < ndset; i++)
+    ord[i] = i;
+  shuffle_int(ord, ndset);
+  for (int i = 0; i < ndset; i++) {
+    uint64_t t[MAXN];
+    for (int j = 0; j < n; j++)
+      t[j] = dset[(size_t)ord[i] * n + n - 1 - j];
+    vec_list_push(&dl, t);
+  }
+  free(ord);
+  brute_pairs();
+  int fails = 0;
+  dfirst_t *df = dfirst_new(l, 0, l->count, &dl, 0, dl.count);
+  dfirst_set_top_root(df, top_root);
+  d_found.k = 0;
+  d_invalid = 0;
+  dfirst_stats_t st = dfirst_search(df, 0, dl.count, 1, 0, o, d_cb, NULL, NULL);
+  bool same = same_dpairs() && !d_invalid && !st.truncated &&
+              st.pairs == (uint64_t)d_brute.k;
+  /* the planted square, twice, flagged */
+  int seen = 0;
+  if (planted >= 0)
+    for (int i = 0; i < d_found.k; i++)
+      if (!cmp_canon(&d_found.a[i].sq, &oracle_out.a[planted])) {
+        for (int t = 0; t < 2; t++) {
+          uint64_t x[MAXN];
+          memcpy(x, pt[t], n * 8);
+          qsort(x, n, 8, cmp_u64);
+          if (!memcmp(x, d_found.a[i].d, n * 8) && d_found.a[i].partner)
+            seen |= 1 << t;
+        }
+      }
+  const bool planted_ok = planted < 0 || seen == 3;
+  /* d-stride 3, offsets 0, 1, 2 */
+  bool split_ok = true;
+  if (seed % 4 == 0) {
+    d_found.k = 0;
+    for (int off = 0; off < 3; off++)
+      dfirst_search(df, 0, dl.count, 3, off, o, d_cb, NULL, NULL);
+    split_ok = same_dpairs() && !d_invalid;
+  }
+  dfirst_free(df);
+  vec_list_free(&dl);
+  if (!same || !planted_ok || !split_ok) {
+    fails++;
+    printf("DFIRST MISMATCH seed %lu n %d nv %d diags %d variant %s top_root "
+           "%d: found %d brute %d invalid %d planted %s split %s\n",
+           (unsigned long)seed, n, nv, ndset, vname, top_root, d_found.k,
+           d_brute.k,
+           d_invalid, planted_ok ? "ok" : "MISSING", split_ok ? "ok" : "BAD");
+    char path[256];
+    snprintf(path, sizeof(path), "fail_%lu.txt", (unsigned long)seed);
+    dump(path, seed);
+  }
+  d_pairs_total += d_brute.k;
+  for (int i = 0; i < d_brute.k; i++)
+    d_partner_total += d_brute.a[i].partner;
+  d_planted += planted >= 0;
+  if (verbose)
+    printf("seed %lu n %d nv %d diags %d variant %s: %d pairs (%lu nodes)\n",
+           (unsigned long)seed, n, nv, ndset, vname, d_brute.k,
+           (unsigned long)st.nodes);
+  return fails;
+}
+
 int main(int argc, char **argv) {
   int ai = 1;
   setvbuf(stdout, NULL, _IOLBF, 0);
   int cross = 0, force_mode = -1, force_n = 0, diff = 0, noracle = 0, diffonly = 0;
+  int dfirst = 0;
   uint64_t budget = 20000000;
   const char *varsel = NULL;
   while (ai < argc && argv[ai][0] == '-') {
@@ -946,6 +1286,8 @@ int main(int argc, char **argv) {
       noracle = diff = 1;
     else if (!strcmp(argv[ai], "--cross"))
       cross = 1;
+    else if (!strcmp(argv[ai], "--dfirst"))
+      dfirst = 1;
     else if (!strcmp(argv[ai], "--mode"))
       force_mode = atoi(argv[++ai]);
     else if (!strcmp(argv[ai], "--n"))
@@ -1005,6 +1347,30 @@ int main(int argc, char **argv) {
         e[n - 1 - i] = t;
       }
       vec_list_push(&l, e);
+    }
+    if (dfirst) {
+      if (have_oracle != 1) {
+        skipped++;
+        ran--;
+        vec_list_free(&l);
+        continue;
+      }
+      /* the default options, and one other option set in turn */
+      search_opts_t o;
+      search_opts_default(&o);
+      fails += dfirst_check(seed, &l, &o, "default", 1);
+      const variant_t *V = &variants[seed % NVAR];
+      o.forward_check = V->fc;
+      o.mrv = V->mrv;
+      o.support = V->support;
+      o.min_words = V->min_words;
+      o.gather = V->gather;
+      o.cross = V->cross;
+      fails += dfirst_check(seed, &l, &o, V->name, (int)(seed / NVAR % 2));
+      total_sq += oracle_out.k;
+      inst_with_sq += oracle_out.k > 0;
+      vec_list_free(&l);
+      continue;
     }
     /* mode 6 (where the oracle is too slow): every variant must find the
      * planted square, besides agreeing with the others */
@@ -1098,6 +1464,10 @@ int main(int argc, char **argv) {
   }
   if (cross)
     printf("cross-checked %d\n", crossed);
+  if (dfirst)
+    printf("dfirst: (square, d) pairs %lu, flagged %lu, planted pairs %lu\n",
+           (unsigned long)d_pairs_total, (unsigned long)d_partner_total,
+           (unsigned long)d_planted);
   printf("diff-only %d\n", diffonly);
   printf("ran %d skipped %d fails %d squares %lu inst_with_squares %lu "
          "W2 %d W3 %d W4 %d W8 %d W16+ %d\n",

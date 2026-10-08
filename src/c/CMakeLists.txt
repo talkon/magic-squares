@@ -1,5 +1,5 @@
 # New pipeline: portable C, no AVX-512 required.
-add_library(magic_core OBJECT enumerate.c arrange.c square.c)
+add_library(magic_core OBJECT enumerate.c arrange.c square.c dfirst.c)
 add_executable(enumerate enumerate_main.c $<TARGET_OBJECTS:magic_core>)
 add_executable(msearch msearch.c $<TARGET_OBJECTS:magic_core>)
 add_executable(bench bench.c $<TARGET_OBJECTS:magic_core>)
@@ -98,7 +98,7 @@ add_test(NAME fast_msearch_327 COMMAND sh -c
 # differential test against a brute-force oracle on random synthetic
 # families (n = 3..8, all label widths, every option set), in the native
 # build and without AVX-512
-add_executable(fuzz_arrange fuzz_arrange.c enumerate.c arrange.c square.c)
+add_executable(fuzz_arrange fuzz_arrange.c enumerate.c arrange.c square.c dfirst.c)
 target_link_libraries(fuzz_arrange m)
 add_test(NAME fast_fuzz_arrange COMMAND fuzz_arrange 1 150
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
@@ -106,19 +106,31 @@ add_test(NAME fast_fuzz_arrange COMMAND fuzz_arrange 1 150
 add_test(NAME fast_fuzz_arrange_wide COMMAND fuzz_arrange --mode 7 1 150
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 if (HAVE_FLAG_portable)
-  add_executable(fuzz_arrange_portable fuzz_arrange.c enumerate.c arrange.c square.c)
+  add_executable(fuzz_arrange_portable fuzz_arrange.c enumerate.c arrange.c square.c dfirst.c)
   target_compile_options(fuzz_arrange_portable PRIVATE -mno-avx512f)
   target_link_libraries(fuzz_arrange_portable m)
   add_test(NAME fast_fuzz_arrange_portable COMMAND fuzz_arrange_portable 1000 60
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endif()
-add_executable(fuzz_arrange_matrices fuzz_arrange.c enumerate.c arrange.c square.c)
+add_executable(fuzz_arrange_matrices fuzz_arrange.c enumerate.c arrange.c square.c dfirst.c)
 target_compile_definitions(fuzz_arrange_matrices PRIVATE CARRY_MAX_W=0)
 target_link_libraries(fuzz_arrange_matrices m)
 add_test(NAME fast_fuzz_arrange_matrices COMMAND fuzz_arrange_matrices 2000 60
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME fast_fuzz_arrange_matrices_wide COMMAND fuzz_arrange_matrices --mode 7 2000 40
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+# the diagonal-first search (dfirst.c) against brute force: every (square,
+# traversal in a random diagonal set) pair, the partner flag, a planted
+# diagonal + anti-diagonal pair, d-stride splits; with the carried lists
+# and with the matrices
+add_test(NAME fast_fuzz_dfirst COMMAND fuzz_arrange --dfirst 1 150
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME fast_fuzz_dfirst_matrices COMMAND fuzz_arrange_matrices --dfirst 5000 60
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+# msearch --diag-first finds the one (square, SP traversal) pair of
+# P = 2^16 3^5 5^4 7^2, S = 849 (as bin/dsearch does)
+add_test(NAME fast_msearch_dfirst_849 COMMAND sh -c
+  "$<TARGET_FILE:msearch> --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2 | grep -c '\"type\":\"dsquare\"' | grep -qx 1")
 # saturated byte counters at the node below r1 (every unmatched cell in
 # >= 255 candidates, so the cell is chosen among the saturated counts; the
 # oracle is too slow there, so the variants are compared with each other,

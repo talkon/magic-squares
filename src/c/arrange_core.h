@@ -1547,15 +1547,17 @@ static void SEARCH_REC(sstate_t *s, int d) {
  * nodes; +2% with labels by plain frequency, where MRV picks x ~75% of the
  * time).
  *
- * This runs the r1 in [i0, i1) (those sampled, with R1_SAMPLE): their lists
- * at depth 0 are the vectors from i0 on, which on the carried path have
- * all their labels in the first W words of their bitsets (bits has s->bw
- * >= W words per vector, see search_root in arrange.c); the matrix path
- * always runs [0, N) at W = s->bw. */
+ * This runs the roots r1 in [i0, i1), a run of search_root in arrange.c
+ * (with r1 sampling, only the sampled ones, by their global index: see
+ * r1_next): their lists at depth 0 are the vectors from i0 on, which on
+ * the carried path have all their labels in the first W words of their
+ * bitsets (bits has s->bw >= W words per vector); the matrix path always
+ * runs [0, root_limit) at W = s->bw. */
 static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
   const uint32_t count = s->N;
   const uint64_t bw = (uint64_t)s->bw;
-  const uint32_t first = R1_NEXT(s, i0);
+  int h = 0; /* the stratum of the sampled r1 */
+  const uint32_t first = s->r1_ns ? r1_next(s, i0, &h) : i0;
   if (first >= i1)
     return;
   for (int a = 0; a < 2; a++) {
@@ -1575,15 +1577,18 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
 #if defined(CHILD_PROF) && defined(CARRY)
   const uint64_t cp_t0 = __rdtsc();
 #endif
-  for (uint32_t r1 = first; r1 < i1 && !s->stop; r1 = R1_NEXT(s, r1 + 1)) {
-#ifdef R1_SAMPLE
-    const uint64_t nd0 = s->nodes, sq0 = s->squares;
-    const double c0 = r1_cpu();
-#endif
-    TRY_CHILD(s, 0, ROW, s->bits + r1 * bw, r1, r1 + 1);
-#ifdef R1_SAMPLE
-    r1_log(s, r1, W, nd0, sq0, c0);
-#endif
+  if (!s->r1_ns) {
+    for (uint32_t r1 = i0; r1 < i1 && !s->stop; r1++)
+      TRY_CHILD(s, 0, ROW, s->bits + r1 * bw, r1, r1 + 1);
+  } else {
+    /* r1 sampling (measurements only, see search_opts_t) */
+    for (uint32_t r1 = first; r1 < i1 && !s->stop; r1 = r1_next(s, r1 + 1, &h)) {
+      const uint64_t sq0 = s->squares, nd0 = s->nodes;
+      const double c0 = thread_cpu();
+      TRY_CHILD(s, 0, ROW, s->bits + r1 * bw, r1, r1 + 1);
+      r1_account(s, h, r1, s->squares - sq0, s->nodes - nd0,
+                 thread_cpu() - c0, W);
+    }
   }
 #if defined(CHILD_PROF) && defined(CARRY)
   cp_total += __rdtsc() - cp_t0;

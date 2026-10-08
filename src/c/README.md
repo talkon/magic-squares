@@ -34,6 +34,50 @@ but the search itself (enumeration, reduction, relabelling, output) takes
 ~0.3% of a unit near S_min (N up to ~1700), and ~3% of a short unit whose
 sums all have N < 1000 (see research/ideas.md, "msearch overhead").
 
+### Diagonal-first search (`--diag-first`)
+
+```
+bin/msearch --diag-first --sums 2200 13 7 4 3 1 1          # d-first where N >= 3000
+bin/msearch --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2
+bin/msearch --diag-first --d-stride 250 --d-log d.log --sums 2400 13 7 4 3 1 1
+bin/msearch --diag-first --d-range 0:4096 --sums 2400 13 7 4 3 1 1   # one unit of a sum
+bin/msearch --diag-first --calib-r1-stride 40 --sums 2200 13 7 4 3 1 1
+```
+
+A magic square has two SP traversals (vectors of its (P, S) meeting every
+row and col once) that fit on the two diagonals together. For every vector
+d of the sum (the unreduced list), the semi-magic search on
+V_d = {v : |v & d| = 1} finds the squares with d as a traversal, so the loop
+over d finds every (square, SP traversal) pair once, and every magic square
+twice (src/c/dfirst.c; research/ideas.md, "Diagonal-first search in
+msearch"). V_d comes from a number -> vector posting index (O(sum of the
+posting lengths) per d). Every square of V_d contains all of d, so d's
+numbers get the top labels and only the first rows through the rarest of
+them are roots (`--d-plain-root`: all of V_d, as `bin/dsearch`). Per sum
+it costs the same as the plain search at N ~ 3000 (x = ln(S/S_min) <= 0.4;
+the default `--diag-first-min-n`), 0.86x at N = 4.1k, 0.55-0.61x at
+5.9-7.6k and 0.27-0.37x at 11-23k (ideas.md has the measurements), but it
+does not enumerate the semi-magic squares: d-first sums write "dsquare" records (one per pair,
+with `set_count` = `sp_count`, `magic`, `partner`; dedupe magic squares by
+`hash`), "dchunk" checkpoint records every `--d-chunk` (256) indices of d
+and a "dsum" record (`pairs`, `est_pairs`, `est_time` with `--d-stride`),
+not "square" / "sum" records (the scheduler ignores them).
+`--calib-r1-stride k` adds a plain search of every k-th first row (a
+"csum" record with `est_squares`, `se_squares`, the traversal totals, and
+"csquare" records) for the models of semi-magic squares per sum.
+
+### r1 sampling (measurements)
+
+`--r1-stride k [--r1-offset o]`, or `--r1-strata k1,k2,k3,k4` (equal index
+ranges of the root list, sampled with their own strides from random
+offsets; the early first rows, whose universes are the largest, hold most of
+the time), and `--r1-log FILE` (one line per first row: r1, stratum,
+stride, squares, nodes, CPU seconds); also the environment variables
+`SAMPLE_STRIDE`, `SAMPLE_OFFSET`, `SAMPLE_LOG` of msearch and bench. The
+searched first rows are independent subproblems (r1 is a square's
+lowest-index vector), so the "csum" record's `est_*` (stride x the sampled
+totals) are unbiased for the whole sum, with stratified standard errors.
+
 ## bench: arrangement benchmark
 
 ```

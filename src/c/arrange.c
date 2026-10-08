@@ -32,10 +32,12 @@
 #include "arrange.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 #ifdef __AVX512F__
 #include <immintrin.h>
 #endif
@@ -56,6 +58,17 @@ void search_opts_default(search_opts_t *o) {
   o->cross = 1;
   o->r1_width = 1;
   o->pretest_min = 5;
+  o->r1_stride = 0;
+  o->r1_offset = 0;
+  o->r1_nstrata = 0;
+  for (int h = 0; h < 8; h++)
+    o->r1_sstride[h] = o->r1_soffset[h] = 0;
+  o->r1_log = NULL;
+  o->top_numbers = NULL;
+  o->n_top = 0;
+  o->top_root_only = 0;
+  o->r1_list = NULL;
+  o->r1_nlist = 0;
 }
 
 /*
@@ -220,12 +233,23 @@ typedef struct {
   int pretest_min;
   uint8_t *ptmask[2];
   int stop;
-#ifdef R1_SAMPLE
-  /* r1 sampling (see r1_next) and the per-r1 log */
-  uint32_t smp_stride, smp_off, smp_nlist;
-  uint32_t *smp_list; /* ascending, or NULL */
-  FILE *smp_log;
-#endif
+  /* the root loop takes r1 < root_limit (top_root_only, see
+   * search_opts_t) */
+  uint32_t root_limit;
+  /* r1 sampling (see search_opts_t and r1_next): ns strata (0: every r1,
+   * the default loop), stratum h = root list [lo, hi) taken from lo + off
+   * in steps of stride, or the r1 of r1_list (ascending, one stratum of
+   * stride 1), and per stratum the sampled count and the sums (and sums of
+   * squares) of the per-r1 CPU seconds, squares and nodes. The r1 are
+   * global indices into the root list, whatever width each is searched at
+   * (see search_root). */
+  int r1_ns;
+  struct {
+    uint32_t lo, hi, stride, off;
+    uint64_t n;
+    double t, t2, q, q2, nodes;
+  } r1s[8];
+  uint32_t *r1_list, r1_nlist;
 } sstate_t;
 
 static inline bool bit_get(const uint64_t *row, uint32_t u) {
@@ -573,52 +597,63 @@ static void __attribute__((destructor)) cp_print(void) {
 #endif
 
 /*
- * r1 sampling (build with -DR1_SAMPLE), for timing sums too large to search
- * whole: the root loop runs only r1 = off, off + k, off + 2k, ... (env
- * SAMPLE_STRIDE = k, SAMPLE_OFFSET = off), or only the r1 listed in
- * SAMPLE_LIST (comma-separated), by their index among all the vectors,
- * whatever width each r1 is searched at; k times the sampled totals is
- * unbiased for the sum. SAMPLE_LOG appends one line per r1: r1, its
- * largest label, the width, squares, nodes, thread CPU seconds.
+ * r1 sampling (search_opts_t r1_*), for timing sums too large to search
+ * whole: the root loop runs only the sampled r1, by their global index in
+ * the root list [0, root_limit), whatever width each is searched at (see
+ * search_root): stratum h is [lo, hi) from lo + off in steps of stride
+ * (one stratum [0, root_limit) with r1_stride / r1_offset), or the r1 of
+ * r1_list. stride times the sampled totals of a stratum is unbiased for it.
+ * The r1 log gets one line per sampled r1: r1, stratum, stride, squares,
+ * nodes, thread CPU seconds, its largest label, the width it was searched
+ * at; and a "# run" line per width run.
  */
-#ifdef R1_SAMPLE
-#include <time.h>
-static double r1_cpu(void) {
+static double thread_cpu(void) {
   struct timespec t;
   clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
   return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
 }
-/* the first sampled r1 >= r (UINT32_MAX if none) */
-static uint32_t r1_next(const sstate_t *s, uint32_t r) {
-  if (s->smp_list) {
-    uint32_t lo = 0, hi = s->smp_nlist;
+
+/* the first sampled r1 >= r (UINT32_MAX if none), and its stratum *hp */
+static uint32_t r1_next(const sstate_t *s, uint32_t r, int *hp) {
+  *hp = 0;
+  if (s->r1_list) {
+    uint32_t lo = 0, hi = s->r1_nlist;
     while (lo < hi) {
       const uint32_t mid = (lo + hi) / 2;
-      if (s->smp_list[mid] < r)
+      if (s->r1_list[mid] < r)
         lo = mid + 1;
       else
         hi = mid;
     }
-    return lo < s->smp_nlist ? s->smp_list[lo] : UINT32_MAX;
+    return lo < s->r1_nlist ? s->r1_list[lo] : UINT32_MAX;
   }
-  if (r <= s->smp_off)
-    return s->smp_off;
-  return s->smp_off + (r - s->smp_off + s->smp_stride - 1) / s->smp_stride *
-                          s->smp_stride;
+  for (int h = 0; h < s->r1_ns; h++) {
+    const uint64_t first = (uint64_t)s->r1s[h].lo + s->r1s[h].off,
+                   k = s->r1s[h].stride, hi = s->r1s[h].hi;
+    if (r >= hi)
+      continue;
+    const uint64_t x = r <= first ? first : first + (r - first + k - 1) / k * k;
+    if (x < hi) {
+      *hp = h;
+      return (uint32_t)x;
+    }
+  }
+  return UINT32_MAX;
 }
-static void r1_log(const sstate_t *s, uint32_t r1, int w, uint64_t nd0,
-                   uint64_t sq0, double c0) {
-  const double c1 = r1_cpu();
-  if (s->smp_log)
-    fprintf(s->smp_log, "%u %u %d %llu %llu %.6f\n", r1,
-            (unsigned)s->lab[r1][0], w,
-            (unsigned long long)(s->squares - sq0),
-            (unsigned long long)(s->nodes - nd0), c1 - c0);
+
+static void r1_account(sstate_t *s, int h, uint32_t r1, uint64_t squares,
+                       uint64_t nodes, double sec, int w) {
+  s->r1s[h].n++;
+  s->r1s[h].t += sec;
+  s->r1s[h].t2 += sec * sec;
+  s->r1s[h].q += (double)squares;
+  s->r1s[h].q2 += (double)squares * (double)squares;
+  s->r1s[h].nodes += (double)nodes;
+  if (s->opts.r1_log)
+    fprintf(s->opts.r1_log, "%u %d %u %lu %lu %.6f %u %d\n", r1, h,
+            s->r1s[h].stride, (unsigned long)squares, (unsigned long)nodes,
+            sec, (unsigned)s->lab[r1][0], w);
 }
-#define R1_NEXT(s, r) r1_next(s, r)
-#else
-#define R1_NEXT(s, r) (r)
-#endif
 
 /* instantiate the recursive search for each bitset width (the carried path
  * also for 5-7 words) */
@@ -713,22 +748,28 @@ static inline int r1_words(const sstate_t *s, uint32_t v) {
  * bitsets. The adaptive cross support's state (cross_after, xs_*) carries
  * over from one run to the next, so the search makes the same choices,
  * and visits the same nodes, as at a single width.
+ *
+ * The roots are the r1 < root_limit (top_root_only: those through the top
+ * label, a prefix of the sorted list), partitioned into the width runs;
+ * with r1 sampling, each run searches only the sampled r1 in it (r1_next,
+ * by global index), so every sampled r1 is searched exactly once, at the
+ * width of its run.
  */
 static void search_root(sstate_t *s, int W_, int carry) {
   s->nodes = 1;
-  const uint32_t N = s->N;
+  /* the roots: every r1, or with top_root_only those through the top
+   * label (a prefix of the list) */
+  const uint32_t lim = s->root_limit < s->N ? s->root_limit : s->N;
   if (!carry || !s->opts.r1_width) {
-    search_root_w(s, W_, 0, N);
+    search_root_w(s, W_, 0, lim);
     return;
   }
-  for (uint32_t i0 = 0, i1; i0 < N && !s->stop; i0 = i1) {
+  for (uint32_t i0 = 0, i1; i0 < lim && !s->stop; i0 = i1) {
     const int w = r1_words(s, i0);
-    for (i1 = i0 + 1; i1 < N && r1_words(s, i1) == w; i1++)
+    for (i1 = i0 + 1; i1 < lim && r1_words(s, i1) == w; i1++)
       ;
-#ifdef R1_SAMPLE
-    if (s->smp_log)
-      fprintf(s->smp_log, "# run W %d r1 %u .. %u\n", w, i0, i1);
-#endif
+    if (s->r1_ns && s->opts.r1_log)
+      fprintf(s->opts.r1_log, "# run W %d r1 %u .. %u\n", w, i0, i1);
     search_root_w(s, w, i0, i1);
   }
 }
@@ -766,7 +807,7 @@ static void search_root(sstate_t *s, int W_, int carry) {
  * rank in vals of number p of vector v; sets lab_of[rank]. O(L^2 + n count).
  */
 static void assign_labels(int n, size_t count, size_t L, const uint32_t *rk,
-                          uint32_t *lab_of) {
+                          uint32_t *lab_of, const uint32_t *top, int ntop) {
   /* the vectors through each number (CSR) */
   uint32_t *first = calloc(L + 1, sizeof(uint32_t));
   for (size_t i = 0; i < count * n; i++)
@@ -784,7 +825,14 @@ static void assign_labels(int n, size_t count, size_t L, const uint32_t *rk,
   for (size_t x = 0; x < L; x++)
     freq[x] = live[x] = first[x + 1] - first[x];
   uint8_t *removed = calloc(count, 1), *done = calloc(L, 1);
-  for (size_t lab = L; lab-- > 0;) {
+  /* the given top numbers (ranks) first, without removing their vectors */
+  size_t lab = L;
+  for (int t = 0; t < ntop; t++)
+    if (!done[top[t]]) {
+      done[top[t]] = 1;
+      lab_of[top[t]] = (uint32_t)--lab;
+    }
+  while (lab-- > 0) {
     size_t b = L; /* the rarest number left; ranks ascend with the numbers */
     for (size_t x = 0; x < L; x++)
       if (!done[x] && (b == L || live[x] < live[b] ||
@@ -849,7 +897,9 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   s.pretest_min = opts->pretest_min > 0 && opts->forward_check
                       ? opts->pretest_min
                       : INT_MAX;
-
+  /* every r1, or with top_root_only those through the top label (set after
+   * the sort below) */
+  s.root_limit = (uint32_t)count;
   /* distinct values (dense ids, see dense_ids: hashing rather than sorting
    * all count * n elements, which was half of the setup), and the rank of
    * every element among them in ascending order (sorting only the L
@@ -879,7 +929,15 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   for (size_t i = 0; i < ne; i++)
     rk[i] = rank_of_id[ids[i]];
   uint32_t *lab_of = malloc(L * sizeof(uint32_t)); /* by rank */
-  assign_labels(n, count, L, rk, lab_of);
+  /* numbers forced onto the top labels (top_numbers: the ranks of those
+   * that occur, in the given order) */
+  uint32_t top_rank[SQ_MAX_N * 8];
+  int ntop = 0;
+  for (int t = 0; t < opts->n_top && ntop < SQ_MAX_N * 8; t++)
+    for (size_t i = 0; i < L; i++)
+      if (vi[i].val == opts->top_numbers[t])
+        top_rank[ntop++] = (uint32_t)i;
+  assign_labels(n, count, L, rk, lab_of, top_rank, ntop);
   s.L = (uint32_t)L;
   s.label_val = malloc((L + 1) * sizeof(uint64_t));
   for (size_t i = 0; i < L; i++)
@@ -947,6 +1005,47 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   } else {
     lab_cmp_n = n;
     qsort(s.lab, count, sizeof(*s.lab), lab_cmp);
+  }
+
+  if (opts->top_root_only && ntop > 0 && count > 0 && s.lab[0][0] == L - 1) {
+    /* the vectors through the top label come first */
+    uint32_t k = 0;
+    while (k < count && s.lab[k][0] == L - 1)
+      k++;
+    s.root_limit = k;
+  }
+  /* r1 sampling plan, over the roots [0, root_limit) */
+  if (opts->r1_nlist > 0 && opts->r1_list) {
+    /* the listed r1 (a sorted copy, without repeats), as one stratum of
+     * stride 1 */
+    s.r1_ns = 1;
+    s.r1s[0].lo = 0;
+    s.r1s[0].hi = s.root_limit;
+    s.r1s[0].stride = 1;
+    s.r1_list = malloc(opts->r1_nlist * sizeof(uint32_t));
+    for (uint32_t i = 0; i < opts->r1_nlist; i++) {
+      uint32_t j = i;
+      for (; j > 0 && s.r1_list[j - 1] > opts->r1_list[i]; j--)
+        s.r1_list[j] = s.r1_list[j - 1];
+      s.r1_list[j] = opts->r1_list[i];
+    }
+    for (uint32_t i = 0; i < opts->r1_nlist; i++)
+      if (!s.r1_nlist || s.r1_list[i] != s.r1_list[s.r1_nlist - 1])
+        s.r1_list[s.r1_nlist++] = s.r1_list[i];
+  } else if (opts->r1_nstrata > 0 || opts->r1_stride > 1 || opts->r1_log) {
+    const int K = opts->r1_nstrata > 0
+                      ? (opts->r1_nstrata < 8 ? opts->r1_nstrata : 8)
+                      : 1;
+    const uint64_t nr = s.root_limit;
+    s.r1_ns = K;
+    for (int h = 0; h < K; h++) {
+      s.r1s[h].lo = (uint32_t)(nr * h / K);
+      s.r1s[h].hi = (uint32_t)(nr * (h + 1) / K);
+      uint32_t k = opts->r1_nstrata > 0 ? opts->r1_sstride[h] : opts->r1_stride;
+      uint32_t o = opts->r1_nstrata > 0 ? opts->r1_soffset[h] : opts->r1_offset;
+      s.r1s[h].stride = k < 1 ? 1 : k;
+      s.r1s[h].off = o % s.r1s[h].stride;
+    }
   }
 
   /* bitset width: on the carried path the words needed, otherwise the next
@@ -1048,38 +1147,11 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     else
       s.kids[d] = malloc((count + 64) * sizeof(uint32_t));
   }
-#ifdef R1_SAMPLE
-  {
-    const char *es = getenv("SAMPLE_STRIDE"), *eo = getenv("SAMPLE_OFFSET");
-    const char *el = getenv("SAMPLE_LIST"), *lf = getenv("SAMPLE_LOG");
-    s.smp_stride = es ? (uint32_t)strtoul(es, NULL, 10) : 1;
-    if (s.smp_stride < 1)
-      s.smp_stride = 1;
-    s.smp_off = eo ? (uint32_t)strtoul(eo, NULL, 10) % s.smp_stride : 0;
-    if (el && *el) {
-      s.smp_list = malloc((strlen(el) / 2 + 2) * sizeof(uint32_t));
-      for (const char *p = el; *p;) {
-        char *e;
-        const unsigned long r = strtoul(p, &e, 10);
-        if (e == p)
-          break;
-        s.smp_list[s.smp_nlist++] = (uint32_t)r;
-        p = *e == ',' ? e + 1 : e;
-      }
-      for (uint32_t i = 1; i < s.smp_nlist; i++) /* insertion sort */
-        for (uint32_t j = i; j > 0 && s.smp_list[j - 1] > s.smp_list[j]; j--) {
-          const uint32_t t = s.smp_list[j];
-          s.smp_list[j] = s.smp_list[j - 1];
-          s.smp_list[j - 1] = t;
-        }
-    }
-    s.smp_log = lf ? fopen(lf, "a") : NULL;
-    if (s.smp_log)
-      fprintf(s.smp_log, "# N %u L %u W %d carry %d r1_width %d stride %u off %u list %u\n",
-              s.N, s.L, W_, carry, s.opts.r1_width, s.smp_stride, s.smp_off,
-              s.smp_nlist);
-  }
-#endif
+  if (s.r1_ns && s.opts.r1_log)
+    fprintf(s.opts.r1_log,
+            "# N %u L %u W %d carry %d r1_width %d roots %u strata %d list %u\n",
+            s.N, s.L, W_, carry, s.opts.r1_width, s.root_limit, s.r1_ns,
+            s.r1_nlist);
   if (carry)
     for (int a = 0; a < 2; a++)
       s.ptmask[a] = malloc(s.cap / 8 + 1);
@@ -1087,16 +1159,33 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
 
   search_root(&s, W_, carry);
 
-#ifdef R1_SAMPLE
-  if (s.smp_log)
-    fclose(s.smp_log);
-  free(s.smp_list);
-#endif
+  free(s.r1_list);
   st.nodes = s.nodes;
   st.squares = s.squares;
   st.truncated = s.stop == 2;
   st.num_labels = (int)L;
   st.setup_seconds = t1 - t0;
+  if (s.r1_ns) {
+    double vt = 0, vq = 0;
+    for (int h = 0; h < s.r1_ns; h++) {
+      const double k = s.r1s[h].stride, m = (double)s.r1s[h].n;
+      const double Nh = (double)(s.r1s[h].hi - s.r1s[h].lo);
+      st.r1_sampled += s.r1s[h].n;
+      st.est_seconds += k * s.r1s[h].t;
+      st.est_squares += k * s.r1s[h].q;
+      st.est_nodes += k * s.r1s[h].nodes;
+      if (m >= 2 && !s.r1_list) {
+        /* N_h^2 (1 - m / N_h) s_h^2 / m (none for a list of r1: the
+         * estimates are then the sampled totals) */
+        const double f = Nh * Nh * (1 - m / Nh) / m / (m - 1);
+        vt += f * (s.r1s[h].t2 - s.r1s[h].t * s.r1s[h].t / m);
+        vq += f * (s.r1s[h].q2 - s.r1s[h].q * s.r1s[h].q / m);
+      }
+    }
+    st.est_nodes += 1; /* the root */
+    st.se_seconds = vt > 0 ? sqrt(vt) : 0;
+    st.se_squares = vq > 0 ? sqrt(vq) : 0;
+  }
   st.seconds = wall_time() - t1;
 
   for (int a = 0; a < 2; a++)
