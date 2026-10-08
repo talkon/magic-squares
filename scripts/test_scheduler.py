@@ -542,11 +542,17 @@ def test_time_model():
     lNp = np.log(rng.uniform(1000, 7000, 50))
     lL = np.log(rng.uniform(80, 200, 50))
     prior = am.TimeModel()
-    y = prior.log_time(lNp, lL, 6) + math.log(0.5) + rng.normal(0, 0.17, 50)
+    # engine 3 starts from the shipped (engine 2) prior with its shift
+    prior3 = am.time_prior(3)
+    dth = np.zeros(am.NT)
+    for f, d in am.ENGINE_TIME_SHIFT.get(3, {}).items():
+        dth[am.TIME_FEATURES.index(f)] = d
+    assert prior3.engine == 3 and np.allclose(prior3.th - prior.th, dth)
+    y = prior3.log_time(lNp, lL, 6) + math.log(0.5) + rng.normal(0, 0.17, 50)
     st = am.TimeModel.stats(am.time_features(lNp, lL, 6), y)
     models = scheduler.fit_time_models({"3:plain": st})
     tm = scheduler.current_time_model(models, engine=3)
-    ratio = np.exp(tm.log_time(lNp, lL, 6) - prior.log_time(lNp, lL, 6)).mean()
+    ratio = np.exp(tm.log_time(lNp, lL, 6) - prior3.log_time(lNp, lL, 6)).mean()
     assert abs(ratio - 0.5) < 0.05, ratio
     assert np.abs(tm.th[1:4] - prior.th[1:4]).max() < 1e-3
     # 3000 cheap sums at N' 300-3k: +0.3 on ln t, and a label slope of -3.5
@@ -565,9 +571,19 @@ def test_time_model():
     # ... while the band it saw is learned
     small = np.exp(tm2.log_time(lN2, lL2, 6) - prior.log_time(lN2, lL2, 6)).mean()
     assert 1.2 < small < 1.45, small
-    # no data for the newest engine: the previous engine's posterior
+    # no data for the newest engine: the previous engine's posterior (with
+    # the newer engines' shifts)
     assert np.allclose(scheduler.current_time_model(models, engine=4).th, tm.th)
-    assert np.allclose(scheduler.current_time_model({}).th, prior.th)
+    m2 = scheduler.fit_time_models({"2:plain": am.TimeModel.stats(F2, y2)})
+    assert np.allclose(scheduler.current_time_model(m2, engine=3).th, tm2.th + dth)
+    assert np.allclose(scheduler.current_time_model(m2, engine=2).th, tm2.th)
+    # engine 3 data after engine 2's: fitted from engine 2's shifted posterior
+    m23 = scheduler.fit_time_models({"2:plain": am.TimeModel.stats(F2, y2), "3:plain": st})
+    tm23 = scheduler.current_time_model(m23)
+    assert tm23.engine == scheduler.ENGINE == 3 and tm23.n == 50
+    assert np.abs(tm23.th[1:4] - tm2.th[1:4]).max() < 1e-3
+    assert np.allclose(scheduler.current_time_model({}).th, prior3.th)
+    assert np.allclose(scheduler.current_time_model({}, engine=2).th, prior.th)
     print("time model ok")
 
 
@@ -707,6 +723,10 @@ def test_dfirst_summary():
             {"type": "dsum", "mode": "dfirst", "n": 6, "P": list(P), "S": 887, "nvecs": 6000,
              "nvecs_raw": 6100, "labels": 160, "nodes": 10 ** 6, "pairs": 0, "time": 5.0,
              "cpu": 5.5, "truncated": 0, "complete": 0, "d_stride": 3, "engine": 2},
+            # 886 searched again: counted once among the sums, its CPU twice
+            {"type": "dsum", "mode": "dfirst", "n": 6, "P": list(P), "S": 886, "nvecs": 6000,
+             "nvecs_raw": 6100, "labels": 160, "nodes": 10 ** 7, "pairs": 0, "time": 40.0,
+             "cpu": 40.0, "truncated": 0, "complete": 1, "engine": 2},
             {"type": "skip", "mode": "dfirst", "n": 6, "P": list(P), "S": 889, "nvecs": 900,
              "nvecs_raw": 950, "d_lo": 200},
             {"type": "csum", "mode": "sampled", "n": 6, "P": list(P), "S": 891, "r1_stride": 4,
@@ -741,7 +761,8 @@ def test_dfirst_summary():
             assert s.totals["cpu"] == ref.totals["cpu"]
             T = s.totals
             assert (T["dfirst_sums"], T["dfirst_partial"], T["dfirst_magic"]) == (1, 1, 1), T
-            assert abs(T["dfirst_cpu"] - 56.5) < 1e-9 and T["sampled"] == 1
+            assert abs(T["dfirst_cpu"] - 96.5) < 1e-9 and T["sampled"] == 1
+            assert T["sampled_cpu"] == 1.0
             assert [q["hash"] for q in s.notable] == ["00000000000000ab"]
             assert s.notable[0]["dfirst"] == 1 and not s.types
         # the holes survive a save and load between the reads
@@ -764,6 +785,24 @@ def test_dfirst_summary():
         scheduler.report_v2(sch, out=buf)
         assert "d-first (not in the fits): 1 sums searched in full, 1 parts" in buf.getvalue()
         assert "(d-first)" in buf.getvalue()
+    # a notable square of a sum searched twice (two units) is notable once;
+    # the units never inherit bench's SAMPLE_* variables
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        for name in "ab":
+            write_unit(os.path.join(units, name + ".jsonl"), P, [(880, 1)],
+                       squares=[(880, 3, 3, 1, 7)], done=(880, 880))
+        s = scheduler.Summary(state, 6)
+        s.update(units, store)
+        assert s.totals["squares"] == 2 and len(s.notable) == 1, s.notable
+    os.environ["SAMPLE_STRIDE"] = "3"
+    try:
+        env = scheduler.msearch_env()
+        assert "SAMPLE_STRIDE" not in env and env.get("PATH") == os.environ.get("PATH")
+    finally:
+        del os.environ["SAMPLE_STRIDE"]
     # end to end with msearch: complete d-first sums covered, a d-sampled
     # one and an r1-sampled plain run not; the time law never sees d-first
     msearch = os.path.join(os.path.dirname(HERE), "bin", "msearch")

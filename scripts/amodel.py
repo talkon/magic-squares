@@ -421,6 +421,16 @@ TIME_FEATURES = ("intercept", "ln N'/4000", "ln L/150", "hinge N'>8k", "labels>1
 NT = len(TIME_FEATURES)
 TIME_PRIOR = {"th": [3.8587, 5.4575, -3.4622, 0.9458, 0.3934, 0.0, 0.0, 0.0, 0.0],
               "sd": 0.30, "engine": 2}
+# the start of a newer msearch engine's law: the previous engine's
+# posterior (the shipped prior for engine 2) plus these shifts of th (see
+# time_prior). Engine 3 (cx/integrated: per-r1 widths, carried bitsets up to
+# 512 labels, the pretest) ran the plain search of the same sums at 0.98-1.01x
+# engine 2's CPU with <= 128 labels and 0.66-0.89x (geometric mean 0.80,
+# 8 sums at 137-252 labels, N 4.1-23k, paired) above, so its labels > 128
+# step starts 0.227 lower (0.39 -> 0.17); above 256 labels it ran at
+# 0.26x, which no feature of the law describes (3 sums at N 21-32k; refit
+# the shape when engine-3 data arrives there; research/ideas.md).
+ENGINE_TIME_SHIFT = {3: {"labels>128": -0.227}}
 # prior precision of th for the online refit. The shape (N, L and hinge
 # slopes) is fixed: refitting it on the thousands of cheap sums at N' < 3k
 # moved predictions at N' >= 3k by 1.4-2x. Learned online: a global
@@ -454,6 +464,18 @@ def log_nodes(lNp, lLraw, k):
     x = np.asarray(lNp, float) - math.log(4000)
     return (NODE_TH[0] + NODE_TH[1] * x + NODE_TH[2] * np.log(lab / 150)
             + NODE_TH[3] * np.maximum(0.0, np.asarray(lNp, float) - math.log(8000)))
+
+
+def time_prior(engine, base=None):
+    """the prior of engine's time law: base (a TimeModel of an older engine,
+    default the shipped prior) with the ENGINE_TIME_SHIFT of the engines
+    after it, up to engine"""
+    base = base or TimeModel()
+    th = base.th.copy()
+    for e in range(int(base.engine) + 1, int(engine) + 1):
+        for f, d in ENGINE_TIME_SHIFT.get(e, {}).items():
+            th[TIME_FEATURES.index(f)] += d
+    return TimeModel(th, base.sd, engine, 0)
 
 
 class TimeModel:

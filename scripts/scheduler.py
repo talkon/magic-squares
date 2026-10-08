@@ -510,12 +510,23 @@ def fit_lsq(X, y, ridge=1e-6):
 UNIT_DROP = 0.5
 
 # version of msearch's search (its "engine" field; records without it are
-# version 1): the time model uses only timings of the newest version
-ENGINE = 2
+# version 1): the time model uses only timings of the newest version (v2:
+# each engine's law starts from the previous engine's posterior, see
+# fit_time_models). 3 = cx/integrated (per-r1 widths, carried bitsets up to
+# 512 labels, the pretest)
+ENGINE = 3
 
 
 def engine_of(r):
     return r.get("engine", 1)
+
+
+def msearch_env():
+    """the environment of the msearch units: ours without bench's SAMPLE_*
+    measurement variables (msearch ignores them since cx/integrated, but an
+    older binary would turn every unit into an r1-sampled run that never
+    covers its sums)"""
+    return {k: v for k, v in os.environ.items() if not k.startswith("SAMPLE_")}
 
 
 # default model (6x6), used until `fit` writes model_6.json in the state
@@ -1089,7 +1100,7 @@ class Scheduler:
                     if u.score <= 0:
                         break
                     path = self.unit_path(u.P, u.lo, u.hi)
-                    proc = subprocess.Popen(self.command(u.P, u.lo, u.hi, path),
+                    proc = subprocess.Popen(self.command(u.P, u.lo, u.hi, path), env=msearch_env(),
                                             stdout=subprocess.DEVNULL)
                     running[proc] = (u.P, path)
                     busy.add(u.P)
@@ -1552,7 +1563,10 @@ def fit_time_models(stats, prior=None):
         engine, mode = key.split(":")
         engine = int(engine)
         st = {k: (np.array(v) if isinstance(v, list) else v) for k, v in stats[key].items()}
-        base = last.get(mode) if engine >= am.TIME_PRIOR["engine"] else None
+        # (engine 3 on: the previous engine's posterior, shifted by
+        # amodel.ENGINE_TIME_SHIFT)
+        base = (am.time_prior(engine, last.get(mode)) if engine >= am.TIME_PRIOR["engine"]
+                else None)
         tm = am.TimeModel(engine=engine).fit(st, prior=base)
         tm.engine = engine
         out[key] = tm
@@ -1564,7 +1578,8 @@ def fit_time_models(stats, prior=None):
 def current_time_model(models, engine=None, mode="plain"):
     """the time model of the newest engine (at least ENGINE): the fit of
     that engine, or the posterior of the newest older engine >= 2, or the
-    shipped prior"""
+    shipped prior (either shifted by amodel.ENGINE_TIME_SHIFT, see
+    amodel.time_prior)"""
     am = _am()
     engines = [int(k.split(":")[0]) for k in models if k.endswith(":" + mode)]
     engine = max([ENGINE] + engines) if engine is None else engine
@@ -1573,9 +1588,8 @@ def current_time_model(models, engine=None, mode="plain"):
         return models[key]
     older = [e for e in engines if am.TIME_PRIOR["engine"] <= e < engine]
     if older:
-        tm = models[f"{max(older)}:{mode}"]
-        return am.TimeModel(tm.th, tm.sd, engine, 0)
-    return am.TimeModel(engine=engine)
+        return am.time_prior(engine, models[f"{max(older)}:{mode}"])
+    return am.time_prior(engine)
 
 
 # --------------------------------------------------------------------------
@@ -1863,8 +1877,9 @@ def unit_files(units_dir):
 SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
 # the format of the summary (bump it when update_file / _ingest read the
 # records differently, so that an old summary is rebuilt): 2 = d-first
-# sums (msearch --diag-first)
-SUMMARY_VERSION = 2
+# sums (msearch --diag-first); 3 = distinct d-first sums, notable squares
+# deduplicated, the CPU of sampled records
+SUMMARY_VERSION = 3
 
 
 def sum_cpu(r):
@@ -1913,7 +1928,10 @@ class Summary:
                        # sample, a truncated run), their CPU seconds, and
                        # the distinct magic squares found
                        "dfirst_sums": 0, "dfirst_partial": 0, "dfirst_cpu": 0.0,
-                       "dfirst_magic": 0}
+                       "dfirst_magic": 0,
+                       # CPU seconds of the sampled records ("csum": r1
+                       # sampling, --calib-r1-stride), in no fit
+                       "sampled_cpu": 0.0}
         self.dirty = False
 
     @staticmethod
@@ -2045,6 +2063,8 @@ class Summary:
                 # a sampled search (every k-th first row, research builds):
                 # its counts and times are not those of the sum
                 self.totals["sampled"] = self.totals.get("sampled", 0) + 1
+                if t == "csum":
+                    self.totals["sampled_cpu"] = self.totals.get("sampled_cpu", 0.0) + r.get("cpu", 0.0)
                 continue
             if r["type"] == "square":
                 pending.append(r)
@@ -2104,6 +2124,7 @@ class Summary:
             fst["cpu"] += t
             self.totals["sums"] += 1
             self.totals["cpu"] += t
+        notable_seen = None
         for q in sqs:
             ps["o"][0] += 1
             ps["o"][1] += q["s_count"]
@@ -2116,7 +2137,15 @@ class Summary:
             self.totals["trav_SP"] += q["sp_count"]
             self.types[q["best_score"]] = self.types.get(q["best_score"], 0) + 1
             if q["best_score"] >= self.NOTABLE:
-                self.notable.append(dict(q, P=list(P)))
+                # once per square (a sum searched again, or a magic square
+                # found d-first before), by its hash where it has one
+                if notable_seen is None:
+                    notable_seen = {(tuple(x["P"]), x["S"], x["hash"]) for x in self.notable
+                                    if "hash" in x}
+                kq = (tuple(P), q["S"], q.get("hash"))
+                if q.get("hash") is None or kq not in notable_seen:
+                    notable_seen.add(kq)
+                    self.notable.append(dict(q, P=list(P)))
         self._ingest_dfirst(P, rs)
         if not sums and not sqs:
             return
@@ -2219,16 +2248,26 @@ class Summary:
         use them; their CPU time is counted apart, and their magic squares
         (a "dsquare" with magic or partner, twice each) join the notable
         squares once."""
+        ps = self.perP.setdefault(p_str(P, "_"), {"o": [0, 0, 0, 0], "cpu": 0.0, "nsums": 0,
+                                                  "cells": {}})
         for r in rs:
             if r["type"] == "dsum":
-                self.totals["dfirst_sums" if r.get("complete") else "dfirst_partial"] += 1
+                if r.get("complete"):
+                    # distinct sums (a sum searched again counts once)
+                    done = ps.setdefault("dfirst_S", [])
+                    if r["S"] not in done:
+                        done.append(r["S"])
+                        self.totals["dfirst_sums"] += 1
+                else:
+                    self.totals["dfirst_partial"] += 1
                 self.totals["dfirst_cpu"] += r.get("cpu", r.get("time", 0.0))
         dm = [q for q in rs if q["type"] == "dsquare" and (q.get("magic") or q.get("partner"))]
         if dm:
-            known = {q.get("hash") for q in self.notable}
+            known = {(tuple(q["P"]), q["S"], q.get("hash")) for q in self.notable}
             for q in dm:
-                if q["hash"] not in known:
-                    known.add(q["hash"])
+                kq = (tuple(P), q["S"], q["hash"])
+                if kq not in known:
+                    known.add(kq)
                     self.notable.append(dict(q, P=list(P), dfirst=1))
                     self.totals["dfirst_magic"] += 1
 
@@ -2865,7 +2904,8 @@ class SchedulerV2:
                         break
                     path = self.unit_path(u.P, u.lo, u.hi)
                     fresh = self.cands.key(u.a) not in self.summary.perP
-                    proc = subprocess.Popen(self.command(u, path), stdout=subprocess.DEVNULL)
+                    proc = subprocess.Popen(self.command(u, path), stdout=subprocess.DEVNULL,
+                                            env=msearch_env())
                     running[proc] = (u.a, path)
                     running_t[proc] = u.time
                     launched.write(json.dumps({
@@ -2948,6 +2988,9 @@ def report_v2(sch, top=20, out=None):
         pr(f"d-first (not in the fits): {T['dfirst_sums']} sums searched in full, "
            f"{T['dfirst_partial']} parts, {T['dfirst_cpu'] / 3600:.2f} CPU-hours, "
            f"{T['dfirst_magic']} magic squares")
+    if T.get("sampled_cpu"):
+        pr(f"sampled records (r1-sampled or calibration, not in the fits): "
+           f"{T['sampled_cpu'] / 3600:.2f} CPU-hours")
     names = {0: "0", 2: "S", 3: "P", 4: "S+S", 5: "S+P", 6: "P+P", 7: "SP",
              9: "SP+S", 10: "SP+P", 14: "MAGIC (SP+SP)"}
     pr("best pair of diagonals: " + ", ".join(
@@ -3089,7 +3132,7 @@ def v2_forecast(args):
         # the shipped calibration: prior class factors and time law, no per-P
         # factors (the state still sets the frontiers)
         sch.calib = Calibration()
-        sch.tm = _am().TimeModel()
+        sch.tm = _am().time_prior(ENGINE)
         sch.scorer.set_calibration(sch.calib)
         sch.scorer.tm = sch.tm
         sch.scorer.lnfsq[:] = 0.0
