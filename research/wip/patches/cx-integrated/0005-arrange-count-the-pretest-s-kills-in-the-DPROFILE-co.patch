@@ -1,7 +1,7 @@
 From cdd6a1ca8eed617d3c4f0fe6e1918216694d5cf0 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:44:02 +0000
-Subject: [PATCH 05/12] arrange: count the pretest's kills in the -DPROFILE
+Subject: [PATCH 05/13] arrange: count the pretest's kills in the -DPROFILE
  counters
 
 The pretest returns from TRY_CHILD before the PROFILE block at its end,

@@ -1,7 +1,7 @@
 From 08a74b8b13ec81dcf3c9b40200896429314d4a9c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 15:57:25 +0000
-Subject: [PATCH 02/12] arrange: pretest of the deep children (count-only
+Subject: [PATCH 02/13] arrange: pretest of the deep children (count-only
  filters, opts.pretest_min)
 
 From 5 vectors placed (the (2,3)/(3,2) children, ~85% of all nodes at

@@ -1,7 +1,7 @@
 From 30c6ff3d8af0a83690d346f197b6873fdb7fad2f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:45:02 +0000
-Subject: [PATCH 07/12] fuzz_arrange: pretest variants on the carried path with
+Subject: [PATCH 07/13] fuzz_arrange: pretest variants on the carried path with
  5-8 words
 
 The pretest (FILTER_COUNT / FILTER_APPLY) was fuzzed only at 2-4 words,

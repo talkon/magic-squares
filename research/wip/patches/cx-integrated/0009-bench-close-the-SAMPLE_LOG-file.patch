@@ -1,7 +1,7 @@
 From 4471760020e2efd281366734cd6598ac18f8beb7 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:45:31 +0000
-Subject: [PATCH 09/12] bench: close the SAMPLE_LOG file
+Subject: [PATCH 09/13] bench: close the SAMPLE_LOG file
 
 The r1 log opened from SAMPLE_LOG was never closed. Returning from main
 flushes it anyway, but the handle leaked for the whole run and a caller

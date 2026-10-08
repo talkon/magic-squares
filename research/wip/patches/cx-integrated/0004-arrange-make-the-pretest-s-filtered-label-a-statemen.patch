@@ -1,7 +1,7 @@
 From 0a72c848508eb08823b42710cff5931260049baf Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:43:24 +0000
-Subject: [PATCH 04/12] arrange: make the pretest's "filtered:" label a
+Subject: [PATCH 04/13] arrange: make the pretest's "filtered:" label a
  statement
 
 The label in TRY_CHILD was followed by a declaration (const int cross),

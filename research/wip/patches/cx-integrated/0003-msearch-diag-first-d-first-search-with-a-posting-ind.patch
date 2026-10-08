@@ -1,7 +1,7 @@
 From 9e690ad0a80cd7e0ae9a9b61a84bf0876ffb0568 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 14:14:18 +0000
-Subject: [PATCH 03/12] msearch --diag-first: d-first search with a posting
+Subject: [PATCH 03/13] msearch --diag-first: d-first search with a posting
  index and a top-label root
 
 For sums with at least --diag-first-min-n vectors (default 3000), msearch

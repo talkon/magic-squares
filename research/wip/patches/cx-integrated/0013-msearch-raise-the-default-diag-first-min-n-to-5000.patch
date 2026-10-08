@@ -1,0 +1,89 @@
+From 18c700924b1e0944e9bbc5b48d1a0b6520eef7d9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 17:17:02 +0000
+Subject: [PATCH 13/13] msearch: raise the default --diag-first-min-n to 5000
+
+cx/dfirst put the crossover of d-first and the plain search at N ~ 3000
+on fdb77fc's search. On the integrated search the plain search got
+faster there and the V_d searches did not: with per-r1 widths the plain
+search runs most of its r1 at 2 words where fdb77fc ran all of them at
+3 (137-159 labels), while V_d already fit in 2 words. Full searches on
+the integrated binary (process CPU, min of 2 alternating runs, same
+session):
+
+  13 7 4 3 1 1  S 1850  N 2523  plain   3.00 s  d-first   3.63 s  1.21
+  13 7 4 3 1 1  S 1900  N 4111  plain  23.79 s  d-first  31.30 s  1.32
+  13 7 4 3 1 1  S 1950  N 5896  plain 149.58 s  d-first 116.11 s  0.78
+  12 6 3 2 1 1  S  988  N 6671  plain 245.17 s  d-first 155.10 s  0.63
+
+(fdb77fc / cx/dfirst: 0.86, 0.61, 0.57 at the last three). The log-log
+interpolation between 4.1k and 5.9k crosses 1 at N ~ 4,960, so 5000 is
+the crossover, and the sums below it keep the plain search's semi-magic
+squares for the models. --calib-r1-stride stays opt-in: the scheduler
+does not read its csum records yet.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ src/c/README.md | 10 ++++++----
+ src/c/msearch.c |  9 +++++----
+ 2 files changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/src/c/README.md b/src/c/README.md
+index 0b18422..53cdaf9 100644
+--- a/src/c/README.md
++++ b/src/c/README.md
+@@ -37,7 +37,7 @@ sums all have N < 1000 (see research/ideas.md, "msearch overhead").
+ ### Diagonal-first search (`--diag-first`)
+ 
+ ```
+-bin/msearch --diag-first --sums 2200 13 7 4 3 1 1          # d-first where N >= 3000
++bin/msearch --diag-first --sums 2200 13 7 4 3 1 1          # d-first where N >= 5000
+ bin/msearch --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2
+ bin/msearch --diag-first --d-stride 250 --d-log d.log --sums 2400 13 7 4 3 1 1
+ bin/msearch --diag-first --d-range 0:4096 --sums 2400 13 7 4 3 1 1   # one unit of a sum
+@@ -54,9 +54,11 @@ msearch"). V_d comes from a number -> vector posting index (O(sum of the
+ posting lengths) per d). Every square of V_d contains all of d, so d's
+ numbers get the top labels and only the first rows through the rarest of
+ them are roots (`--d-plain-root`: all of V_d, as `bin/dsearch`). Per sum
+-it costs the same as the plain search at N ~ 3000 (x = ln(S/S_min) <= 0.4;
+-the default `--diag-first-min-n`), 0.86x at N = 4.1k, 0.55-0.61x at
+-5.9-7.6k and 0.27-0.37x at 11-23k (ideas.md has the measurements), but it
++it costs the same as the plain search at N ~ 5000 (the default
++`--diag-first-min-n`; 1.32x at N = 4.1k, 0.78x at 5.9k, 0.63x at 6.7k with
++the integrated search, whose per-r1 widths sped up the plain search there
++more than the V_d searches; 0.27-0.37x at 11-23k on fdb77fc, ideas.md has
++the measurements), but it
+ does not enumerate the semi-magic squares: d-first sums write "dsquare" records (one per pair,
+ with `set_count` = `sp_count`, `magic`, `partner`; dedupe magic squares by
+ `hash`), "dchunk" checkpoint records every `--d-chunk` (256) indices of d
+diff --git a/src/c/msearch.c b/src/c/msearch.c
+index 50d9369..31c3073 100644
+--- a/src/c/msearch.c
++++ b/src/c/msearch.c
+@@ -31,9 +31,10 @@
+  *                     (square, SP traversal) pair once, so every magic
+  *                     square (twice, once per diagonal); the other sums
+  *                     get the plain search
+- *   --diag-first-min-n N0   default 3000, where d-first and the plain
+- *                     search cost the same per sum at x = ln(S/S_min) <=
+- *                     0.4 (0.86x at N = 4.1k, 0.3x at N = 15-23k)
++ *   --diag-first-min-n N0   default 5000, where d-first and the plain
++ *                     search cost the same per sum with the integrated
++ *                     search (1.32x at N = 4.1k, 0.78x at 5.9k, 0.63x at
++ *                     6.7k; 0.3x at N = 15-23k on fdb77fc)
+  *   --d-stride k, --d-offset o   search only d = lo + o, lo + o + k, ...
+  *                     (an unbiased sample; o defaults to a random offset
+  *                     from --sample-seed)
+@@ -454,7 +455,7 @@ int main(int argc, char *argv[]) {
+   search_opts_default(&opts);
+   /* d-first */
+   int diag_first = 0;
+-  size_t dfirst_min_n = 3000, d_stride = 1, d_chunk = 256;
++  size_t dfirst_min_n = 5000, d_stride = 1, d_chunk = 256;
+   int64_t d_offset = -1; /* -1: random from the seed */
+   size_t d_range_lo = 0, d_range_hi = (size_t)-1;
+   const char *d_log_file = NULL;
+-- 
+2.43.0
+

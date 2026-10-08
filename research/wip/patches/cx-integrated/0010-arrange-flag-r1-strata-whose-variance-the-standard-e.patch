@@ -1,7 +1,7 @@
 From 067f780a8a08ca0dfba87850f2a6fc797ad68dd3 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:46:44 +0000
-Subject: [PATCH 10/12] arrange: flag r1 strata whose variance the standard
+Subject: [PATCH 10/13] arrange: flag r1 strata whose variance the standard
  errors leave out
 
 The stratified standard errors skipped every stratum with fewer than 2

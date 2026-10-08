@@ -1,7 +1,7 @@
 From c96c6e3d09ae5697b58bc630115fd5a56357f5d8 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:50:19 +0000
-Subject: [PATCH 11/12] msearch, scheduler: make d-first sums unambiguous to
+Subject: [PATCH 11/13] msearch, scheduler: make d-first sums unambiguous to
  the scheduler
 
 msearch --diag-first writes "dsquare" / "dchunk" / "dsum" records for the

@@ -1,7 +1,7 @@
 From 835e05242eded66d059993595348e5452eb14a61 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:51:23 +0000
-Subject: [PATCH 12/12] msearch: plain sums of a --d-range split are searched
+Subject: [PATCH 12/13] msearch: plain sums of a --d-range split are searched
  by one unit only
 
 --d-range lo:hi splits the d of a d-first sum between units, but a sum

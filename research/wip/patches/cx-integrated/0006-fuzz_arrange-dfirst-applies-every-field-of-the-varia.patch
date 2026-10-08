@@ -1,7 +1,7 @@
 From 286c5c0986a46977e5bcd0a5fb771930716f65f5 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:44:14 +0000
-Subject: [PATCH 06/12] fuzz_arrange: --dfirst applies every field of the
+Subject: [PATCH 06/13] fuzz_arrange: --dfirst applies every field of the
  variant
 
 The --dfirst loop copied the variant's fc / mrv / support / min_words /

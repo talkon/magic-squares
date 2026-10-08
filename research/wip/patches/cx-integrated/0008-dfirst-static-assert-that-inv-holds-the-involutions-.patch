@@ -1,7 +1,7 @@
 From c0b50db8a3a96046e7c113628cd6fdd22c8da89a Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Thu, 8 Oct 2026 16:45:22 +0000
-Subject: [PATCH 08/12] dfirst: static assert that inv[] holds the involutions
+Subject: [PATCH 08/13] dfirst: static assert that inv[] holds the involutions
  of n <= SQ_MAX_N
 
 gen_inv writes every involution with n mod 2 fixed points into the fixed
