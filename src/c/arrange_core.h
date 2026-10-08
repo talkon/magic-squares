@@ -1237,7 +1237,7 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
       for (int w = 0; w < W; w++)
         dead |= ncell_o[w] & ~ncell_b[w] & ~ub[w];
     CP_WHY(CD_FC_B);
-  filtered:
+  filtered:; /* (a label must precede a statement before C23) */
     /* with two rows and two cols placed, most children are dead, and cross
      * support (with the support filter's test folded in) finds it faster
      * than the support filter's cascade: on the o candidates first, which
