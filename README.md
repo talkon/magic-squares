@@ -160,15 +160,34 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
 * Expected magic squares found with the current build and an ideal choice of
   (P, S): **0.16 in 1 CPU-year, 0.34 in 10, 0.64 in 100, 1.1 in 1,000**
   (68% band x/÷2). Everything searched so far holds ~0.005.
-* The scheduler as fitted would collect about 10x less
-  ([research/forecast.md](research/forecast.md): 0.015-0.018 in 1 CPU-year).
-  Its model of squares per sum stops growing at N ~ 5,500 (it predicts 88
-  squares where 484 were found at N = 5-8k, and 0.08 where 60 were found at
-  N = 15-32k), and its pool omits exponent orders that are not
-  non-increasing, which hold more than half of the yield.
+* The scheduler as fitted forecasts only 0.015-0.018 for itself in 1
+  CPU-year ([research/forecast.md](research/forecast.md)). Scored by the
+  analytic model, its choices are worth ~0.05, about 3x less than the ideal
+  choice at 1 CPU-year and 4x at 100. Its model of squares per sum stops
+  growing at N ~ 5,500 (it predicts 88 squares where 484 were found at
+  N = 5-8k, and 0.08 where 60 were found at N = 15-32k), and its pool omits
+  exponent orders that are not non-increasing, which hold more than half of
+  the yield.
 * Speedups are best compared by the ratio of E at a fixed budget: 10x faster
   gives x2.2 at 1 CPU-year and x1.5 at 1,000; time ~ N^2 instead of ~N^4
   beyond N = 4,000 gives x1.1 and x1.7.
+
+[research/retrospective.md](research/retrospective.md) puts every version of
+the code through the same model, with times measured for 9 versions on 33
+sums (N = 451-31,743):
+
+| code | CPU to reach a given E, vs the first search's code | E(1 CPU-yr) | E(100 CPU-yr) |
+|---|---:|---:|---:|
+| first search (legacy `arrangement_6`) | 1 | 0.051 | 0.28 |
+| df352df (new arrange.c) | 1/2.5-1/3 | 0.080 | 0.38 |
+| a72cef3 (+ support filter) | 1/6.5 | 0.11 | 0.48 |
+| 2d2bc6d (+ carried bitsets) | 1/11-1/13 | 0.14 | 0.58 |
+| fdb77fc (current) | 1/17-1/18 | 0.16 | 0.64 |
+
+The 17-18x is measured speed; E at a fixed budget grows only ~3x because
+E(C) rises slowly with C. Search strategy multiplies with it: the first
+search's expected yield (1.1 CPU-years with the legacy code) is reached in
+about 6.5 CPU-hours with the current code and an ideal choice of (P, S).
 
 [research/calibration.md](research/calibration.md) checks the per-square
 part of the heuristic rung by rung (S, P, S+S, S+P, P+P, SP) on the 7,021

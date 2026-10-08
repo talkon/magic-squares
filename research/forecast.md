@@ -7,7 +7,9 @@
 > too low in squares per sum, and that the pool omits
 > exponent orders that are not non-increasing. With an ideal choice of
 > (P, S), the current build is expected to find 0.16 magic squares in 1
-> CPU-year, 0.34 in 10 and 0.64 in 100 (x/÷2), about 10x more than below.
+> CPU-year, 0.34 in 10 and 0.64 in 100 (x/÷2). Scored by that model, the
+> scheduler's own choices are worth ~0.05 in 1 CPU-year, 3.5x more than its
+> forecast below and 3x less than the ideal (research/retrospective.md T5).
 
 Expected number E(C) of magic (SP+SP) squares found after C CPU-hours of the
 current search (5.7x faster than at the start of October; single core),
