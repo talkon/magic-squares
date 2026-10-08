@@ -753,7 +753,8 @@ static int oracle(uint64_t budget) {
   if (oracle_blown)
     return 1;
   canon_len = 2 * n * n;
-  qsort(oracle_out.a, oracle_out.k, sizeof(canon_t), cmp_canon);
+  if (oracle_out.k) /* (a is NULL before the first square) */
+    qsort(oracle_out.a, oracle_out.k, sizeof(canon_t), cmp_canon);
   int k = 0;
   for (int i = 0; i < oracle_out.k; i++)
     if (k == 0 || cmp_canon(&oracle_out.a[k - 1], &oracle_out.a[i]) != 0)
@@ -826,7 +827,8 @@ static int oracle2(void) {
       cl_push(&oracle2_out, &c);
     }
   canon_len = 2 * n * n;
-  qsort(oracle2_out.a, oracle2_out.k, sizeof(canon_t), cmp_canon);
+  if (oracle2_out.k)
+    qsort(oracle2_out.a, oracle2_out.k, sizeof(canon_t), cmp_canon);
   return 0;
 }
 
@@ -1026,7 +1028,8 @@ int main(int argc, char **argv) {
                (unsigned long)st.nodes, now() - t1, t1 - t0);
       labels = st.num_labels;
       canon_len = 2 * n * n;
-      qsort(found.a, found.k, sizeof(canon_t), cmp_canon);
+      if (found.k)
+        qsort(found.a, found.k, sizeof(canon_t), cmp_canon);
       if (!have_oracle) {
         /* the first variant's squares (deduplicated) become the reference */
         oracle_out.k = 0;
@@ -1039,8 +1042,8 @@ int main(int argc, char **argv) {
       for (int i = 0; i < found.k && same; i++)
         same = cmp_canon(&found.a[i], &oracle_out.a[i]) == 0;
       const bool lost =
-          mode == 6 &&
-          !bsearch(&planted, found.a, found.k, sizeof(canon_t), cmp_canon);
+          mode == 6 && (!found.k || !bsearch(&planted, found.a, found.k,
+                                             sizeof(canon_t), cmp_canon));
       if (!same || lost) {
         fails++;
         printf("MISMATCH seed %lu mode %d n %d nv %d labels %d variant %s: "

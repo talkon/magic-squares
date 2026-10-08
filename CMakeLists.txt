@@ -7,6 +7,18 @@ set(CMAKE_C_FLAGS "-march=native")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -g -ggdb")
 set(CMAKE_C_FLAGS_DEBUG "-Og -g -fsanitize=address -fno-omit-frame-pointer")
+# GCC (13.3) with AVX-512: a function that uses zmm registers realigns its
+# frame to 64 bytes, and GCC then reads local arrays laid out at 64-aligned
+# offsets with aligned moves (vmovdqa64, also for _mm512_loadu_si512); with
+# AddressSanitizer's detection of use after return (on at run time by
+# default) those locals live on its fake stack, which keeps them only
+# 32-aligned, and the moves fault. A GCC bug (a function with a local
+# uint64_t[8] passed to _mm512_loadu_si512 reproduces it), so leave that
+# detection out of GCC's instrumentation (as with
+# ASAN_OPTIONS=detect_stack_use_after_return=0)
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+  string(APPEND CMAKE_C_FLAGS_DEBUG " --param=asan-use-after-return=0")
+endif()
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
 
 enable_testing()
