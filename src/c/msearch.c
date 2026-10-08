@@ -59,14 +59,15 @@
  *                     strata: equal index ranges of the root list)
  *   --r1-log FILE     one line per sampled r1
  *   --sample-seed X   seed of the default random offsets (default 1)
- *   (environment: SAMPLE_STRIDE, SAMPLE_OFFSET, SAMPLE_LOG as in cx/profile)
+ *   (msearch ignores bench's SAMPLE_* environment variables: only these
+ *   options sample)
  *
  * Output (JSON lines, one record per searched sum, flushed immediately so a
  * killed run keeps all completed sums):
  *   {"type":"sum","n":6,"P":[13,6,3,2],"Pval":...,"S":506,"nvecs":831,
  *    "nvecs_raw":831,"labels":77,"nodes":890845,"squares":0,
  *    "time":0.23,"setup_time":..,"enum_time":0.001,"cpu":0.24,"truncated":0,
- *    "engine":2}
+ *    "engine":3}
  * (time, setup_time, enum_time: wall seconds of the search, of the reduction
  * and setup, and this sum's share of the enumeration; cpu: the process CPU
  * seconds of all three, which the scheduler fits its time law to) and one
@@ -110,6 +111,8 @@
  * "mode":"sampled" without --diag-first) in its "done" record: its range
  * was not searched in full, and the scheduler skips the record.
  */
+/* clock_gettime and the CPU-time clocks also under a strict -std=c17 */
+#define _POSIX_C_SOURCE 200809L
 #include <getopt.h>
 #include <math.h>
 #include <stdio.h>
@@ -127,8 +130,11 @@
  * the search time changes materially, since the scheduler fits its model of
  * the time per sum only to records of the newest version (1 = the first
  * version of this pipeline, without the field; 2 = support and cross
- * filters, carried bitsets, October 2026) */
-#define ENGINE_VERSION 2
+ * filters, carried bitsets, October 2026; 3 = per-r1 widths, carried
+ * bitsets up to 512 labels, the pretest (cx/integrated, October 2026):
+ * 0.66-0.89x engine 2's CPU at 129-256 labels, 0.26x above; keep
+ * scripts/scheduler.py ENGINE in step) */
+#define ENGINE_VERSION 3
 
 static double wall_time(void) {
   struct timeval t;
@@ -247,13 +253,37 @@ static int dsquare_found(const dsquare_t *d, void *vctx) {
   return 0;
 }
 
-/* comma-separated unsigned list; returns the count (at most max) */
+/* a whole decimal argument (no trailing junk), or exit 2 */
+static uint64_t arg_u64(const char *s, const char *name) {
+  char *e;
+  const uint64_t v = strtoull(s, &e, 10);
+  if (!*s || *s == '-' || *e != '\0') {
+    fprintf(stderr, "msearch: bad value '%s' for --%s\n", s, name);
+    exit(2);
+  }
+  return v;
+}
+
+static double arg_double(const char *s, const char *name) {
+  char *e;
+  double v = strtod(s, &e);
+  if (e == s || *e != '\0') {
+    fprintf(stderr, "msearch: bad value '%s' for --%s\n", s, name);
+    exit(2);
+  }
+  return v;
+}
+
+/* comma-separated unsigned list; returns the count, -1 if malformed or
+ * longer than max */
 static int parse_u32_list(const char *s, uint32_t *out, int max) {
   int k = 0;
-  while (*s && k < max) {
+  while (*s) {
     char *end;
+    if (k == max || *s == '-')
+      return -1;
     out[k++] = (uint32_t)strtoul(s, &end, 10);
-    if (end == s)
+    if (end == s || (*end && *end != ','))
       return -1;
     s = end;
     if (*s == ',')
@@ -348,7 +378,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
                            size_t d_lo, size_t d_hi, size_t d_chunk,
                            FILE *d_log, uint32_t calib_stride, int top_root,
                            double enum_share, double reduce_time,
-                           double pre_cpu) {
+                           double pre_cpu, double deadline) {
   const double c0 = cpu_time();
   dfirst_t *df = dfirst_new(red, 0, red->count, all, start_i, raw);
   dfirst_set_top_root(df, top_root);
@@ -385,6 +415,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
     tot.vd_seconds += st.vd_seconds;
     tot.setup_seconds += st.setup_seconds;
     tot.search_seconds += st.search_seconds;
+    tot.d_cpu += st.d_cpu;
     tot.d_cpu2 += st.d_cpu2;
     tot.cpu_seconds += st.cpu_seconds;
     tot.d_pairs2 += st.d_pairs2;
@@ -398,7 +429,9 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
             (unsigned long)st.pairs, (unsigned long)st.partners,
             cpu_time() - cc);
     fflush(out);
-    if (st.stopped) {
+    /* --time-limit: also between the chunks of a d-first sum, which can
+     * take hours (the sum is then not complete) */
+    if (st.stopped || (deadline > 0 && c2 < hi && wall_time() >= deadline)) {
       stopped = 1;
       break;
     }
@@ -418,7 +451,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
   double se_time = 0, se_pairs = 0;
   if (m >= 2) {
     const double f = Nd * Nd * (1 - m / Nd) / m / (m - 1);
-    const double ct = tot.cpu_seconds; /* the d loop */
+    const double ct = tot.d_cpu; /* the sum over d of the per-d CPU */
     const double vt = f * (tot.d_cpu2 - ct * ct / m);
     const double vp =
         f * (tot.d_pairs2 - (double)tot.pairs * (double)tot.pairs / m);
@@ -480,20 +513,15 @@ int main(int argc, char *argv[]) {
   const char *d_log_file = NULL;
   uint32_t calib_stride = 0;
   int d_top_root = 1; /* see dfirst_set_top_root */
+  const char *dfirst_opt = NULL; /* a d-first option given (for the check) */
   /* r1 sampling of the plain search */
   uint32_t r1_stride = 0, r1_strata[8];
   int64_t r1_offset = -1;
   int r1_nstrata = 0;
   const char *r1_log_file = NULL;
   uint64_t seed = 1;
-  {
-    const char *es = getenv("SAMPLE_STRIDE"), *eo = getenv("SAMPLE_OFFSET");
-    if (es && atoi(es) > 1)
-      r1_stride = (uint32_t)atoi(es);
-    if (eo)
-      r1_offset = atoi(eo);
-    r1_log_file = getenv("SAMPLE_LOG");
-  }
+  /* (no SAMPLE_* environment as in bench: a variable left exported would
+   * silently turn every scheduler unit into a sampled run) */
 
   static struct option long_options[] = {
       {"diag-first", no_argument, 0, 1000},
@@ -531,14 +559,14 @@ int main(int argc, char *argv[]) {
                             long_options, NULL)) != -1) {
     switch (opt) {
     case 'n':
-      n = atoi(optarg);
+      n = (int)arg_u64(optarg, "vec-size");
       break;
     case 'a':
-      min_sum = strtoull(optarg, NULL, 10);
+      min_sum = arg_u64(optarg, "min-sum");
       have_min = 1;
       break;
     case 'b':
-      max_sum = strtoull(optarg, NULL, 10);
+      max_sum = arg_u64(optarg, "max-sum");
       have_max = 1;
       break;
     case 's':
@@ -549,13 +577,13 @@ int main(int argc, char *argv[]) {
       }
       break;
     case 'l':
-      opts.node_limit = strtoull(optarg, NULL, 10);
+      opts.node_limit = arg_u64(optarg, "node-limit");
       break;
     case 't':
-      total_node_limit = strtoull(optarg, NULL, 10);
+      total_node_limit = arg_u64(optarg, "total-nodes");
       break;
     case 'T':
-      time_limit = atof(optarg);
+      time_limit = arg_double(optarg, "time-limit");
       break;
     case 'o':
       out_file = optarg;
@@ -579,49 +607,65 @@ int main(int argc, char *argv[]) {
       opts.cross = 0;
       break;
     case 'P':
-      opts.pretest_min = atoi(optarg);
+      opts.pretest_min = (int)arg_u64(optarg, "pretest-min");
       break;
     case 1000:
       diag_first = 1;
       break;
     case 1001:
-      dfirst_min_n = strtoull(optarg, NULL, 10);
+      dfirst_min_n = arg_u64(optarg, "diag-first-min-n");
       break;
     case 1002:
-      d_stride = strtoull(optarg, NULL, 10);
+      d_stride = arg_u64(optarg, "d-stride");
       if (d_stride < 1)
         d_stride = 1;
+      dfirst_opt = "d-stride";
       break;
     case 1003:
-      d_offset = strtoll(optarg, NULL, 10);
+      d_offset = (int64_t)arg_u64(optarg, "d-offset");
+      dfirst_opt = "d-offset";
       break;
     case 1004: {
-      char *e;
-      d_range_lo = strtoull(optarg, &e, 10);
-      d_range_hi = *e == ':' && e[1] ? strtoull(e + 1, NULL, 10) : (size_t)-1;
+      /* lo:hi with lo < hi, or lo: (to the end) */
+      char *c = strchr(optarg, ':');
+      if (!c) {
+        fprintf(stderr, "msearch: --d-range takes lo:hi or lo:\n");
+        return 2;
+      }
+      *c = '\0';
+      d_range_lo = arg_u64(optarg, "d-range");
+      d_range_hi = c[1] ? arg_u64(c + 1, "d-range") : (size_t)-1;
+      if (d_range_lo >= d_range_hi) {
+        fprintf(stderr, "msearch: --d-range needs lo < hi\n");
+        return 2;
+      }
+      dfirst_opt = "d-range";
       break;
     }
     case 1005:
-      d_chunk = strtoull(optarg, NULL, 10);
+      d_chunk = arg_u64(optarg, "d-chunk");
       if (d_chunk < 1)
         d_chunk = 1;
+      dfirst_opt = "d-chunk";
       break;
     case 1006:
       d_log_file = optarg;
+      dfirst_opt = "d-log";
       break;
     case 1007:
-      calib_stride = (uint32_t)strtoul(optarg, NULL, 10);
+      calib_stride = (uint32_t)arg_u64(optarg, "calib-r1-stride");
+      dfirst_opt = "calib-r1-stride";
       break;
     case 1008:
-      r1_stride = (uint32_t)strtoul(optarg, NULL, 10);
+      r1_stride = (uint32_t)arg_u64(optarg, "r1-stride");
       break;
     case 1009:
-      r1_offset = strtoll(optarg, NULL, 10);
+      r1_offset = (int64_t)arg_u64(optarg, "r1-offset");
       break;
     case 1010:
       r1_nstrata = parse_u32_list(optarg, r1_strata, 8);
       if (r1_nstrata <= 0) {
-        fprintf(stderr, "bad --r1-strata\n");
+        fprintf(stderr, "msearch: bad --r1-strata (1 to 8 strides)\n");
         return 2;
       }
       break;
@@ -629,10 +673,11 @@ int main(int argc, char *argv[]) {
       r1_log_file = optarg;
       break;
     case 1012:
-      seed = strtoull(optarg, NULL, 10);
+      seed = arg_u64(optarg, "sample-seed");
       break;
     case 1013:
       d_top_root = 0;
+      dfirst_opt = "d-plain-root";
       break;
     default:
       return 2;
@@ -641,10 +686,23 @@ int main(int argc, char *argv[]) {
   prime_exps_t p;
   if (n < 3 || n > SQ_MAX_N || optind >= argc ||
       pexp_parse(&p, argc - optind, argv + optind) || pexp_value(&p) == 0) {
-    fprintf(stderr, "usage: msearch [--vec-size N] [--min-sum S] [--max-sum S] "
-                    "[--sums S1,S2,..] [--node-limit X] [--total-nodes X] "
-                    "[--time-limit T] [--out FILE] [--format json|legacy] "
-                    "e1 e2 ...\n");
+    fprintf(stderr,
+            "usage: msearch [--vec-size N] [--min-sum S] [--max-sum S] "
+            "[--sums S1,S2,..] [--node-limit X] [--total-nodes X] "
+            "[--time-limit T] [--out FILE] [--format json|legacy] "
+            "[--reduce strong] [--no-fc] [--no-mrv] [--no-support] "
+            "[--no-cross] [--pretest-min K]\n"
+            "  [--diag-first [--diag-first-min-n N0] [--d-stride k] "
+            "[--d-offset o] [--d-range lo:hi] [--d-chunk C] [--d-log FILE] "
+            "[--d-plain-root] [--calib-r1-stride k]]\n"
+            "  [--r1-stride k] [--r1-offset o] [--r1-strata k1,k2,..] "
+            "[--r1-log FILE] [--sample-seed X]\n"
+            "  e1 e2 ...   (P = 2^e1 3^e2 5^e3 ...; see the header of "
+            "src/c/msearch.c)\n");
+    return 2;
+  }
+  if (dfirst_opt && !diag_first) {
+    fprintf(stderr, "msearch: --%s needs --diag-first\n", dfirst_opt);
     return 2;
   }
 
@@ -673,6 +731,10 @@ int main(int argc, char *argv[]) {
   out_ctx_t ctx = {.out = out, .legacy = legacy, .p = &p};
   FILE *d_log = d_log_file ? fopen(d_log_file, "a") : NULL;
   FILE *r1_log = r1_log_file ? fopen(r1_log_file, "a") : NULL;
+  if ((d_log_file && !d_log) || (r1_log_file && !r1_log)) {
+    perror(d_log_file && !d_log ? d_log_file : r1_log_file);
+    return 2;
+  }
   const int plain_sampled = r1_stride > 1 || r1_nstrata > 0 || r1_log;
   if (legacy && (diag_first || plain_sampled)) {
     fprintf(stderr, "--format legacy: no d-first or sampling\n");
@@ -737,15 +799,19 @@ int main(int argc, char *argv[]) {
        * its reduction and enumeration share (in every record's "cpu") */
       const double share = (double)raw / (all.count ? all.count : 1);
       const double pre_cpu = cpu_time() - cr + enum_cpu * share;
-      if (diag_first && red.count < dfirst_min_n && d_range_lo > 0) {
-        /* a plain sum in a --d-range unit: the units of a range split the
-         * d of its d-first sums between them, but a plain sum is searched
-         * whole, so only by the unit whose d-range starts at 0, not once
-         * per unit */
+      if (diag_first && red.count < dfirst_min_n &&
+          (d_range_lo > 0 || (d_offset >= 0 && (size_t)d_offset % d_stride != 0))) {
+        /* a plain sum in a --d-range or --d-offset unit: the units of a
+         * range (or of the offsets of a stride) split the d of its d-first
+         * sums between them, but a plain sum is searched whole, so only by
+         * the unit whose d-range starts at 0 (and whose offset is 0), not
+         * once per unit */
         fprintf(out,
                 "{\"type\":\"skip\",\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
-                "\"S\":%lu,\"nvecs\":%zu,\"nvecs_raw\":%zu,\"d_lo\":%zu}\n",
-                n, pstr, (unsigned long)S, red.count, raw, d_range_lo);
+                "\"S\":%lu,\"nvecs\":%zu,\"nvecs_raw\":%zu,\"d_lo\":%zu,"
+                "\"d_offset\":%ld}\n",
+                n, pstr, (unsigned long)S, red.count, raw, d_range_lo,
+                (long)(d_offset >= 0 ? (size_t)d_offset % d_stride : 0));
         fflush(out);
         continue;
       }
@@ -754,7 +820,8 @@ int main(int argc, char *argv[]) {
                                   raw, &red, &opts, d_stride, d_offset, seed,
                                   d_range_lo, d_range_hi, d_chunk, d_log,
                                   calib_stride, d_top_root, enum_time * share,
-                                  reduce_time, pre_cpu);
+                                  reduce_time, pre_cpu,
+                                  time_limit > 0 ? t_start + time_limit : 0);
         if (total_node_limit && total_nodes >= total_node_limit)
           stop = stop_nodes = 1;
         if (time_limit > 0 && wall_time() - t_start >= time_limit)

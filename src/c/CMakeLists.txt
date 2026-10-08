@@ -64,6 +64,10 @@ if (HAVE_NO_GFNI_FLAGS)
   add_test(NAME fast_bench_quick_no_gfni COMMAND bench_no_gfni ${BENCH_DIR}/quick.txt)
   add_test(NAME fast_bench_quick_no_gfni_wide3 COMMAND bench_no_gfni --min-words 3 ${BENCH_DIR}/quick.txt)
   add_test(NAME fast_bench_quick_no_gfni_no_support COMMAND bench_no_gfni --no-support ${BENCH_DIR}/quick.txt)
+  # the fallbacks on the carried path with 7 words, and with the pretest
+  # off
+  add_test(NAME fast_bench_quick_no_gfni_wide7 COMMAND bench_no_gfni --min-words 7 ${BENCH_DIR}/quick.txt)
+  add_test(NAME fast_bench_quick_no_gfni_no_pretest COMMAND bench_no_gfni --pretest-min 0 ${BENCH_DIR}/quick.txt)
 endif()
 # builds for CPUs without AVX-512BW (bit-sliced counters, 8 slices with
 # AVX-512F) and without AVX-512 (plain C filters, 4 slices), which the
@@ -111,6 +115,20 @@ if (HAVE_FLAG_portable)
   target_link_libraries(fuzz_arrange_portable m)
   add_test(NAME fast_fuzz_arrange_portable COMMAND fuzz_arrange_portable 1000 60
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  # the d-first search with the plain C filters
+  add_test(NAME fast_fuzz_dfirst_portable COMMAND fuzz_arrange_portable --dfirst 7000 40
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endif()
+if (HAVE_NO_GFNI_FLAGS)
+  # the carried path with 5-8 words (and the pretest) with the fallbacks
+  # for AVX-512 CPUs without GFNI / VPOPCNTDQ
+  add_executable(fuzz_arrange_no_gfni fuzz_arrange.c enumerate.c arrange.c square.c dfirst.c)
+  target_compile_options(fuzz_arrange_no_gfni PRIVATE -mno-gfni -mno-avx512vpopcntdq)
+  target_link_libraries(fuzz_arrange_no_gfni m)
+  add_test(NAME fast_fuzz_arrange_no_gfni_wide COMMAND fuzz_arrange_no_gfni --mode 7 3000 60
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  add_test(NAME fast_fuzz_dfirst_no_gfni COMMAND fuzz_arrange_no_gfni --dfirst 3100 40
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endif()
 add_executable(fuzz_arrange_matrices fuzz_arrange.c enumerate.c arrange.c square.c dfirst.c)
 target_compile_definitions(fuzz_arrange_matrices PRIVATE CARRY_MAX_W=0)
@@ -131,6 +149,12 @@ add_test(NAME fast_fuzz_dfirst_matrices COMMAND fuzz_arrange_matrices --dfirst 5
 # P = 2^16 3^5 5^4 7^2, S = 849 (as bin/dsearch does)
 add_test(NAME fast_msearch_dfirst_849 COMMAND sh -c
   "$<TARGET_FILE:msearch> --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2 | grep -c '\"type\":\"dsquare\"' | grep -qx 1")
+# msearch ignores bench's SAMPLE_* environment (a leftover export must not
+# turn scheduler units into sampled runs), and rejects malformed options
+add_test(NAME fast_msearch_no_sample_env COMMAND sh -c
+  "SAMPLE_STRIDE=3 SAMPLE_LOG=/dev/null $<TARGET_FILE:msearch> --sums 327 10 4 3 2 | grep -c '\"type\":\"square\"' | grep -qx 1")
+add_test(NAME fast_msearch_bad_args COMMAND sh -c
+  "m=$<TARGET_FILE:msearch>; for a in '--diag-first --d-range 5:3' '--diag-first --d-range x' '--d-stride 3' '--calib-r1-stride 2' '--r1-strata 1,2,3,4,5,6,7,8,9' '--min-sum 3x' '--diag-first --diag-first-min-n abc' '--diag-first --d-log /nonexistent/x'; do $m $a --sums 327 10 4 3 2 > /dev/null 2>&1; [ $? -eq 2 ] || { echo \"accepted: $a\"; exit 1; }; done")
 # saturated byte counters at the node below r1 (every unmatched cell in
 # >= 255 candidates, so the cell is chosen among the saturated counts; the
 # oracle is too slow there, so the variants are compared with each other,
