@@ -88,8 +88,10 @@ computed once on 24 sums; then a lazy greedy planner always runs the next
 chunk of sums of the P with the best predicted yield, searching each P in
 increasing order of S from ceil(6 P^(1/6)). As results come in it refits
 class factors (squares, S and P traversals, by N band, number of primes,
-assignment ratio and S / S_min), the time law, and per-P factors (empirical
-Bayes); `report` compares observed and predicted counts. The previous
+assignment ratio and S / S_min; quasi-Poisson, since counts of one P move
+together), the level of the time law (its shape stays fixed; msearch
+reports CPU time per sum), and per-P factors (empirical Bayes); `report`
+compares observed and predicted counts. The previous
 scheduler (a Poisson regression fitted to our runs, over non-increasing
 exponents) is still available as `--model regression --pool classic`.
 
@@ -180,10 +182,13 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
 * The analytic scheduler ([research/scheduler-v2.md](research/scheduler-v2.md),
   now the default) uses that model per (P, S) over a pool of 377,908 P
   that includes exponent orders that are not non-increasing. It forecasts
-  **~0.1 magic squares in 1 CPU-year and ~0.2 in 10** (after a x0.8
-  discount for the shortfall of its top-ranked units on held-out runs);
-  scored by the same model, the old scheduler's choices collect about half
-  as much at 1 CPU-year (x2.0) and 0.4x at 10 (x2.6).
+  **0.12 magic squares in 1 CPU-year, 0.25 in 10 and 0.39 in 100**
+  (`forecast --shipped`; 90% band from its calibration 0.04-0.32 at 1
+  CPU-year). Units it ranks highest came in at 0.7-0.9 of prediction on
+  held-out data, so quote **about 0.1 and 0.2**. Scored by the same model,
+  the old scheduler's choices collect 0.059 and 0.096 (x2.0 / x2.6). The
+  ideal frontier above uses a slower time law and is not directly
+  comparable (v2 reaches ~2/3 of it under that law).
 * Speedups are best compared by the ratio of E at a fixed budget: 10x faster
   gives x2.2 at 1 CPU-year and x1.5 at 1,000; time ~ N^2 instead of ~N^4
   beyond N = 4,000 gives x1.1 and x1.7.
