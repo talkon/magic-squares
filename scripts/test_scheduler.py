@@ -274,13 +274,21 @@ def test_profile_store():
         A, vv = st2.get((12, 6, 3, 2, 1, 1))   # outside the pool: extra
         assert vv.any() and "12_6_3_2_1_1" in st2.extra
         st2.save_extra()
-        old = am.AMODEL_VERSION
-        am.AMODEL_VERSION = old + 1000
+        old = am.PROFILE_VERSION
+        am.PROFILE_VERSION = old + 1000
         try:
             st3 = scheduler.ProfileStore(state, pool, 6)
             assert not np.asarray(st3.done).any() and not st3.extra
         finally:
-            am.AMODEL_VERSION = old
+            am.PROFILE_VERSION = old
+        # a changed constant without a version bump also invalidates
+        old = am.KAPPA
+        am.KAPPA = old * 1.01
+        try:
+            st4 = scheduler.ProfileStore(state, pool, 6)
+            assert not np.asarray(st4.done).any()
+        finally:
+            am.KAPPA = old
     print("profile store ok")
 
 
@@ -330,12 +338,21 @@ def test_planner():
             brute.append((best.a, best.lo, best.hi))
             bp.advance(best.a, best.hi)
         assert lazy == brute, (lazy[:5], brute[:5])
-    # stopping rules on one P
+    # stopping rules on one P (a coverage gap of negligible density is
+    # skipped, so this test uses explicit gaps)
     P = (12, 6, 3, 2, 1, 1)
     with tempfile.TemporaryDirectory() as state:
         cands, sc, plan = make_v2([P], state, unit_time=1e9, drop=0.5)
         f = int(plan.frontier[0])
         assert f == math.ceil(scheduler._am().s0(P))
+        # eval_sums (written out for speed) == grid_density (TimeModel.time)
+        # at the grid points, with band offsets and the label-word step set
+        sc.tm = scheduler._am().TimeModel(th=[3.8, 5.4, -3.4, 0.9, 0.4, 0.1, -0.2, 0.3, 0.05])
+        Sg = sc.prof(0)[0]
+        _, m, t, _, _, _ = sc.eval_sums(0, Sg)
+        g = sc.grid_density([0])[0]
+        assert np.allclose(np.log(m / t), g[np.isfinite(g)], atol=1e-9)
+        sc.tm = _am_tm()
         u = plan.unit(0)
         S = np.arange(u.lo, u.hi + 2)
         sq, m, t, _, _, _ = sc.eval_sums(0, S)
@@ -353,8 +370,15 @@ def test_planner():
         # a gap where the model predicts nothing (below S_min) is skipped
         plan.set_cover(0, [[f + 1, z + 20]])
         assert plan.frontier[0] == z + 21
+        # a gap of negligible predicted density (right at S_min) is skipped
         plan.set_cover(0, [[z + 5, z + 20]])
-        assert plan.frontier[0] == f and plan.unit(0).hi <= z + 4
+        neg = plan._negligible(0, f, z + 4)
+        assert plan.frontier[0] == (z + 21 if neg else f)
+        # a gap with real density is not
+        zz = int(cands.S0[0] * 1.1)
+        assert not plan._negligible(0, zz + 1, zz + 9)
+        plan.set_cover(0, [[f, zz], [zz + 10, zz + 20]])
+        assert plan.frontier[0] == zz + 1 and plan.unit(0).hi <= zz + 9
     print("planner ok")
 
 
@@ -374,16 +398,24 @@ def test_fit_poisson_map():
     for key, (m, s) in scheduler.GLM_PRIORS.items():
         b, C = scheduler.fit_poisson_map(Z[:0], [], [], m, s)
         assert np.allclose(b, m) and np.allclose(np.diag(C), np.array(s) ** 2)
-    # the shipped calibration = the GLMs with no data: review factors on P(magic)
+    # the shipped calibration = the GLMs with no data: the prior means
     cal = scheduler.Calibration.fit(np.zeros((scheduler.NCELLS, 9)))
     lg, lS, lP, lm = cal.rates()
     lg0, _, _, lm0 = scheduler.Calibration().rates()
-    assert np.allclose(lg, 0) and np.allclose(lm, lm0)
+    assert np.allclose(lg, lg0) and np.allclose(lm, lm0)
     import amodel as am
     c_low = scheduler.cell_index(math.log(2000), 6, 0, 0.2)
     c_hi = scheduler.cell_index(math.log(4000), 7, 0, 0.05)
-    assert abs(math.exp(lm[c_low]) - am.PAIR) < 1e-9
-    assert abs(math.exp(lm[c_hi]) / (am.PAIR * am.NTR * am.K7 * am.X01) - 1) < 0.01
+    c_sm = scheduler.cell_index(math.log(800), 6, 0, 0.05)
+    assert abs(math.exp(lm[c_low]) - am.PAIR) < 1e-9 and abs(lg[c_low]) < 1e-12
+    # N' >= 3k: e^{2 (0.04 + 0.06)}; k >= 7: e^{-0.16}; x < 0.1: e^{-0.08}
+    assert abs(math.exp(lm[c_hi]) / (am.PAIR * math.exp(0.2) * am.K7 * am.X01) - 1) < 0.01
+    assert abs(lg[c_sm] - (-0.25 - 0.1)) < 1e-12
+    # quasi-Poisson: the same data with dispersion 4 gives a 2x wider se
+    _, C1 = scheduler.fit_poisson_map(Z, y, np.log(E), mean, sd)
+    _, C4 = scheduler.fit_poisson_map(Z, y, np.log(E), mean, sd, phi=np.full(len(y), 4.0))
+    r = np.sqrt(np.diag(C4) / np.diag(C1))[used]
+    assert (np.abs(r - 2) < 0.05).all(), r
     print("fit_poisson_map ok")
 
 
@@ -393,17 +425,24 @@ def test_per_p():
     f_sq, f_S, f_P = scheduler.per_p_factors(0, 0, 0, 0, 0, 0)
     assert f_sq == f_S == f_P == 1
     f_sq, f_S, f_P = scheduler.per_p_factors(60, 20, 30, 30, 0, 30)
-    assert abs(f_sq - 100 / 60) < 1e-12 and abs(f_S - 1) < 1e-12 and abs(f_P - 0.5) < 1e-12
+    A, phi = scheduler.A_SQ, scheduler.PHI_SUM
+    assert abs(f_sq - (A + 60 / phi) / (A + 20 / phi)) < 1e-12
+    assert abs(f_S - 1) < 1e-12 and abs(f_P - 0.5) < 1e-12
+    # one sum at 0.55 of its 670 predicted squares: a strong, not total, pull
+    f1 = scheduler.per_p_factors(366, 670, 0, 0, 0, 0)[0]
+    assert 0.55 < f1 < 0.65, f1
     hi = scheduler.per_p_factors(60, 20, 30, 30, 0, 30, explore=1.0)
     assert hi[0] > f_sq and hi[2] > f_P
     with tempfile.TemporaryDirectory() as state:
         P = (12, 6, 3, 2, 1, 1)
         cands, sc, plan = make_v2([P], state)
         c = int(scheduler.cell_index(math.log(2000), 6, 0, 0.2))   # class rates 0.86, 0.64
+        # o (all squares of the P) is not used: the counts come from the
+        # cells, where the expectations are
         summ = SimpleNamespace(perP={"12_6_3_2_1_1": {"o": [10, 30, 0, 0], "cells": {
             c: [5, 2, 6.0, 30, 30.0, 0, 30.0, 0, 0.1]}}})
         sc.set_factors(summ)
-        assert abs(math.exp(sc.lnfsq[0]) - 50 / 46) < 1e-9
+        assert abs(math.exp(sc.lnfsq[0]) - (A + 2 / phi) / (A + 6 / phi)) < 1e-9
         f_S, f_P = 60 / (30 + 30 * 0.86), 30 / (30 + 30 * 0.64)
         Fm = f_S ** 2 * f_P ** 2 * (1 + 1 / 60) * (1 + 1 / 30) / (1 + 1 / 30) ** 2
         assert abs(math.exp(sc.lnFm[0]) - Fm) < 1e-9
@@ -411,21 +450,38 @@ def test_per_p():
 
 
 def test_time_model():
-    """T7: an engine at 0.5x the law is learned from 50 sums; the hinge
-    stays at its prior without sums above N' = 8k"""
+    """T7: an engine at 0.5x the law is learned from 50 sums; the shape
+    (slopes, hinge) stays at its prior; a refit on many sums at N' < 3k
+    with a different shape moves predictions at N' >= 3k by < 10%"""
     import numpy as np
     import amodel as am
     rng = np.random.default_rng(4)
     lNp = np.log(rng.uniform(1000, 7000, 50))
     lL = np.log(rng.uniform(80, 200, 50))
     prior = am.TimeModel()
-    y = prior.log_time(lNp, lL) + math.log(0.5) + rng.normal(0, 0.17, 50)
-    st = am.TimeModel.stats(am.time_features(lNp, lL), y)
+    y = prior.log_time(lNp, lL, 6) + math.log(0.5) + rng.normal(0, 0.17, 50)
+    st = am.TimeModel.stats(am.time_features(lNp, lL, 6), y)
     models = scheduler.fit_time_models({"3:plain": st})
     tm = scheduler.current_time_model(models, engine=3)
-    ratio = np.exp(tm.log_time(lNp, lL) - prior.log_time(lNp, lL)).mean()
+    ratio = np.exp(tm.log_time(lNp, lL, 6) - prior.log_time(lNp, lL, 6)).mean()
     assert abs(ratio - 0.5) < 0.05, ratio
-    assert tm.th[3] == prior.th[3]
+    assert np.abs(tm.th[1:4] - prior.th[1:4]).max() < 1e-3
+    # 3000 cheap sums at N' 300-3k: +0.3 on ln t, and a label slope of -3.5
+    # instead of the prior's (what drifted the v2 refit by 1.4-2x)
+    n = 3000
+    lN2 = np.log(rng.uniform(300, 3000, n))
+    lL2 = np.log(rng.uniform(70, 160, n))
+    F2 = am.time_features(lN2, lL2, 6)
+    y2 = (prior.log_time(lN2, lL2, 6) + 0.3 + (-3.5 - prior.th[2]) * (lL2 - math.log(110))
+          + rng.normal(0, 0.25, n))
+    tm2 = scheduler.fit_time_models({"2:plain": am.TimeModel.stats(F2, y2)})["2:plain"]
+    lN3 = np.log(rng.uniform(3000, 20000, 200))
+    lL3 = np.log(rng.uniform(120, 260, 200))
+    shift = np.exp(tm2.log_time(lN3, lL3, 6) - prior.log_time(lN3, lL3, 6))
+    assert np.abs(shift - 1).max() < 0.10, (shift.min(), shift.max())
+    # ... while the band it saw is learned
+    small = np.exp(tm2.log_time(lN2, lL2, 6) - prior.log_time(lN2, lL2, 6)).mean()
+    assert 1.2 < small < 1.45, small
     # no data for the newest engine: the previous engine's posterior
     assert np.allclose(scheduler.current_time_model(models, engine=4).th, tm.th)
     assert np.allclose(scheduler.current_time_model({}).th, prior.th)
@@ -433,16 +489,19 @@ def test_time_model():
 
 
 def write_unit(path, P, sums, squares=(), done=None, partial=False):
+    # as msearch: a sum's squares precede its sum record; squares at a sum
+    # without a record (a killed run) come last
     recs = []
+    sq_recs = [{"type": "square", "n": 6, "P": list(P), "S": S, "s_count": s,
+                "p_count": p, "sp_count": sp, "best_score": best, "hash": f"{S}{s}{p}",
+                "grid": [[1] * 6] * 6} for S, s, p, sp, best in squares]
     for S, sq in sums:
+        recs += [q for q in sq_recs if q["S"] == S]
         recs.append({"type": "sum", "n": 6, "P": list(P), "S": S, "nvecs": 2000,
                      "nvecs_raw": 2000 + S, "labels": 120, "nodes": 10 ** 6, "squares": sq,
                      "time": 0.004, "setup_time": 0.001, "enum_time": 0.001, "truncated": 0,
                      "engine": 2})
-    for S, s, p, sp, best in squares:
-        recs.append({"type": "square", "n": 6, "P": list(P), "S": S, "s_count": s,
-                     "p_count": p, "sp_count": sp, "best_score": best, "hash": f"{S}{s}{p}",
-                     "grid": [[1] * 6] * 6})
+    recs += [q for q in sq_recs if q["S"] not in {S for S, _ in sums}]
     if done:
         recs.append({"type": "done", "n": 6, "P": list(P), "min_sum": done[0],
                      "last_sum": done[1], "complete": 1, "time": 3.0})
@@ -507,6 +566,24 @@ def test_summary():
         res = scheduler.Results(6)
         res.add_file(path)
         assert len(res.sums) == 20
+        # a unit killed in the middle of S = 902 (its square written, no sum
+        # record) and its rerun from 902: the square counts once
+        write_unit(os.path.join(units, "u2.jsonl"), P, [(900, 0), (901, 1)], [(902, 0, 1, 0, 3)])
+        inc.update(units, store)
+        assert inc.totals["squares"] == 2
+        write_unit(os.path.join(units, "u3.jsonl"), P, [(902, 1), (903, 0)], [(902, 0, 1, 0, 3)],
+                   done=(902, 903))
+        inc.update(units, store)
+        assert inc.totals["squares"] == 3 and inc.types == {3: 2, 7: 1}
+        # sampled records (research builds) are not ingested
+        with open(os.path.join(units, "u4.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "sum", "n": 6, "P": list(P), "S": 950, "stride": 8,
+                                "nvecs": 9, "nvecs_raw": 9, "labels": 9, "nodes": 1,
+                                "squares": 5, "time": 1.0, "setup_time": 0, "truncated": 0})
+                    + "\n")
+        n0 = inc.totals["sums"]
+        inc.update(units, store)
+        assert inc.totals["sums"] == n0 and inc.totals["sampled"] == 1
     print("summary ok")
 
 
@@ -523,9 +600,9 @@ def test_no_enumerate():
     def forbidden(*a, **k):
         raise AssertionError(f"subprocess.run called: {a}")
 
-    def binary(name):
+    def binary(name, check=True):
         assert name == "msearch", name
-        return saved_bin(name)
+        return saved_bin(name, check)
 
     subprocess.run = forbidden
     scheduler.binary = binary

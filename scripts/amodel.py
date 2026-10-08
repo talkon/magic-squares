@@ -45,12 +45,15 @@ are marked invalid: non-finite values, Newton not converged, N < 2n, or at
 or before the last decrease of N along the grid.
 
 Time. TimeModel: CPU seconds per sum as a function of the model's N (bias
-corrected) and L_raw, ln t = th . [1, ln(N'/4000), ln(L_raw/150),
-max(0, ln(N'/8000))], refit online per msearch engine (Bayesian ridge).
+corrected), L_raw and the label words, ln t = th . time_features (see
+TIME_PRIOR), refit online per msearch engine (Bayesian ridge that keeps the
+shape and learns an intercept, the label-word step and N' band offsets).
 node_law(): predicted search nodes, used only for --node-limit.
 
 Needs numpy. AMODEL_VERSION changes whenever the numbers profile() returns
-change (constants, grid, lattice table): it invalidates cached profiles.
+or the meaning of stored statistics change (it invalidates cached
+profiles and the scheduler's summary); model_hash() additionally covers
+the constants and the lattice table, in case a change forgets the bump.
 """
 import json
 import math
@@ -58,7 +61,8 @@ import os
 
 import numpy as np
 
-AMODEL_VERSION = 1
+AMODEL_VERSION = 2     # the scheduler's summary statistics (time features: 2)
+PROFILE_VERSION = 1    # the numbers profile() returns (the profile store)
 
 PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -70,7 +74,7 @@ D_6 = 5400
 # review corrections (existence.md 4.1): multipliers on squares (SQ12) or on
 # P(magic | square) (the others); the scheduler's learning priors start here
 SQ12 = 1.23     # squares per sum at N' >= 12000
-NTR = 1.35      # P(magic) at N' >= 3000 (traversal rates rise with N)
+NTR = 1.35      # P(magic) at N' >= 3000 (the review's value; the scheduler's prior is 1.22)
 K7 = 0.85       # P(magic) at k >= 7 distinct primes
 X01 = 0.92      # P(magic) at x = ln(S / smin_approx) < 0.1
 PAIR = 0.87     # P(magic): the pair factor
@@ -94,8 +98,32 @@ FIELDS = ("lN", "lEs", "lPm", "lpS", "lpP", "lpSP", "lLraw", "ld")
 CAP_FACTOR = 24.0
 A_MAX = 40      # the lattice table covers exponents 0..40
 
-with open(os.path.join(HERE, "amodel_lattice.json")) as _f:
-    _LAT = {int(n): v for n, v in json.load(_f).items()}
+with open(os.path.join(HERE, "amodel_lattice.json"), "rb") as _f:
+    _LAT_BYTES = _f.read()
+_LAT = {int(n): v for n, v in json.loads(_LAT_BYTES).items()}
+
+
+def _hash(*parts):
+    import hashlib
+    h = hashlib.sha1()
+    for x in parts:
+        h.update(x if isinstance(x, bytes) else json.dumps(x, sort_keys=True, default=float).encode())
+    return h.hexdigest()[:12]
+
+
+def profile_hash():
+    """hash of everything profile() and the store depend on, besides the
+    code: PROFILE_VERSION, the calibration constants, the grid and the
+    lattice table (a cached profile is reused only when it matches)"""
+    return _hash(PROFILE_VERSION, [C0, B, DN, KAPPA, D_6, CAP_FACTOR, A_MAX, LOG_PM_CAP, STORE_CLIP],
+                 [float(u) for u in GRID_U], list(FIELDS), _LAT_BYTES)
+
+
+def model_hash():
+    """profile_hash plus the constants the scheduler's stored statistics
+    depend on (review factors, label and N-bias laws, time features)"""
+    return _hash(AMODEL_VERSION, profile_hash(), REVIEW, [LAB0, LAB1, LAB2, NBIAS_SLOPE, NBIAS_KNOT],
+                 list(TIME_BAND_EDGES), list(TIME_FEATURES))
 
 
 # --------------------------------------------------------------------------
@@ -372,27 +400,53 @@ def guard_counts(prof):
 UNIT_OVERHEAD = 0.05    # CPU seconds per unit (process start)
 SUM_OVERHEAD = 0.002    # CPU seconds per sum
 
-# ln t = th . [1, ln(N'/4000), ln(Lraw/150), max(0, ln(N'/8000))], msearch
-# engine 2, fitted with the model's N' and L_raw at each sum's S (as the
-# scheduler uses them, not the observed N and labels) on 594 full sums with
-# N >= 1000 and 10 r1-sampled sums at N 6.7-45k (weight 30). Residual sd
-# 0.25 (0.17 with the observed N: the model's N carries a few % of error,
-# which the N^5 law multiplies); band means within +-0.04 except +0.42 on
-# the 6 full sums at N 3-6k (known: the label bitset grows to 3 words).
-TIME_PRIOR = {"th": [3.6717, 5.2827, -2.2092, 0.5531], "sd": 0.25, "engine": 2}
-# prior precision of th for an online refit, and of the residual variance
-# (in pseudo-sums at sd 0.17)
-TIME_LAMBDA = (50.0, 50.0, 50.0, 200.0)
+# ln t = th . time_features(lN', L_raw, k): [1, ln(N'/4000), ln(L_raw/150),
+# max(0, ln(N'/8000)), [labels_obs > 128], band offsets for N' <1k, 1-3k,
+# 3-6k, >=6k]. msearch engine 2, fitted (least squares on ln t, AMODEL_VERSION
+# 2) with the model's N' and L_raw at each sum's S (as the scheduler uses
+# them) on 3,690 full sums at N' >= 300 (pool/validate_rows, the live
+# verification units, the 32 CPU-timed held-out draws) and 10 r1-sampled
+# sums at N 6.7-45k (weight 30); the band offsets are 0 in the prior and
+# only learned online. The step at labels > 128 is the third 64-bit word of
+# the label bitsets (cost per node 0.25 -> 0.6 us); without it the law ran
+# 1.2-1.3x under the sums at N' 3-6k that carry most of the forecast's E.
+# Held out (fit without the draws and the live B/C units): draws CPU obs/pred
+# 1.10, live C 1.03. Residual sd 0.21-0.33 by source, 0.48 on the sampled
+# sums; the shipped sd 0.30 (its e^{sd^2/2} enters the mean) and the
+# intercept (+0.03 over the ln-t fit) make sum(t)/sum(pred) ~1.04 at
+# N' >= 3k and ~0.9 below.
+TIME_BAND_EDGES = (1000.0, 3000.0, 6000.0)
+TIME_FEATURES = ("intercept", "ln N'/4000", "ln L/150", "hinge N'>8k", "labels>128",
+                 "band<1k", "band 1-3k", "band 3-6k", "band>=6k")
+NT = len(TIME_FEATURES)
+TIME_PRIOR = {"th": [3.8587, 5.4575, -3.4622, 0.9458, 0.3934, 0.0, 0.0, 0.0, 0.0],
+              "sd": 0.30, "engine": 2}
+# prior precision of th for the online refit. The shape (N, L and hinge
+# slopes) is fixed: refitting it on the thousands of cheap sums at N' < 3k
+# moved predictions at N' >= 3k by 1.4-2x. Learned online: a global
+# intercept (sd 0.1), the W >= 3 step (sd 0.1) and one offset per N' band
+# (sd 0.25), so a residual learned at small N' moves the other bands by
+# about 14% of itself. TIME_SD_PSEUDO pseudo-sums at the prior sd anchor
+# the residual variance.
+TIME_LAMBDA = (100.0, 1e6, 1e6, 1e6, 100.0, 16.0, 16.0, 16.0, 16.0)
 TIME_SD_PSEUDO = 20.0
 
 # ln nodes = NODE_TH . [1, ln(N'/4000), ln(labels/150), max(0, ln(N'/8000))]
 NODE_TH = (17.375, 5.756, -5.765, 0.639)
 
 
-def time_features(lNp, lLraw):
-    x = np.asarray(lNp, float) - math.log(4000)
-    return np.stack([np.ones_like(x), x, np.asarray(lLraw, float) - math.log(150),
-                     np.maximum(0.0, np.asarray(lNp, float) - math.log(8000))], -1)
+def time_features(lNp, lLraw, k):
+    """[..., NT] features of the time law at bias-corrected lN', L_raw and k
+    distinct primes (scalar or broadcastable)"""
+    lNp = np.asarray(lNp, float)
+    lLraw = np.asarray(lLraw, float)
+    lNp, lLraw, k = np.broadcast_arrays(lNp, lLraw, np.asarray(k, float))
+    x = lNp - math.log(4000)
+    w3 = (labels_obs(lNp, lLraw, k) > 128).astype(float)
+    band = np.searchsorted(np.log(TIME_BAND_EDGES), lNp, side="right")
+    cols = [np.ones_like(x), x, lLraw - math.log(150), np.maximum(0.0, lNp - math.log(8000)), w3]
+    cols += [(band == b).astype(float) for b in range(len(TIME_BAND_EDGES) + 1)]
+    return np.stack(cols, -1)
 
 
 def log_nodes(lNp, lLraw, k):
@@ -411,21 +465,23 @@ class TimeModel:
 
     def __init__(self, th=None, sd=None, engine=None, n=0):
         self.th = np.array(TIME_PRIOR["th"] if th is None else th, float)
+        if self.th.shape != (NT,):
+            raise ValueError(f"time law with {self.th.size} coefficients, expected {NT}")
         self.sd = float(TIME_PRIOR["sd"] if sd is None else sd)
         self.engine = TIME_PRIOR["engine"] if engine is None else engine
         self.n = n  # rows in the last fit
 
-    def log_time(self, lNp, lLraw):
-        return time_features(lNp, lLraw) @ self.th
+    def log_time(self, lNp, lLraw, k):
+        return time_features(lNp, lLraw, k) @ self.th
 
-    def time(self, lNp, lLraw):
+    def time(self, lNp, lLraw, k):
         """expected CPU seconds per sum"""
-        return np.exp(np.minimum(self.log_time(lNp, lLraw), 60.0) + 0.5 * self.sd ** 2) + SUM_OVERHEAD
+        return np.exp(np.minimum(self.log_time(lNp, lLraw, k), 60.0) + 0.5 * self.sd ** 2) + SUM_OVERHEAD
 
     @staticmethod
     def stats(F, y):
         """sufficient statistics of rows (F, y): n, F'F, F'y, y'y"""
-        F = np.asarray(F, float).reshape(-1, 4)
+        F = np.asarray(F, float).reshape(-1, NT)
         y = np.asarray(y, float)
         return {"n": len(y), "FF": F.T @ F, "Fy": F.T @ y, "yy": float(y @ y)}
 

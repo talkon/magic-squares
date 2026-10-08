@@ -19,17 +19,26 @@ semi-magic squares per sum and P(magic | square) = D_n kappa p_pair from a
 max-entropy local limit theorem with exact lattice factors and ~3 fitted
 constants; it was tested on held-out data up to N = 45k (the regression
 below stops growing at N ~ 5.5k). On top of it:
-  * the review factors of existence.md 4.1 (x1.23 squares at N' >= 12k;
-    x1.35 P(magic) at N' >= 3k, x0.85 at 7+ primes, x0.92 at x =
-    ln(S / S_min) < 0.1, pair factor x0.87) as the priors of three
-    main-effects Poisson GLMs (squares, S traversals, P traversals) over
-    216 calibration cells (N' band x primes x assignment ratio x x band),
-    refit every --refit-every units by MAP;
-  * per-P gamma factors (a = 40 on squares, 30 on traversals), posterior
-    means (no exploration bonus by default, --explore);
-  * time per sum ln t = th . [1, ln(N'/4000), ln(L/150), max(0, ln(N'/8000))]
-    with N' the model's N (bias corrected) and L its predicted number of
-    distinct entries (labels), refit per msearch engine (Bayesian ridge).
+  * the review factors of existence.md 4.1, revised on held-out data
+    (squares: x1.23 at N' >= 12k, x0.80 at N' 6-12k, x0.78 below N' 1k,
+    x0.90 at x = ln(S / S_min) < 0.1; P(magic): x1.22 at N' >= 3k, x0.85
+    at 7+ primes, x0.92 at x < 0.1, pair factor x0.87) as the priors of
+    three main-effects quasi-Poisson GLMs (squares, S traversals, P
+    traversals) over 216 calibration cells (N' band x primes x assignment
+    ratio x x band), refit every --refit-every units by MAP; the dispersion
+    of a cell comes from the per-P factors below (counts of one P move
+    together), so a few P cannot pin a class factor;
+  * per-P gamma factors (a = 15 on squares, i.e. sd 0.26 between P, with
+    the squares of one P tempered by their overdispersion 2.5; a = 30 on
+    traversals), posterior means (no exploration bonus by default);
+  * time per sum ln t = th . [1, ln(N'/4000), ln(L/150), max(0,
+    ln(N'/8000)), [labels > 128], N' band offsets] with N' the model's N
+    (bias corrected), L its predicted number of distinct entries and the
+    step where the label bitsets need a third 64-bit word; refit per msearch
+    engine on the process CPU time msearch reports ("cpu"), learning only an
+    intercept, the step and the band offsets (the shape stays at the
+    prior: a refit dominated by cheap small sums mispredicted the large
+    ones by 1.4-2x).
 The candidates are a wide pool (scripts/pool.py, --pool wide): every
 exponent assignment over 2..29 with S0 = 6 P^(1/6) <= 6000, tau >= 1000,
 4-10 primes and (P / P_sorted)^(1/6) <= 1.2 (377,908 P), since most of the
@@ -165,9 +174,9 @@ def log(msg):
     print(time.strftime("[%H:%M:%S] ") + msg, file=sys.stderr, flush=True)
 
 
-def binary(name):
+def binary(name, check=True):
     path = os.path.join(ROOT, "bin", name)
-    if not os.path.exists(path):
+    if check and not os.path.exists(path):
         sys.exit(f"{path} not found: run ./build.sh first")
     return path
 
@@ -1283,6 +1292,7 @@ def _am():
 # calibration cells: N' band x k x assignment ratio x x = ln(S / smin_approx)
 
 NBAND_EDGES = (1000, 3000, 6000, 12000, 24000)
+XBAND_EDGES = (0.1, 0.25)
 NBAND_NAMES = ("<1k", "1-3k", "3-6k", "6-12k", "12-24k", ">=24k")
 KBAND_NAMES = ("k<=5", "k=6", "k=7", "k>=8")
 RBAND_NAMES = ("sorted", "r<=1.1", "r>1.1")
@@ -1293,7 +1303,17 @@ LN8K = math.log(8000)
 # class rates of S and P traversals that the shipped P(magic | square)
 # corresponds to (analytic.md 4.3: 0.86 and 0.64 near S_min)
 TRAV_BASE = (0.86, 0.64)
-A_SQ, A_TRAV = 40.0, 30.0   # prior strength of the per-P gamma factors
+# prior strength of the per-P gamma factors: A_SQ = 15 is a between-P sd of
+# 1/sqrt(15) = 0.26 in ln(squares obs/pred) (the per-unit sd measured on
+# held-out units); squares within one P are overdispersed too (per-sum
+# Pearson chi2/df 2.5), so their counts enter the posterior divided by
+# PHI_SUM
+A_SQ, A_TRAV = 15.0, 30.0
+PHI_SUM = 2.5
+# share of the forecast's E to quote after selection: held-out units that v2
+# itself ranked highest came in at 0.7-0.9 of their predicted magic density
+# (squares 0.87-0.94, P(magic) proxy 0.7-1.05; research/scheduler-v2.md)
+SELECTION_DISCOUNT = 0.8
 EXPLORE_V2 = 0.0            # optimism: posterior mean + EXPLORE * sd
 
 
@@ -1309,7 +1329,7 @@ def cell_index(lNp, k, rbin, x):
     np = _np()
     nb = np.searchsorted(np.log(NBAND_EDGES), lNp, side="right")
     kb = np.clip(np.asarray(k) - 5, 0, 3)
-    xb = np.searchsorted((0.1, 0.25), x, side="right")
+    xb = np.searchsorted(XBAND_EDGES, x, side="right")
     return ((nb * 4 + kb) * 3 + rbin) * 3 + xb
 
 
@@ -1344,38 +1364,48 @@ def _prior(intercept, sd0, sd, **effects):
 
 # priors of the three GLMs (log rate = intercept + effects): squares relative
 # to the analytic model x SQ12; S and P traversals per 720 e^{lpS}, e^{lpP}.
-# At the prior means m(c) below reproduces the review factors NTR (e^0.30),
+# At the prior means m(c) below gives e^{2 (0.04 + 0.06)} = 1.22 at N' >= 3k
+# (the review's NTR 1.35, lowered by the live data), and the review factors
 # K7 (e^-0.16) and X01 (e^-0.08) on P(magic | square).
 GLM_PRIORS = {
-    "sq": _prior(0.0, 0.3, 0.25),
-    "S": _prior(math.log(TRAV_BASE[0]), 0.1, 0.1, **{"N'>=3k": (0.09, 0.1)}),
+    # squares: over-predicted below N' 1k (0.74 on 146 P), right at S_min
+    # (x < 0.05: 0.65) and at N' 6-12k (0.78-0.80, as analytic.md 3.4's
+    # held-out 0.78 at N 3.4-8.9k)
+    "sq": _prior(0.0, 0.3, 0.25, **{"N'<1k": (-0.25, 0.15), "x<0.1": (-0.1, 0.15),
+                                    "N' 6-12k": (-0.22, 0.15)}),
+    # S traversals at N' >= 3k: +0.04 (the review's +0.09 was not borne out
+    # by the live units, 0.91 relative, nor by all data, 0.94 at 3-12k)
+    "S": _prior(math.log(TRAV_BASE[0]), 0.1, 0.1, **{"N'>=3k": (0.04, 0.1)}),
     "P": _prior(math.log(TRAV_BASE[1]), 0.1, 0.1, **{"N'>=3k": (0.06, 0.1), "k>=7": (-0.08, 0.1),
                                                      "x<0.1": (-0.04, 0.1)}),
 }
 
 
-def fit_poisson_map(Z, y, offset, prior_mean, prior_sd, iters=50):
-    """MAP of a Poisson GLM, log mu = offset + Z beta, with independent
-    normal priors on beta (Newton with step halving); returns (beta, the
-    Laplace covariance)"""
+def fit_poisson_map(Z, y, offset, prior_mean, prior_sd, iters=50, phi=None):
+    """MAP of a (quasi-)Poisson GLM, log mu = offset + Z beta, with
+    independent normal priors on beta (Newton with step halving); phi: the
+    dispersion per row (variance = phi mu; default 1), which divides each
+    row's log-likelihood; returns (beta, the Laplace covariance)"""
     np = _np()
     Z = np.asarray(Z, float)
     y = np.asarray(y, float)
     off = np.asarray(offset, float)
     m = np.asarray(prior_mean, float)
     lam = 1.0 / np.asarray(prior_sd, float) ** 2
+    w = np.ones(len(y)) if phi is None else 1.0 / np.maximum(np.asarray(phi, float), 1e-9)
 
     def logpost(b):
         eta = off + Z @ b
-        return float((y * eta - np.exp(np.minimum(eta, 50))).sum() - 0.5 * (lam * (b - m) ** 2).sum())
+        return float((w * (y * eta - np.exp(np.minimum(eta, 50)))).sum()
+                     - 0.5 * (lam * (b - m) ** 2).sum())
 
     b = m.copy()
     lp = logpost(b)
-    H = Z.T @ (np.exp(np.minimum(off + Z @ b, 50))[:, None] * Z) + np.diag(lam)
+    H = Z.T @ ((w * np.exp(np.minimum(off + Z @ b, 50)))[:, None] * Z) + np.diag(lam)
     for _ in range(iters):
         mu = np.exp(np.minimum(off + Z @ b, 50))
-        g = Z.T @ (y - mu) - lam * (b - m)
-        H = Z.T @ (mu[:, None] * Z) + np.diag(lam)
+        g = Z.T @ (w * (y - mu)) - lam * (b - m)
+        H = Z.T @ ((w * mu)[:, None] * Z) + np.diag(lam)
         step = np.linalg.solve(H, g)
         t = 1.0
         while True:
@@ -1387,8 +1417,19 @@ def fit_poisson_map(Z, y, offset, prior_mean, prior_sd, iters=50):
         if np.abs(t * step).max() < 1e-10:
             break
     mu = np.exp(np.minimum(off + Z @ b, 50))
-    H = Z.T @ (mu[:, None] * Z) + np.diag(lam)
+    H = Z.T @ ((w * mu)[:, None] * Z) + np.diag(lam)
     return b, np.linalg.inv(H)
+
+
+def dispersion(e, ee, key):
+    """quasi-Poisson dispersion of a count with expectation e summed over P
+    whose squared per-P expectations sum to ee: per-P gamma factors (between-P
+    variance 1/A) and, for squares, PHI_SUM within a P:
+    phi = phi_within + (1/A) ee / e"""
+    np = _np()
+    a, phi0 = (A_SQ, PHI_SUM) if key == "sq" else (A_TRAV, 1.0)
+    e = np.asarray(e, float)
+    return phi0 + np.asarray(ee, float) / a / np.maximum(e, 1e-12)
 
 
 class Calibration:
@@ -1403,14 +1444,19 @@ class Calibration:
         self.data = data or {}
 
     @staticmethod
-    def fit(table):
-        """table: [NCELLS, 9] = sums, O_sq, E_sq, O_S, E_S, O_P, E_P, O_SP, E_SP"""
+    def fit(table, ee=None):
+        """table: [NCELLS, 9] = sums, O_sq, E_sq, O_S, E_S, O_P, E_P, O_SP, E_SP;
+        ee: [NCELLS, 3] sums over P of the squared per-P expectations E_sq,
+        E_S, E_P (Summary.cell_ee), for the quasi-Poisson dispersion (None:
+        Poisson)"""
         np = _np()
         Z = cell_design()
         beta, cov, data = {}, {}, {}
-        for key, (o, e) in (("sq", (1, 2)), ("S", (3, 4)), ("P", (5, 6))):
+        for j, (key, (o, e)) in enumerate((("sq", (1, 2)), ("S", (3, 4)), ("P", (5, 6)))):
             use = table[:, e] > 0
-            b, C = fit_poisson_map(Z[use], table[use, o], np.log(table[use, e]), *GLM_PRIORS[key])
+            phi = None if ee is None else dispersion(table[use, e], ee[use, j], key)
+            b, C = fit_poisson_map(Z[use], table[use, o], np.log(table[use, e]), *GLM_PRIORS[key],
+                                   phi=phi)
             beta[key], cov[key] = b, C
             data[key] = [float(table[use, o].sum()), float(table[use, e].sum())]
         return Calibration(beta, cov, data)
@@ -1535,13 +1581,15 @@ class Pool:
             cands = gen_candidates(args.vec_size, args.tau_min, args.tau_max)
             params = {"tau_min": args.tau_min, "tau_max": args.tau_max}
             return Pool(Pool.arrays_for(cands), "classic", params)
+        if args.vec_size != 6:
+            sys.exit("--pool wide is for 6x6 only (pool.py uses S0 = 6 P^(1/6)): use --pool classic")
         import pool as poolmod
         params = dict(poolmod.DEFAULTS, npr=args.pool_primes, s0_max=args.pool_s0_max,
                       tau_min=args.tau_min, ratio_max=args.pool_ratio)
         if params["npr"] > len(PRIMES):
             sys.exit(f"--pool-primes {params['npr']}: msearch accepts {len(PRIMES)} primes")
         path = os.path.join(state, f"pool_{args.vec_size}.npz")
-        meta = json.dumps({"params": params, "version": _am().AMODEL_VERSION}, sort_keys=True)
+        meta = json.dumps({"params": params, "generator": poolmod.POOL_VERSION}, sort_keys=True)
         if os.path.exists(path):
             with np.load(path) as z:
                 if str(z["meta"]) == meta:
@@ -1580,8 +1628,8 @@ class ProfileStore:
         os.makedirs(self.dir, exist_ok=True)
         self.nf, self.ng = len(am.FIELDS), len(am.GRID_U)
         self.extra_path = os.path.join(self.dir, "extra.json")
-        tag = {"version": am.AMODEL_VERSION, "grid": [float(u) for u in am.GRID_U],
-               "fields": list(am.FIELDS)}
+        tag = {"version": am.PROFILE_VERSION, "hash": am.profile_hash(),
+               "grid": [float(u) for u in am.GRID_U], "fields": list(am.FIELDS)}
         self.extra = {}
         self.extra_dirty = False
         if os.path.exists(self.extra_path):
@@ -1760,6 +1808,18 @@ def unit_files(units_dir):
     return sorted(plain + gz)
 
 
+# keys that mark a sampled msearch record (r1-sampling research builds)
+SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
+
+
+def sum_cpu(r):
+    """CPU seconds of a msearch sum record: the process CPU time where
+    msearch reports it ("cpu"), else its wall times"""
+    if "cpu" in r:
+        return r["cpu"]
+    return r["time"] + r["setup_time"] + r.get("enum_time", 0.0)
+
+
 class Summary:
     """everything the scheduler needs from the msearch output files, without
     keeping the records: per file the bytes parsed; per touched P merged
@@ -1778,12 +1838,14 @@ class Summary:
 
     def reset(self):
         am = _am()
-        self.tag = {"version": am.AMODEL_VERSION, "grid": [float(u) for u in am.GRID_U]}
+        self.tag = {"version": am.AMODEL_VERSION, "hash": am.model_hash(),
+                    "grid": [float(u) for u in am.GRID_U],
+                    "cells": [list(NBAND_EDGES), list(XBAND_EDGES), NCELLS]}
         self.files = {}      # basename (without .gz) -> per-file stats
         self.cover = {}      # 'e_e_e' -> merged [[lo, hi], ...]
         self.perP = {}       # 'e_e_e' -> {"o": [sq, S, P, SP], "cpu", "nsums", "cells": {c: [9]}}
         self.time = {}       # 'engine:mode' -> {"n", "FF", "Fy", "yy"}
-        self.tband = {}      # 'engine:mode:band:W' -> [n, F0..F3, y]
+        self.tband = {}      # 'engine:mode:band:W' -> [n, sum of the NT features, sum y]
         self.nbias = {}      # band -> [n, sum, sumsq] of ln(nvecs_raw / N')
         self.lbias = {}      # band -> [n, sum, sumsq] of ln(labels / labels_obs)
         self.notable = []
@@ -1832,6 +1894,26 @@ class Summary:
                 t[c] += v
         return t
 
+    def cell_ee(self, groups=None):
+        """[NCELLS, 3]: per cell, the sum over P of the squared per-P
+        expectations E_sq, E_S, E_P (the dispersion of the cell's counts);
+        with groups (cell -> group index), the same per group, a P's cells
+        in one group summed first"""
+        np = _np()
+        ng = NCELLS if groups is None else int(max(groups)) + 1
+        out = np.zeros((ng, 3))
+        for st in self.perP.values():
+            acc = {}
+            for c, v in st["cells"].items():
+                g = c if groups is None else int(groups[c])
+                a = acc.setdefault(g, [0.0, 0.0, 0.0])
+                a[0] += v[2]
+                a[1] += v[4]
+                a[2] += v[6]
+            for g, a in acc.items():
+                out[g] += np.square(a)
+        return out
+
     def update(self, units_dir, store, extra_files=()):
         """parse the new complete lines of every unit file; returns the set
         of P keys that got new records"""
@@ -1870,6 +1952,11 @@ class Summary:
         if end <= 0:
             return set()
         recs = {}
+        # msearch writes a sum's squares before the sum's record: a square
+        # counts only once its sum record has arrived (a unit killed in the
+        # middle of a sum leaves orphan squares, which the rerun of that sum
+        # writes again); squares still waiting are kept in st["pending"]
+        pending = st.pop("pending", [])
         for line in data[:end].split(b"\n"):
             if not line:
                 continue
@@ -1882,8 +1969,29 @@ class Summary:
             if r.get("n") != self.n:
                 self.totals["other_n"] += 1
                 continue
+            if any(k in r for k in SAMPLED_KEYS):
+                # a sampled search (every k-th first row, research builds):
+                # its counts and times are not those of the sum
+                self.totals["sampled"] = self.totals.get("sampled", 0) + 1
+                continue
+            if r["type"] == "square":
+                pending.append(r)
+                continue
             P = norm_p(r["P"])
+            if r["type"] == "sum":
+                keep = []
+                for q in pending:
+                    if q["S"] == r["S"] and norm_p(q["P"]) == P:
+                        recs.setdefault(P, []).append(q)
+                    else:
+                        keep.append(q)
+                pending = keep
+            elif r["type"] == "done" and pending:
+                self.totals["orphans"] = self.totals.get("orphans", 0) + len(pending)
+                pending = []
             recs.setdefault(P, []).append(r)
+        if pending:
+            st["pending"] = pending
         st["off"] += end
         for P, rs in recs.items():
             self._ingest(P, rs, st, store)
@@ -1912,7 +2020,7 @@ class Summary:
             self.cover[key] = _merge([tuple(x) for x in self.cover.get(key, [])] + cov)
         ps = self.perP.setdefault(key, {"o": [0, 0, 0, 0], "cpu": 0.0, "nsums": 0, "cells": {}})
         for r in sums:
-            t = r["time"] + r["setup_time"] + r.get("enum_time", 0.0)
+            t = sum_cpu(r)
             ps["cpu"] += t
             ps["nsums"] += 1
             fst["sums"] += 1
@@ -1971,7 +2079,7 @@ class Summary:
         if good:
             a = at([r["S"] for r in good])
             esq = np.exp(a["lEs"]) * np.where(a["lNp"] >= LN12K, am.SQ12, 1.0)
-            F = am.time_features(a["lNp"], a["lLraw"])
+            F = am.time_features(a["lNp"], a["lLraw"], k)
             lab = am.labels_obs(a["lNp"], a["lLraw"], k)
             for i, r in enumerate(good):
                 if not a["inside"][i]:
@@ -1991,24 +2099,25 @@ class Summary:
                     b[0] += 1
                     b[1] += float(val)
                     b[2] += float(val) ** 2
-                t = r["time"] + r["setup_time"] + r.get("enum_time", 0.0)
+                t = sum_cpu(r)
                 if t < 0.01:
                     continue
                 y = math.log(t)
                 tk = f"{engine_of(r)}:{r.get('mode', 'plain')}"
-                ts = self.time.setdefault(tk, {"n": 0, "FF": [[0.0] * 4 for _ in range(4)],
-                                               "Fy": [0.0] * 4, "yy": 0.0})
+                nt = am.NT
+                ts = self.time.setdefault(tk, {"n": 0, "FF": [[0.0] * nt for _ in range(nt)],
+                                               "Fy": [0.0] * nt, "yy": 0.0})
                 f = F[i]
                 ts["n"] += 1
                 ts["FF"] = (np.array(ts["FF"]) + np.outer(f, f)).tolist()
                 ts["Fy"] = (np.array(ts["Fy"]) + f * y).tolist()
                 ts["yy"] += y * y
                 W = (max(r["labels"], 1) + 63) // 64
-                tb = self.tband.setdefault(f"{tk}:{band}:{W}", [0.0] * 6)
+                tb = self.tband.setdefault(f"{tk}:{band}:{W}", [0.0] * (nt + 2))
                 tb[0] += 1
-                for j in range(4):
+                for j in range(nt):
                     tb[1 + j] += float(f[j])
-                tb[5] += y
+                tb[nt + 1] += y
         if sqs:
             a = at([q["S"] for q in sqs])
             T = NUM_TRAVERSALS[self.n]
@@ -2104,10 +2213,16 @@ class AnalyticScorer:
     @tm.setter
     def tm(self, tm):
         self._tm = tm
+        am = _am()
+        np = _np()
         th = [float(v) for v in tm.th]
-        # ln t = c0 + th1 lN' + th2 lL + th3 max(0, lN' - ln 8000), + sd^2/2 for the mean
+        # ln t = c0 + th1 lN' + th2 lL + th3 max(0, lN' - ln 8000) + th4 [labels > 128]
+        #        + band offset, + sd^2/2 for the mean (am.time_features, written out)
         self._tc = (th[0] - th[1] * math.log(4000) - th[2] * math.log(150) + 0.5 * tm.sd ** 2,
-                    th[1], th[2], th[3])
+                    th[1], th[2], th[3], th[4], np.array(th[5:]))
+        # labels_obs > 128  <=>  lL + LAB1 lN' > _w3c - LAB2 (k - 6)
+        self._w3c = math.log(128) - am.LAB0 + am.LAB1 * math.log(4000)
+        self._tbe = np.log(np.array(am.TIME_BAND_EDGES))
 
     def prof(self, a):
         """per cand: S of the valid grid points, lN, lEs, lPm, L_raw there
@@ -2126,7 +2241,8 @@ class AnalyticScorer:
             A = A.astype(np.float64)
         kb = min(max(int(self.c.k[a]) - 5, 0), 3)
         out = (self.c.S0[a] * (1 + am.GRID_U[v]), A[0, v].copy(), A[1, v].copy(), A[2, v].copy(),
-               A[6, v].copy(), kb * 9 + int(self.c.rbin[a]) * 3, math.log(self.c.smin[a]))
+               A[6, v].copy(), kb * 9 + int(self.c.rbin[a]) * 3, math.log(self.c.smin[a]),
+               int(self.c.k[a]))
         if len(self._cache) > 100000:
             self._cache.clear()
         self._cache[a] = out
@@ -2157,7 +2273,7 @@ class AnalyticScorer:
         lem = (lEs + self.ln_gsq[cell] + math.log(am.SQ12) * (lNp >= LN12K)
                + np.minimum(lPm + self.ln_m[cell], am.LOG_PM_CAP)
                + (self.lnfsq[rows] + self.lnFm[rows])[:, None])
-        lt = np.log(self.tm.time(lNp, lL))
+        lt = np.log(self.tm.time(lNp, lL, self.c.k[rows, None]))
         return np.where(V, lem - lt, -np.inf)
 
     _NB = None
@@ -2168,13 +2284,13 @@ class AnalyticScorer:
         profile's logs in S; written for speed)"""
         np = _np()
         am = _am()
-        Sg, gN, gEs, gPm, gL, base, lsmin = self.prof(a)
+        Sg, gN, gEs, gPm, gL, base, lsmin, k = self.prof(a)
         S = np.asarray(S, float)
         if len(Sg) == 0:
             z = np.zeros(len(S))
             return z, z, z + am.SUM_OVERHEAD, z, z, np.zeros(len(S), int)
         if AnalyticScorer._NB is None:
-            AnalyticScorer._NB = (np.log(np.array(NBAND_EDGES, float)), np.array([0.1, 0.25]))
+            AnalyticScorer._NB = (np.log(np.array(NBAND_EDGES, float)), np.array(XBAND_EDGES))
         nbe, xbe = AnalyticScorer._NB
         lN = np.interp(S, Sg, gN)
         lNp = lN + am.NBIAS_SLOPE * np.maximum(0.0, lN - am.NBIAS_KNOT)
@@ -2190,8 +2306,10 @@ class AnalyticScorer:
         lo, hi = Sg[0] - 1e-9, Sg[-1] + 1e-9
         below = S < lo
         outside = below | (S > hi)
-        c0, c1, c2, c3 = self._tc
-        t = np.exp(c0 + c1 * lNp + c2 * lL + c3 * np.maximum(0.0, lNp - LN8K)) + am.SUM_OVERHEAD
+        c0, c1, c2, c3, c4, cb = self._tc
+        w3 = lL + am.LAB1 * lNp > self._w3c - am.LAB2 * (k - 6)
+        t = np.exp(c0 + c1 * lNp + c2 * lL + c3 * np.maximum(0.0, lNp - LN8K) + c4 * w3
+                   + cb[np.searchsorted(self._tbe, lNp, side="right")]) + am.SUM_OVERHEAD
         if outside.any():
             sq[outside] = 0.0
             t[below] = am.SUM_OVERHEAD
@@ -2277,7 +2395,9 @@ class AnalyticScorer:
         e_sq = float((v[:, 2] * np.exp(self.ln_gsq[cs])).sum())
         e_S = float((v[:, 4] * np.exp(self.ln_rS[cs])).sum())
         e_P = float((v[:, 6] * np.exp(self.ln_rP[cs])).sum())
-        o_sq, o_S, o_P = st["o"][0], st["o"][1], st["o"][2]
+        # observed counts over the same sums as the expectations (inside the
+        # model's grid, not truncated)
+        o_sq, o_S, o_P = float(v[:, 1].sum()), float(v[:, 3].sum()), float(v[:, 5].sum())
         f_sq, f_S, f_P = per_p_factors(o_sq, e_sq, o_S, e_S, o_P, e_P,
                                        getattr(self, "explore", EXPLORE_V2))
         # E[(f_S f_P)^2] under the gamma posteriors, relative to the prior's
@@ -2290,11 +2410,13 @@ class AnalyticScorer:
 
 def per_p_factors(o_sq, e_sq, o_S, e_S, o_P, e_P, explore=0.0):
     """gamma posterior means (+ explore x sd) of the per-P factors on
-    squares and on S and P traversals: (a + observed) / (a + expected)"""
+    squares and on S and P traversals: (a + observed) / (a + expected), the
+    squares tempered by their overdispersion (o / PHI_SUM, e / PHI_SUM)"""
     def post(o, e, a):
         mean = (a + o) / (a + e)
         return mean + explore * math.sqrt(a + o) / (a + e)
-    return post(o_sq, e_sq, A_SQ), post(o_S, e_S, A_TRAV), post(o_P, e_P, A_TRAV)
+    return (post(o_sq / PHI_SUM, e_sq / PHI_SUM, A_SQ), post(o_S, e_S, A_TRAV),
+            post(o_P, e_P, A_TRAV))
 
 
 class Planner:
@@ -2318,20 +2440,33 @@ class Planner:
             self.frontier[a] = self._walk(a, self.f0[a])
         self.heap = []
 
+    GAP_NEGLIGIBLE = 1e-3
+
     def _walk(self, a, f):
         """the first sum >= f not covered; a gap below the model's first
         valid point (no squares predicted there, e.g. between ceil(S0) and
-        the S_min another search started from) counts as covered"""
+        the S_min another search started from) counts as covered, and so
+        does a gap whose predicted density stays below GAP_NEGLIGIBLE x the
+        P's best (else its tiny score would hold back the P's later sums)"""
         cov = self.cover.get(a, ())
         if not cov:
             return f
         Sg = self.sc.prof(a)[0]
         zero_below = Sg[0] if len(Sg) else float("inf")
         for lo, hi in cov:
-            if lo > f and lo - 1 >= zero_below:
+            if lo > f and lo - 1 >= zero_below and not self._negligible(a, f, lo - 1):
                 break
             f = max(f, hi + 1)
         return f
+
+    def _negligible(self, a, lo, hi):
+        np = _np()
+        best = float(np.exp(self.sc.grid_density([a])[0].max()))
+        if not best > 0:
+            return True
+        S = np.unique(np.linspace(lo, hi, 9).round())
+        sq, m, t, _, _, _ = self.sc.eval_sums(a, S)
+        return float((m / t).max()) < self.GAP_NEGLIGIBLE * best
 
     def set_cover(self, a, intervals):
         self.cover[a] = [list(x) for x in intervals]
@@ -2529,7 +2664,7 @@ class SchedulerV2:
     def refit(self, save=True):
         """class factors, time model and per-P factors from the summary"""
         table = self.summary.cell_table()
-        self.calib = Calibration.fit(table)
+        self.calib = Calibration.fit(table, self.summary.cell_ee())
         self.time_models = fit_time_models(self.summary.time_stats())
         self.tm = current_time_model(self.time_models)
         explore = self.args.explore if self.args.explore is not None else EXPLORE_V2
@@ -2556,14 +2691,19 @@ class SchedulerV2:
         p.build(busy)
         return p
 
-    def command(self, u, out):
+    def command(self, u, out, check=True):
         nl, tl = self.scorer.limits(u, self.args.unit_time)
-        return [binary("msearch"), "--vec-size", str(self.n), "--min-sum", str(u.lo),
+        return [binary("msearch", check), "--vec-size", str(self.n), "--min-sum", str(u.lo),
                 "--max-sum", str(u.hi), "--time-limit", f"{tl:.0f}", "--node-limit", str(nl),
                 "--out", out, *map(str, u.P)]
 
     def unit_path(self, P, lo, hi):
-        seq = len(glob.glob(os.path.join(self.units, "*.jsonl*")))
+        # a running sequence number (globbing units/ on every launch is
+        # O(files); the time stamp keeps names unique across runs)
+        if not hasattr(self, "_seq"):
+            self._seq = len(self.summary.files)
+        seq = self._seq
+        self._seq += 1
         name = f"{int(time.time())}_{seq:06d}_{p_str(P, '_')}_{lo}_{hi}.jsonl"
         return os.path.join(self.units, name)
 
@@ -2572,6 +2712,7 @@ class SchedulerV2:
         plan = self.planner()
         deadline = time.time() + args.hours * 3600 if args.hours else None
         running = {}
+        running_t = {}
         units_done = 0
         stopping = False
         launched = open(os.path.join(self.dir, f"launched_{self.n}.jsonl"), "a")
@@ -2592,6 +2733,7 @@ class SchedulerV2:
                     if proc.poll() is None:
                         continue
                     a, path = running.pop(proc)
+                    running_t.pop(proc, None)
                     units_done += 1
                     self.summary.update_file(path, self.store)
                     key = self.cands.key(a)
@@ -2615,14 +2757,17 @@ class SchedulerV2:
                         break
                     time.sleep(0.5)
                     continue
+                exhausted = False
                 while len(running) < args.workers:
                     u = plan.pop()
                     if u is None:
+                        exhausted = True
                         break
                     path = self.unit_path(u.P, u.lo, u.hi)
                     fresh = self.cands.key(u.a) not in self.summary.perP
                     proc = subprocess.Popen(self.command(u, path), stdout=subprocess.DEVNULL)
                     running[proc] = (u.a, path)
+                    running_t[proc] = u.time
                     launched.write(json.dumps({
                         "file": os.path.basename(path), "P": list(u.P), "lo": u.lo, "hi": u.hi,
                         "time": u.time, "squares": u.squares, "magic": u.magic, "score": u.score,
@@ -2630,7 +2775,13 @@ class SchedulerV2:
                     launched.flush()
                     log(f"start P={p_str(u.P)} S={u.lo}..{u.hi} (predicted {u.time:.0f}s, "
                         f"{u.squares:.1f} squares, {u.score * 3.15e7:.3g} magic/CPU-year)")
-                time.sleep(0.5)
+                if exhausted and not running:
+                    log("no more units to run (every candidate is covered or has no "
+                        "predicted magic squares)")
+                    break
+                # poll often while the units are short (the top of the ranking
+                # has units of a few seconds)
+                time.sleep(0.1 if any(t < 30 for t in running_t.values()) else 0.5)
         except KeyboardInterrupt:
             for proc in running:
                 proc.terminate()
@@ -2673,13 +2824,16 @@ def describe_calib(calib, tm):
             + ", ".join(f"{v:.3f}" for v in tm.th) + f"] sd {tm.sd:.3f} ({tm.n} sums)")
 
 
-def _poisson_interval(o, e, z=1.645):
-    """obs/pred with an approximate 90% interval"""
+def _poisson_interval(o, e, z=1.645, phi=1.0):
+    """obs/pred with an approximate 90% interval (quasi-Poisson with
+    dispersion phi: the Poisson interval of o / phi, scaled back)"""
     if e <= 0:
         return float("nan"), float("nan"), float("nan")
-    lo = max(0.0, o - z * math.sqrt(o) + z * z / 4) if o > 0 else 0.0
-    hi = o + z * math.sqrt(o + 1) + z * z / 2
-    return o / e, lo / e, hi / e
+    phi = max(float(phi), 1e-9)
+    o2 = o / phi
+    lo = max(0.0, o2 - z * math.sqrt(o2) + z * z / 4) if o2 > 0 else 0.0
+    hi = o2 + z * math.sqrt(o2 + 1) + z * z / 2
+    return o / e, phi * lo / e, phi * hi / e
 
 
 def report_v2(sch, top=20, out=None):
@@ -2697,8 +2851,9 @@ def report_v2(sch, top=20, out=None):
     pr(f"traversals: S {T['trav_S']}, P {T['trav_P']}, SP {T['trav_SP']}")
     pr(f"(sums outside the model's grid: {T['outside']}, truncated: {T['truncated']})")
     tab = s.cell_table()
-    pr("\ncalibration (obs/pred with 90% intervals; pred = analytic model x SQ12 for squares, "
-       "720 p for traversals, before the learned class factors):")
+    pr("\ncalibration (obs/pred with 90% quasi-Poisson intervals, dispersion from per-P "
+       "factors; pred = analytic model x SQ12 for squares, 720 p for traversals, before the "
+       "learned class factors):")
     groups = (("N' band", 0, NBAND_NAMES), ("k", 1, KBAND_NAMES), ("ratio", 2, RBAND_NAMES),
               ("x band", 3, XBAND_NAMES))
     parts = np.array([cell_parts(c) for c in range(NCELLS)])
@@ -2706,14 +2861,16 @@ def report_v2(sch, top=20, out=None):
         pr(f"  by {gname}:")
         pr(f"    {'':10} {'sums':>8} {'squares obs/pred':>28} {'S trav obs/pred':>28} "
            f"{'P trav obs/pred':>28}")
+        ee = s.cell_ee(parts[:, gi])
         for b, lab in enumerate(labels):
             sel = parts[:, gi] == b
             row = tab[sel].sum(0)
             if row[0] == 0 and row[3] == 0:
                 continue
             cols = []
-            for o, e in ((1, 2), (3, 4), (5, 6)):
-                r, lo, hi = _poisson_interval(row[o], row[e])
+            for j, (key, o, e) in enumerate((("sq", 1, 2), ("S", 3, 4), ("P", 5, 6))):
+                phi = dispersion(row[e], ee[b, j], key) if b < len(ee) else 1.0
+                r, lo, hi = _poisson_interval(row[o], row[e], phi=float(phi))
                 cols.append(f"{row[o]:7.0f}/{row[e]:8.1f} {r:4.2f} [{lo:4.2f},{hi:4.2f}]")
             pr(f"    {lab:10} {row[0]:8.0f} " + " ".join(cols))
     tot = tab.sum(0)
@@ -2733,7 +2890,8 @@ def report_v2(sch, top=20, out=None):
     for key, v in s.tband.items():
         eng, mode, band, W = key.split(":")
         tm = sch.time_models.get(f"{eng}:{mode}", sch.tm)
-        resid = (v[5] - np.dot(v[1:5], tm.th)) / max(v[0], 1)
+        nt = len(tm.th)
+        resid = (v[nt + 1] - np.dot(v[1:nt + 1], tm.th)) / max(v[0], 1)
         rows.setdefault((int(eng), mode), []).append((NBAND_NAMES.index(band), int(W), v[0], resid))
     for (eng, mode), rs in sorted(rows.items()):
         pr(f"  engine {eng} {mode}: " + ", ".join(
@@ -2771,15 +2929,16 @@ def report_launched(sch, pr):
                 rows.append((r, st))
     if not rows:
         return
-    pr("\nlaunched units (complete only): observed / predicted squares")
+    pr("\nlaunched units (complete only): observed / predicted squares (90% quasi-Poisson)")
     cut = sorted(r["score"] for r, _ in rows)[int(0.9 * (len(rows) - 1))]
     for name, sel in (("fresh P", lambda r: r["fresh"]), ("repeat", lambda r: not r["fresh"])):
         for scope, f2 in (("all", lambda r: True), ("top decile", lambda r: r["score"] >= cut)):
             o = sum(st["squares"] for r, st in rows if sel(r) and f2(r))
             e = sum(r["squares"] for r, st in rows if sel(r) and f2(r))
             nu = sum(1 for r, st in rows if sel(r) and f2(r))
+            ee = sum(r["squares"] ** 2 for r, st in rows if sel(r) and f2(r))
             if nu:
-                ratio, lo, hi = _poisson_interval(o, e)
+                ratio, lo, hi = _poisson_interval(o, e, phi=float(dispersion(e, ee, "sq")))
                 flag = "  <-- below 0.8" if name == "fresh P" and scope == "all" and ratio < 0.8 \
                     and hi < 1.0 else ""
                 pr(f"  {name:8} {scope:10} {nu:6} units {o:8.0f} / {e:9.1f} = {ratio:.2f} "
@@ -2812,7 +2971,7 @@ def v2_emit(args):
         units_dir = os.path.relpath(units_dir, ROOT)  # portable plan
     for i, u in enumerate(sch.simulate(max_units=args.units)):
         out = os.path.join(units_dir, f"plan{i:06d}_{p_str(u.P, '_')}_{u.lo}_{u.hi}.jsonl")
-        print(" ".join(sch.command(u, out)[1:]))
+        print(" ".join(sch.command(u, out, check=False)[1:]))
 
 
 def v2_forecast(args):
@@ -2903,11 +3062,16 @@ def v2_forecast(args):
         f = np.exp(lg - lg0 + lm - lm0)
         vals.append(float((Ecell * f).sum()) / frac
                     * math.exp(rng.normal(0, 0.2) + rng.normal(0, 0.2)))
+    E = magic / frac
+    print(f"E({hours / frac / yr:.3g} CPU-years) = {E:.3g} at the posterior-mean log factors")
     if vals:
         q = np.percentile(vals, [5, 50, 95])
-        print(f"E({hours / frac / yr:.3g} CPU-years) = {magic / frac:.3g}; band from {len(vals)} "
-              f"draws (class-factor posterior x lognormal(0, 0.2) for PAIR and for SP+SP): "
-              f"5% {q[0]:.3g}, median {q[1]:.3g}, 95% {q[2]:.3g}")
+        print(f"  band from {len(vals)} draws (class-factor posterior x lognormal(0, 0.2) for PAIR "
+              f"and for SP+SP; the plan is not re-optimised per draw): 5% {q[0]:.3g}, median "
+              f"{q[1]:.3g}, mean {np.mean(vals):.3g}, 95% {q[2]:.3g} (the draws' median is above "
+              f"the point: the factors vary per cell and the sum of lognormals is skewed)")
+    print(f"  after the selection discount (x{SELECTION_DISCOUNT}: units v2 ranks highest came in "
+          f"below prediction on held-out data): E = {SELECTION_DISCOUNT * E:.3g}")
     print(f"predicted CPU-years per magic square at this pace: {hours / magic / yr:.3g}")
 
 
@@ -3014,9 +3178,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def model_opts(p):
-        p.add_argument("--model", choices=("analytic", "regression"), default="analytic",
-                       help="analytic: the existence study's model over a wide pool (v2); "
-                            "regression: the fitted Poisson regression of v1")
+        p.add_argument("--model", choices=("analytic", "regression"), default=None,
+                       help="analytic: the existence study's model over a wide pool (v2, "
+                            "default for --vec-size 6); regression: the fitted Poisson "
+                            "regression of v1 (default for other sizes)")
         p.add_argument("--pool", choices=("wide", "classic"), default=None,
                        help="candidate P: every exponent assignment within --pool-ratio of "
                             "its sorted one (wide, default with --model analytic) or "
@@ -3042,7 +3207,8 @@ def main():
 
     def common(p):
         model_opts(p)
-        p.add_argument("--workers", type=int, default=os.cpu_count() or 1)
+        p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
+                       help="msearch processes at a time (default: cores - 1)")
         p.add_argument("--unit-time", type=float, default=120,
                        help="target CPU-seconds per unit of work")
         p.add_argument("--unit-drop", type=float, default=UNIT_DROP,
@@ -3130,6 +3296,8 @@ def main():
     p.set_defaults(func=cmd_import_legacy)
 
     args = ap.parse_args()
+    if getattr(args, "model", "") is None:
+        args.model = "analytic" if args.vec_size == 6 else "regression"
     UNIT_DROP = getattr(args, "unit_drop", UNIT_DROP)
     if hasattr(args, "pool"):
         if args.pool is None:

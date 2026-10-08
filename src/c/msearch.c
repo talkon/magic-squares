@@ -24,8 +24,14 @@
  * killed run keeps all completed sums):
  *   {"type":"sum","n":6,"P":[13,6,3,2],"Pval":...,"S":506,"nvecs":831,
  *    "nvecs_raw":831,"labels":77,"nodes":890845,"squares":0,
- *    "time":0.23,"enum_time":0.001,"truncated":0}
- * and one record per semi-magic square found, preceding its sum record:
+ *    "time":0.23,"setup_time":..,"enum_time":0.001,"cpu":0.24,"truncated":0,
+ *    "engine":2}
+ * (time, setup_time, enum_time: wall seconds of the search, of the reduction
+ * and setup, and this sum's share of the enumeration; cpu: the process CPU
+ * seconds of all three, which the scheduler fits its time law to) and one
+ * record per semi-magic square found, preceding its sum record (a run killed
+ * in the middle of a sum leaves squares without a sum record: the scheduler
+ * counts a square only once its sum record follows):
  *   {"type":"square","n":6,"P":[...],"S":...,"s_count":..,"p_count":..,
  *    "sp_count":..,"best_score":..,"grid":[[...],...]}
  * where grid has the best pair of diagonals on its main diagonals. A final
@@ -39,6 +45,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "enumerate.h"
 #include "arrange.h"
@@ -55,6 +62,15 @@ static double wall_time(void) {
   struct timeval t;
   gettimeofday(&t, NULL);
   return (double)t.tv_sec + 1e-6 * (double)t.tv_usec;
+}
+
+/* CPU time of this (single-threaded) process: the "cpu" field of a sum
+ * record, which the scheduler learns its time law from (wall time includes
+ * waiting on a loaded machine) */
+static double cpu_time(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
 }
 
 typedef struct {
@@ -274,12 +290,13 @@ int main(int argc, char *argv[]) {
       if (sum_list[list_pos] > hi)
         continue;
     }
-    double te = wall_time();
+    double te = wall_time(), ce = cpu_time();
     vec_list_t all, red;
     vec_list_init(&all, n);
     vec_list_init(&red, n);
     enum_vectors_grouped(&p, n, lo, hi, &all);
     double enum_time = wall_time() - te;
+    double enum_cpu = cpu_time() - ce;
     size_t i = 0;
     for (uint64_t S = lo; S <= hi && !stop; S++) {
       last_sum = S;
@@ -296,7 +313,7 @@ int main(int argc, char *argv[]) {
         if (!found)
           continue;
       }
-      double tr = wall_time();
+      double tr = wall_time(), cr = cpu_time();
       red.count = 0;
       reduce_vectors(&all, start_i, raw, &red, strong);
       double reduce_time = wall_time() - tr;
@@ -308,6 +325,8 @@ int main(int argc, char *argv[]) {
       search_stats_t st =
           search_vectors(&red, 0, red.count, &opts, square_found, &ctx);
       total_nodes += st.nodes;
+      double share = (double)raw / (all.count ? all.count : 1);
+      double cpu = cpu_time() - cr + enum_cpu * share;
       if (legacy) {
         fprintf(out, "num searched: %lu\n", (unsigned long)st.nodes);
       } else {
@@ -317,13 +336,12 @@ int main(int argc, char *argv[]) {
                 "{\"type\":\"sum\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,\"S\":%lu,"
                 "\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%d,\"nodes\":%lu,"
                 "\"squares\":%lu,\"time\":%.6f,\"setup_time\":%.6f,"
-                "\"enum_time\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
+                "\"enum_time\":%.6f,\"cpu\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
                 n, pstr, (unsigned long)pexp_value(&p), (unsigned long)S,
                 red.count, raw, st.num_labels, (unsigned long)st.nodes,
                 (unsigned long)st.squares, st.seconds,
                 st.setup_seconds + reduce_time,
-                enum_time * (double)raw / (all.count ? all.count : 1),
-                st.truncated, ENGINE_VERSION);
+                enum_time * share, cpu, st.truncated, ENGINE_VERSION);
       }
       fflush(out);
       if (total_node_limit && total_nodes >= total_node_limit)

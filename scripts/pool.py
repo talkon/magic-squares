@@ -28,6 +28,10 @@ import time
 import numpy as np
 
 PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47)
+# bump when gen_pool's output changes for the same parameters (the
+# scheduler's cached pool_6.npz is keyed by it); the pool is for n = 6 only
+# (S0 = 6 P^(1/6) below)
+POOL_VERSION = 1
 LP = [math.log(p) for p in PRIMES]
 
 DEFAULTS = dict(npr=10, s0_max=6000.0, s0_min=0.0, tau_min=1000, k_min=4, k_max=10,
