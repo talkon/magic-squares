@@ -20,6 +20,7 @@ bin/msearch --min-sum 320 --max-sum 340 10 4 3 2    # P = 2^10 3^4 5^3 7^2
 
 # adaptive search over (P, S), using all cores, resumable (state in data/sched)
 python3 scripts/scheduler.py import-legacy stats/stats_short.txt
+python3 scripts/scheduler.py profile           # once: the model of 378k P (~1 CPU-hour, niced)
 python3 scripts/scheduler.py plan              # what it would run next, and why
 python3 scripts/scheduler.py forecast --hours 1000
 python3 scripts/scheduler.py run --hours 24
@@ -37,7 +38,7 @@ scripts/test_calibrate.py` for the calibration ladder).
 | `bin/msearch` | enumerate + arrange + diagonal check for one P and a range of sums, in one process, writing JSON lines as it goes (or the legacy text format) |
 | `bin/bench` | arrangement benchmark on fixed (P, S) instances, checking the squares found against expected counts and hashes |
 | `bin/enumerate` | write enumeration files (drop-in replacement for `enumeration.cpp`), vector counts per sum, or the smallest sum |
-| `scripts/scheduler.py` | chooses which (P, S) to search next to maximize the expected number of magic squares per CPU-second, runs `msearch` workers, refits its model as results come in |
+| `scripts/scheduler.py` | chooses which (P, S) to search next to maximize the expected number of magic squares per CPU-second, runs `msearch` workers, refits its model as results come in (model: `scripts/amodel.py`, candidate pool: `scripts/pool.py`) |
 | `submit-sc-plan.sh` | runs a static plan from `scheduler.py emit` on SuperCloud with LLsub |
 | `bin/arrangement_{5,6,7}`, `bin/enumeration`, `src/py/`, `run.sh`, `submit-sc*.sh` | the original pipeline (still works) |
 
@@ -71,18 +72,26 @@ faster near the smallest possible sum S_min(P) (about 600 to 10,000 per
 CPU-hour depending on P, versus ~80 per hour on average in the first search),
 and squares with a smaller S are also more likely to be magic. The scheduler models
 
-    magic squares per CPU-second = (semi-magic squares per CPU-second)
-                                   * 5400 * (rho * p_S * p_P)^2
+    magic squares per CPU-second = (semi-magic squares per sum) / (CPU-seconds per sum)
+                                   * P(a semi-magic square is magic)
 
-where p_S, p_P are the probabilities that a traversal (a possible diagonal)
-has the magic sum / product and rho ~ 2 corrects for these not being
-independent. The first factor is a Poisson regression on the number of
-vectors N, S / S_min, and the divisor structure of P, fitted to our runs and to
-the per-P totals of the first search; p_S and p_P are fitted to the traversal
-counts of the squares found. Each P also gets its own correction factors
-(empirical Bayes) as its results come in, with an optimism bonus to explore
-new P. Each P is searched in increasing order of S; the scheduler always runs
-the next chunk of sums of the P with the best predicted yield.
+per (P, S) with the analytic model of research/existence.md
+(`scripts/amodel.py`: a max-entropy local limit theorem with exact lattice
+factors and ~3 fitted constants, which predicts the number of vectors N, the
+squares per sum and P(magic | square) = 5400 kappa p_pair, and was tested on
+held-out data up to N = 45k), times the review corrections of that study, and
+a time law in N and the predicted number of distinct entries. The candidates
+are every exponent assignment of P over 2..29 within a small factor of the
+sorted one (`scripts/pool.py`, 377,908 P: most of the yield is in exponents
+that are not non-increasing, e.g. 13 7 4 3 0 0 1 1). The model of each P is
+computed once on 24 sums; then a lazy greedy planner always runs the next
+chunk of sums of the P with the best predicted yield, searching each P in
+increasing order of S from ceil(6 P^(1/6)). As results come in it refits
+class factors (squares, S and P traversals, by N band, number of primes,
+assignment ratio and S / S_min), the time law, and per-P factors (empirical
+Bayes); `report` compares observed and predicted counts. The previous
+scheduler (a Poisson regression fitted to our runs, over non-increasing
+exponents) is still available as `--model regression --pool classic`.
 
 ### Running on a cluster (SuperCloud)
 

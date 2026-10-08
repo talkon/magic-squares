@@ -539,7 +539,7 @@ def test_no_enumerate():
                                    tau_min=1000, tau_max=12000, explore=None, profile_workers=1,
                                    no_legacy=False, workers=1, unit_time=60.0, unit_drop=0.5,
                                    node_limit=0, active=300, only=SMALL, top=5, units=3,
-                                   hours=0.5, sample=1.0, seed=1, draws=5)
+                                   hours=0.5, sample=1.0, seed=1, draws=5, shipped=False)
             import contextlib
             import io
             buf = io.StringIO()
