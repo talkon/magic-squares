@@ -119,9 +119,9 @@ runs, October 2026):
 
 | | nodes | -march=native | -march=cascadelake |
 | --- | ---: | ---: | ---: |
-| `bench/quick.txt` (7 instances, N = 450-1700) | 1.77M | 0.27 s | 0.29 s |
-| `bench/full.txt` (9 instances, N = 330-2240) | 14.96M | 3.29 s | 3.47 s |
-| `bench/prod.txt` (9 production-like sums, N = 1491-2994) | 50.38M | 13.4 s | 14.2 s |
+| `bench/quick.txt` (7 instances, N = 450-1700) | 1.77M | 0.27 s | 0.30 s |
+| `bench/full.txt` (9 instances, N = 330-2240) | 14.96M | 3.27 s | 3.52 s |
+| `bench/prod.txt` (9 production-like sums, N = 1491-2994) | 50.38M | 14.0 s | 14.8 s |
 
 The round-2 micro-optimizations took 8-9% off the native build and 12-15%
 off the cascadelake build (from 0.30 / 3.65 / 14.6 s and 0.34 / 4.02 /
@@ -129,6 +129,66 @@ off the cascadelake build (from 0.30 / 3.65 / 14.6 s and 0.34 / 4.02 /
 legacy `arrangement_6` took 3.56 s on `quick.txt` and 63.1 s on `full.txt`
 (earlier measurement, Intel Xeon with AVX-512), visiting 31.7M and 598M
 nodes.
+
+The current code (cx/integrated) visits the same nodes and finds the same
+squares on all three files. Its times above were measured on October 8
+alternating with fdb77fc's, built the same way, on a shared machine (min of
+3 rounds: fdb77fc 0.27 / 3.39 / 13.8 s native, 0.29 / 3.63 / 14.3 s
+cascadelake; the mean over the rounds differs by less than 1% on prod):
+the benchmark sums have at most 121 labels, below everything the
+integration changed, except the pretest (0-3% here). Its gains are at
+large N.
+
+### Large sums
+
+The benchmark sums have at most 2,994 vectors and 121 labels. The sums that
+matter most for a first magic square have N ~ 3k-32k vectors (see Status),
+where three changes of October 2026 (branch cx/integrated; research/ideas.md,
+"Carried bitsets up to 512 labels", "The pretest of the deep children",
+"Diagonal-first search in msearch" and "Measurements on the integrated
+binary") speed the search up:
+
+* the plain search runs each first row with only the 64-bit words of labels
+  it needs, carries its bitsets up to 512 labels instead of switching to
+  N x N matrices above 256, and pretests the deep children;
+* `msearch --diag-first` searches, for every vector d of the sum, the
+  squares that have d as a diagonal (the semi-magic search on the vectors
+  that meet d once): it finds every magic square (twice) without
+  enumerating the semi-magic squares, so it is used only where it is
+  cheaper, N >= 5000 (`--diag-first-min-n`).
+
+CPU seconds per sum (paired, r1- and d-sampled where large; relSE <= 8%;
+the previous code is fdb77fc):
+
+| P / S | N | labels | previous plain | plain | d-first | plain speedup | best speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 6 4 2 1 1 / 838 | 1,986 | 104 | 1.01 | 1.01 | 1.65 | 1.0 | 1.0 |
+| 12 6 3 2 1 0 1 / 900 | 2,994 | 121 | 5.9 | 5.8 | 5.9 | 1.0 | 1.0 |
+| 13 7 4 3 1 1 / 1900 | 4,111 | 137 | 35.5 | 23.5 | 29.4 | 1.5 | 1.5 |
+| 12 6 3 2 1 1 / 988 | 6,671 | 159 | 260 | 231 | 149 | 1.1 | 1.7 |
+| 13 7 4 3 1 1 / 2000 | 7,593 | 168 | 511 | 441 | 251 | 1.2 | 2.0 |
+| 12 6 3 2 1 1 / 1200 | 11,697 | 199 | 2,023 | 1,575 | 870 | 1.3 | 2.3 |
+| 13 7 4 3 1 1 / 2200 | 15,199 | 211 | 11,316 | 8,223 | 3,432 | 1.4 | 3.3 |
+| 11 6 4 3 2 1 / 2174 | 16,424 | 220 | 11,503 | 8,685 | 4,056 | 1.3 | 2.8 |
+| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 252 | 14,460 | 12,623 | 5,407 | 1.1 | 2.7 |
+| 9 6 4 3 1 1 1 1 / 2700 | 20,896 | 259 | 53,077 | 13,835 | 4,457 | 3.8 | 11.9 |
+| 13 7 4 3 1 1 / 2400 | 22,992 | 245 | 47,400 | 40,389 | 11,785 | 1.2 | 4.0 |
+| 13 7 4 3 1 1 / 2500 | 26,585 | 260 | 205,729 | 54,280 | 23,366 | 3.8 | 8.8 |
+| 13 7 4 3 1 1 / 2650 | 31,743 | 279 | 467,238 | 121,918 | 39,917 | 3.8 | 11.7 |
+
+* The plain search is unchanged up to 128 labels, 1.1-1.5x faster at
+  129-256 labels and 3.8x faster above 256.
+* d-first costs 1.25x the plain search at N = 4.1k, 0.57-0.65x at 6.7-7.6k,
+  0.42-0.55x at 11.7-21k and 0.29-0.43x at 21-32k. It crosses over at
+  N ~ 4-5k (3.8k pooled over the 13 sums, 4.9k along 13 7 4 3 1 1; it
+  depends on P), hence the threshold of 5000, which also keeps the plain
+  search's semi-magic squares, which the models are fitted to, below it.
+* Time per sum, t = a (N / 4000)^b CPU-s fitted at N = 4.1-31.7k: the
+  previous plain search a = 24.8, b = 4.5 (t(32k) ~ 280k CPU-s); now, the
+  better of the two modes, a = 23, b = 3.5 (t(32k) ~ 35k).
+* Scheduler v2 runs only the plain search so far; it reads d-first output
+  but does not launch d-first units (research/ideas.md lists this as the
+  next step).
 
 ## Status (October 2026)
 
@@ -203,9 +263,15 @@ sums (N = 451-31,743):
 | df352df (new arrange.c) | 1/2.5-1/3 | 0.080 | 0.38 |
 | a72cef3 (+ support filter) | 1/6.5 | 0.11 | 0.48 |
 | 2d2bc6d (+ carried bitsets) | 1/11-1/13 | 0.14 | 0.58 |
-| fdb77fc (current) | 1/17-1/18 | 0.16 | 0.64 |
+| fdb77fc | 1/17-1/18 | 0.16 | 0.64 |
 
-The 17-18x is measured speed; E at a fixed budget grows only ~3x because
+The current code (cx/integrated, msearch engine 3: the "Large sums" table
+above) has not been put through this model yet; it is 1.1-3.8x faster than
+fdb77fc at N >= 4k with the plain search and 1.5-12x with the better of
+the plain and d-first modes, so its row would be higher, mostly at large N. The
+forecasts above also predate it (and scheduler v2's time law has to learn
+engine 3's level first): re-run `forecast` after the engine bump. The
+17-18x is measured speed; E at a fixed budget grows only ~3x because
 E(C) rises slowly with C. Search strategy multiplies with it: the first
 search's expected yield (1.1 CPU-years with the legacy code) is reached in
 about 6.5 CPU-hours with the current code and an ideal choice of (P, S).

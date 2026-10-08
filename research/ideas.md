@@ -1535,7 +1535,8 @@ CPU used: ~1.3 CPU-hours (~10 minutes of it a runaway mutant).
 ## Diagonal-first search in msearch (October 2026, branch cx/dfirst)
 
 `msearch --diag-first` (src/c/dfirst.c) searches the sums with at least
-`--diag-first-min-n` vectors (after reduction; default 3000) diagonal-first,
+`--diag-first-min-n` vectors (after reduction; default 3000 here, 5000 since
+the integration) diagonal-first,
 as `bin/dsearch` did (see "Diagonal-first search (second look)" above): for
 every vector d of the sum's unreduced list, the semi-magic search on
 V_d = {v in the reduced list : |v & d| = 1} finds the squares with d as an
@@ -1562,7 +1563,8 @@ adds an r1-sampled plain search for the models.
 * The r1 sampling of cx/profile is now in search_opts_t (`r1_stride`,
   `r1_offset`, and stratified `r1_nstrata` / `r1_sstride` / `r1_soffset`,
   plus a per-r1 log). msearch exposes it as `--r1-stride`, `--r1-strata`,
-  `--r1-log` and the `SAMPLE_*` environment variables, and bench reads the
+  `--r1-log` and the `SAMPLE_*` environment variables (msearch no longer
+  reads those since the integration's fixes), and bench reads the
   environment variables. A sampled plain sum writes a "csum" record with
   `est_squares`, `se_squares`, `est_time` and `se_time`. The default root
   loop is unchanged: the same nodes and hashes on quick/full/prod, and on
@@ -1670,10 +1672,13 @@ Caveats:
 * The search improvements in progress elsewhere (wider carried path,
   cheaper (2,2) children) speed up the plain search and the V_d searches
   alike, but not necessarily by the same factor: V_d's lists are ~6x
-  shorter. The ratios should be re-measured on the integrated binary.
+  shorter. The ratios should be re-measured on the integrated binary
+  (done: they did not speed up alike, see "Measurements on the integrated
+  binary" below).
 * d-first sums write "dsquare" / "dchunk" / "dsum" records, which the
   scheduler does not read yet. It would need to mark them covered and to fit
-  its squares model to the calibration stream.
+  its squares model to the calibration stream. (Both schedulers read them
+  since the integration, and keep them out of their fits.)
 
 Tried on top of the new root, not kept:
 
@@ -1713,7 +1718,8 @@ stratified r1 sampling (dfirst, in search_opts_t), the top-label root
   the widths (checked: the same r1, strata, strides, squares and nodes per
   r1 as cx/dfirst's binary, with and without the pretest);
 * `-DR1_SAMPLE` is gone: its stride / offset / log are the opts sampling
-  (`SAMPLE_*` in bench and msearch), and its `SAMPLE_LIST` became
+  (`SAMPLE_*` in bench, and at first in msearch: see the second
+  verification below), and its `SAMPLE_LIST` became
   `opts.r1_list` (bench reads `SAMPLE_LIST`; the estimates are then the
   sampled totals, no standard error). The r1 log keeps cx/dfirst's six
   columns and adds wide's largest label and width, plus wide's "# run"
@@ -1758,11 +1764,9 @@ faster at S = 1900 (36 -> 24 s) and 1.25x at 1950 (187 -> 150 s): with
 but the first few at 2. Interpolated, the ratio crosses 1 at N ~ 4,960, so
 `--diag-first-min-n` defaults to 5000 (was 3000), which also keeps the
 plain search's semi-magic squares, for the models, for the sums below.
-At N >= 11k the ratios of cx/dfirst (0.27-0.37) still need re-measuring
-on this binary: wide speeds up the plain search there by 1.0-1.3x where
-the heavy r1 need fewer words (2.8x above 256 labels), and the V_d
-searches by 2.2x above 256 labels; the pretest speeds up the plain search
-by 1.1-1.17x and V_d by ~1.0x.
+The ratios at N >= 11k were re-measured on this binary after the
+verification: see "Measurements on the integrated binary" below (5000
+stays the default).
 
 Gates (before the rebase): `ctest -R fast_` (40 tests) passes;
 `fuzz_arrange` on fresh seeds (52000000-52700199): 500 default, 500 mode 7,
@@ -1811,3 +1815,194 @@ budget), 500 mode 7, 500 `--dfirst` (every variant, pt_* included), 200
 mode 7, 200 portable: 0 fails; bench quick / full / prod: 1,770,779 /
 14,958,507 / 50,375,738 nodes, every instance's nodes, squares and hash
 equal to fdb77fc's bench.
+
+### Measurements on the integrated binary
+
+Paired measurements of the plain search of fdb77fc (base) and of this
+binary (new), and of this binary's d-first search (process CPU seconds per
+sum; both CMake Release, `-O3 -march=native` with LTO; fdb77fc's bench with
+cx/wide's R1_SAMPLE patch):
+
+* plain: bench on identical r1 lists in both builds, 7 strata at r1-index
+  fractions 0, 1/16, 1/8, 1/4, 3/8, 1/2, 3/4, 1 with random offsets; base
+  runs a stratified subset of new's sample; runs alternate (base, new,
+  d-first, base, new, d-first), per-r1 min of 2; sums of <= 1,200 CPU-s run
+  in full, twice;
+* d-first: `msearch --diag-first --diag-first-min-n 0 --d-stride k` with an
+  explicit offset (113-1,370 d per sum), min of 2 per d where repeated;
+* on identical lists base and new have the same squares and the same nodes
+  per r1 up to 252 labels (above 256, base is on the matrices: 2.7-4.5x
+  the nodes); relSE <= 8% (plain), <= 6% (d-first); load 3-6.6 from another
+  workflow; ~63 CPU-min.
+
+| P / S | N | labels | base plain | new plain | new d-first | new / base | d-first / base | d-first / new |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 6 4 2 1 1 / 838 | 1,986 | 104 | 1.01 | 1.01 | 1.65 | 1.007 | 1.6 | 1.60 |
+| 12 6 3 2 1 0 1 / 900 | 2,994 | 121 | 5.9 | 5.8 | 5.9 | 0.984 | 0.97 | 0.99 |
+| 13 7 4 3 1 1 / 1900 | 4,111 | 137 | 35.5 | 23.5 | 29.4 | 0.663 | 0.83 | 1.25 |
+| 12 6 3 2 1 1 / 988 | 6,671 | 159 | 260 | 231 | 149 | 0.892 | 0.575 | 0.645 |
+| 13 7 4 3 1 1 / 2000 | 7,593 | 168 | 511 | 441 | 251 | 0.863 | 0.491 | 0.569 |
+| 12 6 3 2 1 1 / 1200 | 11,697 | 199 | 2,023 | 1,575 | 870 | 0.778 | 0.430 | 0.552 |
+| 13 7 4 3 1 1 / 2200 | 15,199 | 211 | 11,316 | 8,223 | 3,432 | 0.727 | 0.303 | 0.417 |
+| 11 6 4 3 2 1 / 2174 | 16,424 | 220 | 11,503 | 8,685 | 4,056 | 0.755 | 0.353 | 0.467 |
+| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 252 | 14,460 | 12,623 | 5,407 | 0.873 | 0.374 | 0.428 |
+| 9 6 4 3 1 1 1 1 / 2700 | 20,896 | 259 | 53,077 | 13,835 | 4,457 | 0.261 | 0.084 | 0.322 |
+| 13 7 4 3 1 1 / 2400 | 22,992 | 245 | 47,400 | 40,389 | 11,785 | 0.852 | 0.249 | 0.292 |
+| 13 7 4 3 1 1 / 2500 | 26,585 | 260 | 205,729 | 54,280 | 23,366 | 0.264 | 0.114 | 0.430 |
+| 13 7 4 3 1 1 / 2650 | 31,743 | 279 | 467,238 | 121,918 | 39,917 | 0.261 | 0.085 | 0.327 |
+
+* **Plain search.** Unchanged up to 128 labels (1.007, 0.984). Above, by the
+  width each r1 runs at: an r1 at the same width 0.84-0.96x (the pretest),
+  one word fewer 0.66-0.81x (per-r1 widths; at 137 labels nearly every r1
+  drops from 3 words to 2, hence 0.663), and the matrices replaced by the
+  carried path above 256 labels 0.26x. Per sum 0.73-0.89x at N 7.6-23k
+  with <= 256 labels, 0.26x above.
+* **d-first did not speed up alike.** Its CPU per sum is 0.86-1.12x
+  cx/dfirst's fdb77fc estimates at <= 256 labels: with the top-label root
+  every root of V_d contains the top label, so the per-r1 widths never
+  narrow a V_d search, and the pretest does ~nothing there (see its
+  section). Above 256 labels every V_d root runs at 5 words (S = 2500: 79%
+  of the V_d have 257-260 labels, 1.12 us/node against 0.88 at 4 words;
+  S = 2700: 46%), which is why S = 2500 is at 0.43 against 0.29 at S =
+  2400. So d-first / plain is 0.55 at 11.7k, 0.42-0.47 at 15-21k, 0.29 at
+  23k (geometric mean 0.38 at N >= 15k, against 0.31 on fdb77fc), and
+  0.32-0.43 at 21-32k with more than 256 labels. Keeping V_d at or under
+  256 labels (or narrowing its roots) is a possible later optimization.
+* **Best mode against fdb77fc's plain search:** 0.66 at 4.1k (plain),
+  0.49-0.58 at 6.7-7.6k, 0.43 at 11.7k, 0.25-0.37 at 15-23k (<= 256
+  labels) and 0.085-0.114 at 21-32k (> 256 labels): d-first stays worth
+  1.5-3.4x on top of the plain search's gain at N >= 6.7k, which scheduler
+  v2 does not use yet (it never launches d-first units; a follow-up: launch
+  `msearch --diag-first --calib-r1-stride k` at N' >= 5000, with a d-first
+  time law such as the fit below).
+* **Crossover.** Along 13 7 4 3 1 1 (with the full runs above, 1850 = 1.21,
+  1950 = 0.78) d-first / plain crosses 1 at N0 ~ 4.9k; pooled over the 13
+  sums, ln r = -0.028 - 0.566 ln(N / 4000) (resid sd 0.17), N0 ~ 3.8k. It
+  depends on P: 12 6 3 2 1 0 1 is at 0.99 at N 3.0k, 13 7 4 3 1 1 at 1.25
+  at 4.1k. `--diag-first-min-n` stays 5000: sums at 3.8-5k would save at
+  most ~10%, and below 5000 the plain search's semi-magic squares feed the
+  models.
+* **Time per sum**, t = a (N / 4000)^b CPU-s, least squares on ln t over the
+  11 sums with N >= 3k (4.1-31.7k, the 3 above 256 labels included):
+
+  | search | a | b | resid sd | t(16k) | t(32k) |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | fdb77fc plain | 24.8 | 4.49 +- 0.23 | 0.47 | 12.5k | 280k |
+  | new plain | 25.9 | 4.04 +- 0.14 | 0.29 | | |
+  | new d-first | 25.6 | 3.46 +- 0.13 | 0.27 | | |
+  | new, best of the two | 23.0 | 3.53 +- 0.14 | 0.27 | 3.1k | 35k |
+
+  (13 7 4 3 1 1 alone: new best b = 3.63, base 4.56.)
+* **CPU per expected (square, SP traversal) pair** (E = amodel E_semi x
+  SQ12 x 720 p_SP, 0.01-0.66 per sum; no pair occurred in the samples, and
+  the full runs at N 2-3k found 0 against 0.01-0.02 expected): best new
+  ~300 CPU-s at N 3-4k, 1.0-1.1k at 6.7-7.6k, 5.4-10.6k at 11.7-16.4k,
+  17.8k at 23k, 38k at 26.6k, 80k at 31.7k; fdb77fc 450, 1.9-2.0k,
+  17.7-25k, 71k, 338k, 939k. Along 13 7 4 3 1 1 it grows like N^2.7 (new
+  best) against N^3.7 (fdb77fc).
+* Scheduler v2's engine-2 time law against these sums (obs / pred): fdb77fc
+  0.39-2.6; new plain 0.24-0.72 at N >= 11k. Hence engine 3 below.
+
+Also measured here, the top-label root on the matrix path (CARRY_MAX_W=0
+build, same d, min of 2): 12 6 3 2 1 1 / 988 (159 labels, 167 d at stride
+40) 7.33 s against 10.29-10.97 s for the plain root (0.68x; the carried
+build 3.7 against 4.8 s), but 13 7 4 3 1 1 / 2500 (260 labels, 18 d at
+stride 1500, the 8-word matrices) 48.5 s / 30.3M nodes against 37.6 s /
+29.2M (1.27x): on the 8-word matrices the top labels cost more nodes than
+on the carried path (13.2M). dfirst.c now uses the top root only where it
+pays (`top_root_pays`: the carried path, or the matrices of up to 4
+words), deciding per V_d by its own labels when the sum's do not decide
+it: 35.1 s on that sample (some V_d have <= 256 labels). Native builds,
+which carry up to 512 labels, are unaffected.
+
+### Fixes after the second verification
+
+Three verifiers (correctness, performance, adversarial) passed the
+integration with issues; these were fixed:
+
+* **Engine 3.** The integration changes the plain search's CPU per sum
+  (above), but msearch still wrote `"engine":2`, so scheduler v2 would have
+  fitted one law to both builds' timings, and its +0.39 step at > 128
+  labels (the third word, x1.48) now describes a cost that has mostly gone
+  (12 6 3 2 1 1 / 890, 131 labels: 31.9 -> 21.8 CPU-s, 1.47x, both engine 2).
+  msearch writes `"engine":3` and scheduler.py has ENGINE = 3. Each engine's
+  law starts from the previous engine's posterior; `amodel.time_prior` now
+  also shifts it by `ENGINE_TIME_SHIFT`: engine 3's > 128-label step starts
+  0.227 lower (0.39 -> 0.17), the geometric mean of the paired new / base
+  ratios at 137-252 labels (0.80). No feature of the law describes the
+  0.26x above 256 labels (3 sums at N 21-32k); its shape (N slope, hinge,
+  W3 step) should be refit for engine 3 once large-N data arrives, with the
+  13 sums above as anchors. v1 falls back to its default model until it
+  has 20 engine-3 sums.
+* **No SAMPLE_* in msearch.** msearch had taken bench's `SAMPLE_STRIDE`,
+  `SAMPLE_OFFSET` and `SAMPLE_LOG` from the environment, so a variable left
+  exported from a bench session turned every scheduler unit into an
+  r1-sampled run: only csum / csquare records and a sampled done record,
+  which neither scheduler counts, so v2 re-planned the same unit forever.
+  msearch reads only its `--r1-*` options now, and both schedulers start
+  msearch without `SAMPLE_*` (`msearch_env`). ctest `fast_msearch_no_sample_env`.
+* **Option checks.** Numeric values, `--d-range lo:hi` (lo < hi), the
+  d-first options without `--diag-first`, more than 8 `--r1-strata` and
+  log files that cannot be opened are refused (exit 2); the usage text
+  lists every option (ctest `fast_msearch_bad_args`). With `--d-stride k
+  --d-offset o`, o mod k != 0, the plain sums get "skip" records as with
+  `--d-range` lo > 0. `--time-limit` is checked between the chunks of a
+  d-first sum too (the sum is then not complete); `--node-limit` applies
+  per V_d there (documented).
+* **Strict C17.** `#define _POSIX_C_SOURCE 200809L` in arrange.c, dfirst.c,
+  msearch.c and fuzz_arrange.c: clock_gettime with the CPU-time clocks is
+  declared under `-std=c17` / `-std=c11 -pedantic-errors` again (the
+  earlier claim that `-std=c17 -pedantic` was clean was wrong for this
+  tree; the CMake build uses gnu17 and was not affected).
+* **`--calib-r1-stride 1`** wrote est_* = 0: a stride of 1 is now a
+  sampling plan over every r1 (exact estimates); the default 0 stays no
+  plan.
+* The dsum `se_time` uses the sum of the per-d CPU (it mixed the whole
+  loop's thread CPU with the per-d squares); the README and msearch's header
+  say which dsum time fields are CPU and which wall.
+* The csum `est_nodes` / `est_time` are unbiased only up to the adaptive
+  cross-support state, which carries over from r1 to r1 (a sampled r1 can
+  differ by +-1 node from the full run; mean over all offsets 5,009,338
+  against 5,009,395 nodes at 13 6 3 2 1 1 / 899, exact with `--no-cross`);
+  `est_squares` is exactly unbiased (18.000000 over all offsets). Wording
+  fixed in arrange.h, msearch.c and the README.
+* ARRANGE_DEBUG: FILTER_COUNT checks the padding precondition it shares
+  with FILTER_CARRY (the pretest replaced FILTER_CARRY at depth >= 5).
+* Summary bookkeeping (SUMMARY_VERSION 3): `dfirst_sums` counts distinct
+  (P, S); a notable square is kept once per (P, S, hash) also on the plain
+  path (a sum searched twice, or a square found d-first and then plain);
+  the CPU of sampled csum records is totalled (`sampled_cpu`); v1's report
+  lists the magic squares found d-first, not only their number.
+* New ctests for the paths that had none: the no-GFNI / no-VPOPCNTDQ build
+  on the carried path with 7 words and without the pretest
+  (`fast_bench_quick_no_gfni_wide7`, `_no_pretest`), its fuzz at 257-500
+  labels and d-first (`fast_fuzz_arrange_no_gfni_wide`,
+  `fast_fuzz_dfirst_no_gfni`), and d-first in the portable build
+  (`fast_fuzz_dfirst_portable`).
+
+Rejected or left open: the d-first parts of one sum (`--d-range` units,
+`--d-offset` units) are still never merged into coverage, and nothing reads
+the "dchunk" records (no resume): a split sum counts as unsearched and
+would be planned again (documented in src/c/README.md). V_d searches start
+with a fresh adaptive cross-support state (a possible small gain, not
+measured). d-first
+SP squares that are not magic are not notable (every dsquare has an SP
+traversal, so they would flood the list).
+
+Gates after these fixes (build-integ, Release): `ctest -R fast_` passes (47
+tests); every commit compiles with `-Wall -Werror`, and arrange.c / dfirst.c
+with `-std=c17 -pedantic-errors`. `fuzz_arrange` on fresh seeds
+(91000000-95000004), 500 seeds per mode, 0 fails anywhere: default (1
+skipped by the oracle budget), `--mode 1` (forced widths, every variant),
+`--mode 5` (hubs: 442 ran, 58 skipped), `--mode 6` (saturated counters,
+variants default, nomrv, w5, w8, pt_1_w5), `--mode 7`; `--dfirst` with
+modes default (1 skipped), 1, 5 (443 ran, 57 skipped) and 7; the matrices
+build default, mode 7, `--dfirst` (2 skipped) and `--dfirst --mode 7`
+(which takes both roots: 76 of 13,313 V_d of 40 of its seeds had > 256
+labels); the portable build default and `--dfirst` (1 skipped); the
+no-GFNI build default, mode 7 and `--dfirst`. The d-first runs checked
+623,403 (square, d) pairs. bench quick / full / prod: 1,770,779 /
+14,958,507 / 50,375,738 nodes, every instance's nodes, squares and hash
+equal to fdb77fc's, also with `--no-r1-width`, `--pretest-min 0` and
+`--min-words 6`. Mode 4 (large sparse families, limited by its brute-force
+oracle) was not rerun.

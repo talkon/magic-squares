@@ -8,10 +8,12 @@
  *   --min-sum S       smallest sum to search (default: smallest possible)
  *   --max-sum S       largest sum to search (default: min-sum + 99)
  *   --sums S1,S2,...  search exactly these sums instead of a range
- *   --node-limit X    stop the search of one sum after X nodes (record is
- *                     marked truncated)
+ *   --node-limit X    stop the search of one sum (of one V_d in a d-first
+ *                     sum) after X nodes (record is marked truncated)
  *   --total-nodes X   stop after the sum during which X total nodes are hit
- *   --time-limit T    stop after the sum during which T seconds pass
+ *   --time-limit T    stop after the sum during which T seconds pass (a
+ *                     d-first sum also stops after the chunk of d during
+ *                     which they pass, and is then not complete)
  *   --out FILE        append JSON lines to FILE (default stdout)
  *   --format legacy   print in the old arrangement.c format instead, for
  *                     use with postprocess.py
@@ -31,18 +33,22 @@
  *                     (square, SP traversal) pair once, so every magic
  *                     square (twice, once per diagonal); the other sums
  *                     get the plain search
- *   --diag-first-min-n N0   default 5000, where d-first and the plain
- *                     search cost the same per sum with the integrated
- *                     search (1.32x at N = 4.1k, 0.78x at 5.9k, 0.63x at
- *                     6.7k; 0.3x at N = 15-23k on fdb77fc)
+ *   --diag-first-min-n N0   default 5000, about where d-first and the
+ *                     plain search cost the same per sum (d-first / plain
+ *                     CPU: 1.25x at N = 4.1k, 0.65x at 6.7k, 0.57x at
+ *                     7.6k, 0.55x at 11.7k, 0.42-0.47x at 15-21k, 0.29x at
+ *                     23k, 0.32-0.43x at 21-32k with > 256 labels;
+ *                     research/ideas.md)
  *   --d-stride k, --d-offset o   search only d = lo + o, lo + o + k, ...
  *                     (an unbiased sample; o defaults to a random offset
  *                     from --sample-seed)
  *   --d-range lo:hi   only the d with index in [lo, hi) of the sum's
- *                     unreduced list (for splitting a sum into units); the
- *                     plain sums (below --diag-first-min-n) are searched
- *                     only by the unit with lo = 0, the others write a
- *                     "skip" record for them
+ *                     unreduced list (for splitting a sum into units; lo:
+ *                     to the end); the plain sums (below
+ *                     --diag-first-min-n) are searched only by the unit
+ *                     with lo = 0 (and with --d-offset, only by the unit
+ *                     with offset 0 mod k), the others write a "skip"
+ *                     record for them
  *   --d-chunk C       a "dchunk" checkpoint record every C indices of d
  *                     (default 256)
  *   --d-log FILE      one line per d (see dfirst_search)
@@ -94,8 +100,10 @@
  *    "est_pairs":..,"time":..,"est_time":..,...,"cpu":..,"complete":0|1}
  * where pairs is the number of (square, SP traversal) pairs (what a magic
  * square needs twice), cpu the process CPU seconds as in a "sum" record
- * (the d loop, the reduction and the enumeration share; time: the d loop
- * only), and complete says that every d of the sum was
+ * (the d loop, the reduction and the enumeration share; time: the process
+ * CPU of the index and the d loop only, est_time its estimate over the d
+ * range; vd_time, setup_time, search_time: wall-clock sums over d), and
+ * complete says that every d of the sum was
  * searched (not a --d-range part, a --d-stride sample, or a truncated
  * run). With --diag-first the "done" record has "mode":"dfirst" (and
  * diag_first_min_n): its range then also holds the d-first sums, which

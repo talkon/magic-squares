@@ -112,6 +112,18 @@ S0 6000-9000 adds +2.2% / 3.9% / 6%.
   below N' 3k: small sums are slightly over-predicted, which costs them a
   little priority. The residual sd is 0.21-0.33 by source and 0.48 on the
   sampled sums.
+* **Engine 3** (cx/integrated: per-r1 widths, carried bitsets up to 512
+  labels, the pretest; msearch writes `"engine":3`). Its plain search costs
+  0.98-1.01x engine 2's up to 128 labels, 0.66-0.89x at 129-256 labels
+  (geometric mean 0.80) and 0.26x above 256 labels (paired, 13 sums at
+  N 2-32k; ideas.md, "Measurements on the integrated binary"). Its law
+  starts from engine 2's posterior with the label-word step 0.227 lower
+  (`amodel.ENGINE_TIME_SHIFT`, applied by `amodel.time_prior`), and learns
+  its level online as above. The prior's fixed shape (W3 step, N slope,
+  hinge) no longer matches this build above 128 labels or 11k vectors:
+  against the engine-2 prior the integrated plain search came out at
+  obs/pred 0.24-0.72 at N >= 11k. Refit the shape for engine 3 when large-N
+  data arrives; the 13 measured sums can serve as anchors.
 * **The online refit learns the level, not the shape.** The first version
   refit all coefficients by ridge regression on every sum. Thousands of
   cheap sums at N' < 3k then moved the label slope from -2.2 to -3.1..-3.5,

@@ -13,12 +13,19 @@ bin/msearch --format legacy --sums 327 10 4 3 2 > out.txt   # for postprocess.py
 ```
 
 Options: `--vec-size N` (5, 6, 7), `--min-sum`, `--max-sum`, `--sums`,
-`--node-limit X` (per sum; the record is marked `truncated`), `--total-nodes X`
-and `--time-limit T` (stop after the sum during which the limit is reached),
-`--out FILE` (append), `--format legacy`, `--reduce strong`, `--no-fc` /
-`--no-mrv` / `--no-support` / `--no-cross` to disable the search heuristics,
-and `--pretest-min K` (the depth of the pretest below, 0 = off; the same
-squares and nodes).
+`--node-limit X` (per sum, and per V_d in d-first sums; the record is marked
+`truncated`), `--total-nodes X` and `--time-limit T` (stop after the sum
+during which the limit is reached; a d-first sum also stops between its
+chunks of d, and is then not `complete`), `--out FILE` (append), `--format
+legacy`, `--reduce strong`, `--no-fc` / `--no-mrv` / `--no-support` /
+`--no-cross` to disable the search heuristics, `--pretest-min K` (the depth
+of the pretest below, 0 = off; the same squares and nodes), and the
+d-first and r1-sampling options below. Malformed values, a `--d-range`
+with lo >= hi, d-first options without `--diag-first`, more than 8
+`--r1-strata` and log files that cannot be opened are refused (exit 2).
+Every record of a search carries `"engine":3` (the version of the search,
+whose time per sum the scheduler fits per engine; 3 = this code, with the
+per-r1 widths, the carried bitsets up to 512 labels and the pretest).
 
 Output is JSON lines, flushed as it goes: one `square` record per semi-magic
 square (with its traversal counts, the best pair of diagonals, and the square
@@ -53,25 +60,38 @@ twice (src/c/dfirst.c; research/ideas.md, "Diagonal-first search in
 msearch"). V_d comes from a number -> vector posting index (O(sum of the
 posting lengths) per d). Every square of V_d contains all of d, so d's
 numbers get the top labels and only the first rows through the rarest of
-them are roots (`--d-plain-root`: all of V_d, as `bin/dsearch`). Per sum
-it costs the same as the plain search at N ~ 5000 (the default
-`--diag-first-min-n`; 1.32x at N = 4.1k, 0.78x at 5.9k, 0.63x at 6.7k with
-the integrated search, whose per-r1 widths sped up the plain search there
-more than the V_d searches; 0.27-0.37x at 11-23k on fdb77fc, ideas.md has
-the measurements), but it does not enumerate the semi-magic squares:
+them are roots (`--d-plain-root`: all of V_d, as `bin/dsearch`; a V_d
+searched with the 8-word intersection matrices, i.e. 257-512 labels without
+AVX-512BW, always gets the plain root, which is 1.27x faster there). Per
+sum, against the plain search of this code (CPU, paired, research/ideas.md
+"Measurements on the integrated binary"): 1.25x at N = 4.1k, 0.65x at
+6.7k, 0.57x at 7.6k, 0.55x at 11.7k, 0.42-0.47x at 15-21k, 0.29x at 23k,
+and 0.32-0.43x at 21-32k with more than 256 labels (where the plain
+search itself got 3.8x faster); the crossover is at N ~ 4-5k depending on
+P, hence the default `--diag-first-min-n` 5000, which also keeps the plain
+search's semi-magic squares, for the models, below it. It does not
+enumerate the semi-magic squares:
 d-first sums write "dsquare" records (one per pair, with `set_count` =
 `sp_count`, `magic`, `partner`; dedupe magic squares by `hash`), "dchunk"
 checkpoint records every `--d-chunk` (256) indices of d and a "dsum"
 record (`pairs`, `est_pairs`, `est_time` with `--d-stride`; `complete` when
-every d was searched), not "square" / "sum" records. The "done" record of a
+every d was searched; `time` is the process CPU of the index and the d
+loop, `est_time` its estimate for the whole d range, `cpu` that plus the
+reduction and the sum's share of the enumeration as in a "sum" record, and
+`vd_time` / `setup_time` / `search_time` are wall-clock sums over d), not
+"square" / "sum" records. The "done" record of a
 `--diag-first` run has `"mode":"dfirst"`; `scripts/scheduler.py` (both
 models: v1's Results, v2's Summary) keeps the d-first sums out of its fits
 (squares, traversals, time law), counts a complete one as searched and a
 part of one (a `--d-range` unit, a `--d-stride` sample) as not, and lists
-the magic squares found d-first. The dsum record has a "cpu" field as the
-sum record does. With
-`--d-range lo:hi`, only the unit with lo = 0 searches the plain sums of the
-range (the others write a "skip" record).
+the magic squares found d-first. With `--d-range lo:hi`, only the unit with
+lo = 0 searches the plain sums of the range, and with `--d-stride k
+--d-offset o` only the unit with o mod k = 0 (the others write a "skip"
+record). The parts of a sum split by `--d-range` (or `--d-offset`) are not
+merged: neither scheduler counts such a sum as searched (it would be
+planned again), and nothing reads the "dchunk" records yet (no resume from
+them). Scheduler v2 reads d-first output (for example `ingest`ed units) but
+does not launch d-first units itself.
 `--calib-r1-stride k` adds a plain search of every k-th first row (a
 "csum" record with `est_squares`, `se_squares`, the traversal totals, and
 "csquare" records) for the models of semi-magic squares per sum.
@@ -83,16 +103,23 @@ ranges of the root list, sampled with their own strides from random
 offsets; the early first rows, whose universes are the largest, hold most of
 the time), and `--r1-log FILE` (one line per first row: r1, stratum,
 stride, squares, nodes, CPU seconds, its largest label, the width it was
-searched at; a "# run" line per width run); also the environment variables
-`SAMPLE_STRIDE`, `SAMPLE_OFFSET`, `SAMPLE_LOG` of msearch and bench, and
-`SAMPLE_LIST` (r1 by index, comma-separated: the same r1 in two binaries)
-of bench. The r1 are global indices into the root list, whatever width
-each is searched at, so a sample is the same with and without
-`--no-r1-width`. The searched first rows are independent subproblems (r1
-is a square's lowest-index vector), so the "csum" record's `est_*` (stride
-x the sampled totals) are unbiased for the whole sum, with stratified
-standard errors; `se_strata_missing` counts the strata with fewer than 2
-sampled r1, which the standard errors leave out.
+searched at; a "# run" line per width run). bench reads the environment
+variables `SAMPLE_STRIDE`, `SAMPLE_OFFSET`,
+`SAMPLE_LOG` and `SAMPLE_LIST` (r1 by index, comma-separated: the same r1
+in two binaries) instead; msearch ignores them, so that a variable left
+exported cannot turn scheduler units into sampled runs (the schedulers also
+start msearch without them). The r1 are global indices into the root list,
+whatever width each is searched at, so a sample is the same with and
+without `--no-r1-width`. The searched first rows are independent
+subproblems (r1 is a square's lowest-index vector), so the "csum" record's
+`est_squares` and `est_sp_pairs` (stride x the sampled totals) are unbiased
+for the whole sum, with stratified standard errors; `est_nodes` and
+`est_time` are unbiased up to the state of the adaptive cross support,
+which carries over from one r1 to the next (a sampled r1 can differ by a
+node from its count in the full run: about 1e-5; exact with `--no-cross`).
+`se_strata_missing` counts the strata with fewer than 2 sampled r1, which
+the standard errors leave out. `--calib-r1-stride 1` is a full plain search
+with exact "estimates".
 
 ## bench: arrangement benchmark
 
