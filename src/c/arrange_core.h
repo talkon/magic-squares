@@ -28,7 +28,7 @@
 #define KEEP_COUNT CAT(keep_count, W)
 #define SUPPORT CAT(support, W)
 #define FILTER_CARRY CAT(filter_carry, W)
-#define FILTER_STEP CAT(filter_step, W)
+#define PAD_LIST CAT(pad_list, W)
 #define KEEP_CARRY CAT(keep_carry, W)
 #define COUNT_CARRY CAT(count_carry, W)
 #define TRY_CHILD CAT(try_child, W)
@@ -109,66 +109,12 @@ static inline uint64_t IN_CLASS(const uint64_t *g, int w, int c) {
  * Candidate lists that carry their bitsets: word w of entry i of a list is
  * at list[w * cap + i].
  *
- * FILTER_STEP: the test and compression of FILTER_CARRY and KEEP_CARRY for
- * the 8 entries of in from position i on, of which those in live exist;
- * appends the kept ones (word w at out + w * cap + k) and returns the new
- * k. full (a compile-time constant) says that all 8 exist: the callers run
- * it on the full groups of 8 entries, then once with a lane mask on the
- * last one, rather than computing a lane mask in every iteration (~8
- * scalar instructions and masked loads: the loop split of gcc's
- * profile-guided build, 4-5% less time on bench/prod.txt, see
- * research/ideas.md). For once = 1, V[w] and R[w] are word w of v and its
- * rotation (see FILTER_CARRY); otherwise V[w] is word w of the bitset that
- * the kept entries miss (R is unused).
- */
-static inline __attribute__((always_inline)) uint32_t
-FILTER_STEP(const uint64_t *in, size_t cap, uint32_t i, const int full,
-            __mmask8 live, const __m512i *V, const __m512i *R,
-            const bool *tw, const int once, uint64_t *out, uint32_t k,
-            __m512i *acc) {
-  __m512i x[W];
-  for (int w = 0; w < W; w++)
-    x[w] = full ? _mm512_loadu_si512(in + w * cap + i)
-                : _mm512_maskz_loadu_epi64(live, in + w * cap + i);
-  __mmask8 keep;
-  if (once) {
-    /* c = the words of u & v, each rotated by R[w], or-ed into one word:
-     * the rotated words of v are disjoint, so |c| = |u & v| */
-    __m512i c = _mm512_and_si512(x[0], V[0]);
-    for (int w = 1; w < W; w++)
-      if (tw[w]) /* c |= rot(u) & rot(v) */
-        c = _mm512_ternarylogic_epi64(c, _mm512_rolv_epi64(x[w], R[w]), V[w],
-                                      0xF8);
-#ifdef __AVX512VPOPCNTDQ__
-    keep = _mm512_mask_cmpeq_epi64_mask(live, _mm512_popcnt_epi64(c),
-                                        _mm512_set1_epi64(1));
-#else
-    /* exactly one bit: c != 0 and c & (c - 1) == 0 */
-    keep = _mm512_mask_testn_epi64_mask(
-        _mm512_mask_test_epi64_mask(live, c, c), c,
-        _mm512_sub_epi64(c, _mm512_set1_epi64(1)));
-#endif
-  } else {
-    keep = live;
-    for (int w = 0; w < W; w++)
-      if (tw[w])
-        keep = _mm512_mask_testn_epi64_mask(keep, x[w], V[w]);
-  }
-  for (int w = 0; w < W; w++) {
-    /* compress in a register and store all 8 lanes (the lists have
-     * room) */
-    __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
-    _mm512_storeu_si512(out + w * cap + k, y);
-    acc[w] = _mm512_or_si512(acc[w], y);
-  }
-  return k + (uint32_t)__builtin_popcount(keep);
-}
-
-/*
  * FILTER_CARRY: out = the entries u of in[0..cnt) with |u & v| == once
  * (once = 0 or 1), where vb is the bitset of v, and, for once = 0 and excl
  * not NULL, also disjoint from excl; un = the union of the kept entries.
- * Returns |out|.
+ * Returns |out|. Precondition: in[cnt .. roundup8(cnt)) are full sets (all
+ * words ~0, see PAD_LIST), which neither test keeps (they meet v in n >= 3
+ * labels), so the loop needs no lane masks; checked with -DARRANGE_DEBUG.
  *
  * This replaces the N x N intersection matrices: |u & v| is computed from
  * the bitsets, 8 entries at a time, word w of the 8 entries being a single
@@ -217,16 +163,68 @@ static inline uint32_t FILTER_CARRY(const sstate_t *s, const uint64_t *in,
     acc[w] = _mm512_setzero_si512();
     tw[w] = W <= 2 || t;
   }
-  /* the full groups of 8 entries, then the last one (see FILTER_STEP) */
-  uint32_t k = 0, i = 0;
-  for (; i + 8 <= cnt; i += 8)
-    k = FILTER_STEP(in, cap, i, 1, 0xff, V, R, tw, once, out, k, acc);
-  if (i < cnt)
-    k = FILTER_STEP(in, cap, i, 0, (__mmask8)((1u << (cnt - i)) - 1), V, R,
-                    tw, once, out, k, acc);
+#ifdef ARRANGE_DEBUG
+  for (int w = 0; w < W; w++)
+    for (uint32_t i = cnt; i < ((cnt + 7) & ~7u); i++)
+      if (in[w * cap + i] != ~(uint64_t)0) {
+        fprintf(stderr, "FILTER_CARRY: list not padded (W = %d, %u)\n", W,
+                cnt);
+        abort();
+      }
+#endif
+  /* no lane masks (see the precondition), which computed in every
+   * iteration cost ~8 scalar instructions and masked loads per 8 entries
+   * (see research/ideas.md) */
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < cnt; i += 8) {
+    __m512i x[W];
+    for (int w = 0; w < W; w++)
+      x[w] = _mm512_loadu_si512(in + w * cap + i);
+    __mmask8 keep;
+    if (once) {
+      /* c = the words of u & v, each rotated by R[w], or-ed into one word:
+       * the rotated words of v are disjoint, so |c| = |u & v| */
+      __m512i c = _mm512_and_si512(x[0], V[0]);
+      for (int w = 1; w < W; w++)
+        if (tw[w]) /* c |= rot(u) & rot(v) */
+          c = _mm512_ternarylogic_epi64(c, _mm512_rolv_epi64(x[w], R[w]),
+                                        V[w], 0xF8);
+#ifdef __AVX512VPOPCNTDQ__
+      keep = _mm512_cmpeq_epi64_mask(_mm512_popcnt_epi64(c),
+                                     _mm512_set1_epi64(1));
+#else
+      /* exactly one bit: c != 0 and c & (c - 1) == 0 */
+      keep = _mm512_mask_testn_epi64_mask(
+          _mm512_test_epi64_mask(c, c), c,
+          _mm512_sub_epi64(c, _mm512_set1_epi64(1)));
+#endif
+    } else {
+      keep = 0xff;
+      for (int w = 0; w < W; w++)
+        if (tw[w])
+          keep = _mm512_mask_testn_epi64_mask(keep, x[w], V[w]);
+    }
+    for (int w = 0; w < W; w++) {
+      /* compress in a register and store all 8 lanes (the lists have
+       * room) */
+      __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
+      _mm512_storeu_si512(out + w * cap + k, y);
+      acc[w] = _mm512_or_si512(acc[w], y);
+    }
+    k += (uint32_t)__builtin_popcount(keep);
+  }
   for (int w = 0; w < W; w++)
     un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
   return k;
+}
+
+/* pads list[0..cnt) with 8 full sets, for FILTER_CARRY: a node pads its
+ * lists before creating its children, which filter them (once per node,
+ * not at each filter: the store right before the loads of the last group
+ * would cost a store-forwarding stall) */
+static inline void PAD_LIST(const sstate_t *s, uint64_t *list, uint32_t cnt) {
+  for (int w = 0; w < W; w++)
+    _mm512_storeu_si512(list + w * s->cap + cnt, _mm512_set1_epi64(-1));
 }
 
 /*
@@ -249,14 +247,26 @@ static inline uint32_t KEEP_CARRY(const sstate_t *s, uint64_t *list,
     acc[w] = _mm512_setzero_si512();
     tw[w] = bad[w] != 0;
   }
-  /* the test of FILTER_CARRY with once = 0, full groups of 8 entries
-   * first (see FILTER_STEP) */
-  uint32_t k = 0, i = 0;
-  for (; i + 8 <= cnt; i += 8)
-    k = FILTER_STEP(list, cap, i, 1, 0xff, B, NULL, tw, 0, list, k, acc);
-  if (i < cnt)
-    k = FILTER_STEP(list, cap, i, 0, (__mmask8)((1u << (cnt - i)) - 1), B,
-                    NULL, tw, 0, list, k, acc);
+  /* (a lane mask in every iteration: splitting off the last group instead
+   * measured the same or slightly slower in place, and padding the list
+   * slower in replays of the children, see research/ideas.md) */
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < cnt; i += 8) {
+    __mmask8 live = cnt - i >= 8 ? 0xff : (__mmask8)((1u << (cnt - i)) - 1);
+    __m512i x[W];
+    for (int w = 0; w < W; w++)
+      x[w] = _mm512_maskz_loadu_epi64(live, list + w * cap + i);
+    __mmask8 keep = live;
+    for (int w = 0; w < W; w++)
+      if (tw[w])
+        keep = _mm512_mask_testn_epi64_mask(keep, x[w], B[w]);
+    for (int w = 0; w < W; w++) {
+      __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
+      _mm512_storeu_si512(list + w * cap + k, y);
+      acc[w] = _mm512_or_si512(acc[w], y);
+    }
+    k += (uint32_t)__builtin_popcount(keep);
+  }
   for (int w = 0; w < W; w++)
     un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
   return k;
@@ -290,8 +300,9 @@ static inline void COUNT_CARRY(const sstate_t *s, uint64_t *list,
   /* byte j = 1 << j: gf2p8affineqb then gathers bit j of the 8 bytes of
    * each qword of the matrix operand into byte j */
   const __m512i id = _mm512_set1_epi64(0x8040201008040201);
-  /* full groups of 8 entries, then the last one with a lane mask (see
-   * FILTER_STEP) */
+  /* full groups of 8 entries, then the last one with a lane mask, rather
+   * than a lane mask in every iteration (the loop split of gcc's
+   * profile-guided build) */
   uint32_t i = 0;
   for (; i + 8 <= cnt; i += 8)
     for (int w = 0; w < W; w++)
@@ -701,13 +712,28 @@ static inline uint32_t CROSS_AXIS(sstate_t *s, int d, int f,
     __m512i B[8], acc[8][W];
 #pragma GCC unroll 8
     for (int j = 0; j < 8; j++) {
-      /* cell 8 g + j: its word w and bit (with pdep, no branch) */
+      /* cell 8 g + j: its word w and bit */
       const int c = 8 * g + j;
       int w = 0;
+      uint64_t bit = 0;
+#ifdef __BMI2__
+      /* with no branch on the word of each cell, which mispredicts when
+       * the split of the cells between the words changes (6-8% of the
+       * time of a call on dumped states replayed out of order, ~2% of
+       * the search time with -march=cascadelake, none with
+       * -march=native, where siblings share most of their cells): the
+       * (c - nw[v])-th cell of word v, or none if c is not in word v */
+      for (int v = 0; v < W; v++) {
+        const uint64_t bv = _pdep_u64(((uint64_t)1 << c) >> nw[v], Y[v]);
+        w = bv ? v : w;
+        bit |= bv;
+      }
+#else
       for (int v = 1; v < W; v++)
         w = c >= nw[v] ? v : w;
+      bit = c < ny ? nth_bit(Y[w], c - nw[w]) : 0;
+#endif
       base[j] = hl + w * cap;
-      const uint64_t bit = c < ny ? nth_bit(Y[w], c - nw[w]) : 0;
       B[j] = _mm512_set1_epi64((long long)bit);
 #pragma GCC unroll 8
       for (int v = 0; v < W; v++)
@@ -980,27 +1006,50 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
    * >= min_v are the ones from position min_v on (min_v = 0 below the
    * root) */
   uint64_t *uo = s->uni[d + 1][o], *ub = s->uni[d + 1][b];
+#ifdef CHILD_PROF
+  const int pl = 9 * s->np[ROW] + s->np[COL];
+  int why = CD_LIVE; /* the test that killed the child */
+#define CP_WHY(k) (why = dead && why == CD_LIVE ? (k) : why)
+  cp_in[pl][0] += s->nvalid[d][o] - min_v;
+  cp_in[pl][1] += s->nvalid[d][b] - min_v;
+#else
+#define CP_WHY(k)
+#endif
+  CP_START();
   uint32_t ko = FILTER_CARRY(s, s->vw[d][o] + min_v, s->nvalid[d][o] - min_v,
                              m, 1, NULL, s->vw[d + 1][o], uo);
+  CP_PHASE(pl, CP_FO);
+#ifdef CHILD_PROF
+  cp_out[pl][0] += ko;
+#endif
   s->nvalid[d + 1][o] = ko;
   if (s->np[o] + (int)ko < n)
     dead = 1;
+  CP_WHY(CD_CNT_O);
   if (s->opts.forward_check)
     for (int w = 0; w < W; w++)
       dead |= ncell_b[w] & ~ncell_o[w] & ~uo[w];
+  CP_WHY(CD_FC_O);
   if (!dead) {
     uint64_t excl[W];
     for (int w = 0; w < W; w++)
       excl[w] = ~(ncell_o[w] | uo[w]);
+    CP_RESET();
     uint32_t kb = FILTER_CARRY(s, s->vw[d][b] + min_v,
                                s->nvalid[d][b] - min_v, m, 0,
                                sup ? excl : NULL, s->vw[d + 1][b], ub);
+    CP_PHASE(pl, CP_FB);
+#ifdef CHILD_PROF
+    cp_out[pl][1] += kb;
+#endif
     s->nvalid[d + 1][b] = kb;
     if (s->np[b] + (int)kb < n)
       dead = 1;
+    CP_WHY(CD_CNT_B);
     if (s->opts.forward_check)
       for (int w = 0; w < W; w++)
         dead |= ncell_o[w] & ~ncell_b[w] & ~ub[w];
+    CP_WHY(CD_FC_B);
     /* with two rows and two cols placed, most children are dead, and cross
      * support (with the support filter's test folded in) finds it faster
      * than the support filter's cascade: on the o candidates first, which
@@ -1020,12 +1069,20 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
     int after = 0; /* cross support after the support filter */
     if (!dead && cross) {
       after = s->cross_after || (++s->xs_tick & 15) == 0;
-      if (!after)
+      if (!after) {
+        CP_RESET();
         dead = CROSS(s, d + 1, o);
+        CP_PHASE(pl, CP_CROSS);
+        CP_WHY(CD_CROSS);
+      }
     }
     /* the b candidates are closed already, the o candidates may not be */
-    if (!dead && sup)
+    if (!dead && sup) {
+      CP_RESET();
       dead = SUPPORT(s, d + 1, o, 1);
+      CP_PHASE(pl, CP_SUP);
+      CP_WHY(CD_SUP);
+    }
     if (after) {
       s->xs_k += dead != 0;
       if (++s->xs_n == 256) {
@@ -1034,10 +1091,13 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
         s->xs_k /= 2;
       }
       if (!dead) {
+        CP_RESET();
         const uint32_t k0 = s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
         dead = CROSS(s, d + 1, o);
         if (!dead && s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL] < k0)
           dead = SUPPORT_AGAIN(s, d + 1, o);
+        CP_PHASE(pl, CP_AFTER);
+        CP_WHY(CD_AFTER);
       }
     }
     if (!dead) {
@@ -1045,6 +1105,7 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
        * each list covers (the unmatched cells of the other axis); only
        * MRV reads the counts */
       if (s->opts.mrv) {
+        CP_RESET();
         uint64_t need_o[W], need_b[W];
         for (int w = 0; w < W; w++) {
           need_o[w] = ncell_b[w] & ~ncell_o[w];
@@ -1054,10 +1115,15 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
                     s->cnt[d + 1][o]);
         COUNT_CARRY(s, s->vw[d + 1][b], s->nvalid[d + 1][b], need_b,
                     s->cnt[d + 1][b]);
+        CP_PHASE(pl, CP_COUNT);
       }
       SEARCH_REC(s, d + 1);
     }
   }
+#ifdef CHILD_PROF
+  cp_die[pl][why]++;
+#endif
+#undef CP_WHY
 #else
   /* deep children are mostly pruned by the support filter, which needs only
    * the unions: leave the full counts to SEARCH_REC */
@@ -1130,6 +1196,10 @@ static void SEARCH_REC(sstate_t *s, int d) {
 #endif
   if (s->stop)
     return;
+#if defined(CHILD_PROF) && defined(CARRY)
+  const int pl = 9 * s->np[ROW] + s->np[COL];
+  CP_START();
+#endif
 #ifndef CARRY
   if (d >= LAZY_DEPTH && s->opts.support && s->opts.forward_check &&
       s->opts.mrv) {
@@ -1242,7 +1312,7 @@ static void SEARCH_REC(sstate_t *s, int d) {
   const __m512i xm = _mm512_set1_epi64((long long)xb);
   uint32_t nk = 0;
   for (uint32_t i = 0; i < cnt; i += 8) {
-    /* (a lane mask only for the last group, see FILTER_STEP) */
+    /* (a lane mask only for the last group, as in COUNT_CARRY) */
     __mmask8 keep =
         cnt - i >= 8
             ? _mm512_test_epi64_mask(_mm512_loadu_si512(in + xw * cap + i), xm)
@@ -1259,6 +1329,10 @@ static void SEARCH_REC(sstate_t *s, int d) {
                               keep, _mm512_loadu_si512(in + w * cap + i)));
     nk += (uint32_t)__builtin_popcount(keep);
   }
+  /* (after the selection, which would keep full sets) */
+  PAD_LIST(s, s->vw[d][ROW], s->nvalid[d][ROW]);
+  PAD_LIST(s, s->vw[d][COL], s->nvalid[d][COL]);
+  CP_PHASE(pl, CP_SEL);
   for (uint32_t i = 0; i < nk && !s->stop; i++) {
     uint64_t m[W];
     for (int w = 0; w < W; w++)
@@ -1290,6 +1364,7 @@ static void SEARCH_ROOT(sstate_t *s) {
     for (uint32_t i = 0; i < count; i++)
       for (int w = 0; w < W; w++)
         s->vw[0][a][w * s->cap + i] = s->bits[(uint64_t)i * W + w];
+    PAD_LIST(s, s->vw[0][a], count);
 #else
     for (uint32_t i = 0; i < count; i++)
       s->valid[0][a][i] = i;
@@ -1298,8 +1373,14 @@ static void SEARCH_ROOT(sstate_t *s) {
     for (int w = 0; w < W; w++)
       s->cells[0][a][w] = 0;
   }
+#if defined(CHILD_PROF) && defined(CARRY)
+  const uint64_t cp_t0 = __rdtsc();
+#endif
   for (uint32_t r1 = 0; r1 < count && !s->stop; r1++)
     TRY_CHILD(s, 0, ROW, s->bits + (uint64_t)r1 * W, r1, r1 + 1);
+#if defined(CHILD_PROF) && defined(CARRY)
+  cp_total += __rdtsc() - cp_t0;
+#endif
 }
 
 #undef SEARCH_REC
@@ -1310,7 +1391,7 @@ static void SEARCH_ROOT(sstate_t *s) {
 #undef KEEP_COUNT
 #undef SUPPORT
 #undef FILTER_CARRY
-#undef FILTER_STEP
+#undef PAD_LIST
 #undef KEEP_CARRY
 #undef COUNT_CARRY
 #undef TRY_CHILD

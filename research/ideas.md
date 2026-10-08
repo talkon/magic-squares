@@ -896,3 +896,147 @@ Not kept:
   before, see above). The root loop (N^2 / 2 entries filtered per sum, a
   few ms at N = 3000), copying the cells and the cross-support sampling
   in TRY_CHILD are too small to measure.
+
+## The cost of creating children (October 2026, round 2)
+
+(Branch `opt2/children`, commits 9fa7162..8f5cb3a, from f61e719, where
+everything below was measured. Integrated (see "Integration of round 2"
+below): the padding of the lists with full sets for the exactly-once
+filter, with the support passes keeping their lane mask as on this
+branch (the loop split of the section above measured the same there,
+within ~1%), the branch-free cells of cross support, and the
+`-DCHILD_PROF` profile; the folded exactly-once test is the same as in
+the section above.)
+
+Where the time goes (f61e719, `bench/prod.txt`, `-march=native`, 15.0 s,
+50.4M nodes; profile build `-DCHILD_PROF`, see arrange.c, by the layer of
+the child, rows and cols placed): the (2,2) children of the (1,2)/(2,1)
+nodes are 39.2M of the 50.4M nodes and two thirds of the cycles; each
+(1,2)/(2,1) node has 8.2 of them (rows through its branching cell, or
+cols), and 3.4% survive. Their lists come from parent lists of 187 (o, the
+axis that must meet the new vector once) and 88 (b) entries, and are 43.5
+and 36.2 entries after the filters. Of the (2,2) children, 1.3% die after
+the o filter, 5% after the b filter, 50% in cross support, 36% in the
+support filter, 4% in the "after" cross (see `cross_after`), 3.4% live.
+Cross pass 0 (the o candidates against the unions of the b candidates
+through the unmatched cells of the placed o vectors) shrinks the o list
+from 47.6 to 20.5 entries and kills 27% of the children that reach it;
+pass 1 shrinks the b list from 46 to 10 and kills 58% of the rest, mostly
+by count. The (1,2)/(2,1) children (4.85M, from (1,1) nodes with 26.6 kids
+each, lists of ~300) are ~11% of the time, the (2,3)/(3,2) children (6M,
+nearly all dead after their b filter) ~2%.
+
+The rdtsc pairs of the profile build cost ~50% more time and inflate the
+short phases, so the shares below come from builds that stop the (2,2)
+children after a stage (wrong results, same work up to that stage; cross
+support always before the support filter), min of 3 alternating runs in
+one session:
+
+| (2,2) children stopped | f61e719 | this branch |
+| --- | ---: | ---: |
+| before creating them (the other layers) | 2.10 s | 1.85 s |
+| at once (the kids loop) | 2.27 s (+0.17) | 2.05 s (+0.20) |
+| after the o filter | 6.04 s (+3.77) | 5.27 s (+3.22) |
+| after the b filter | 7.58 s (+1.54) | 6.58 s (+1.31) |
+| after cross support | 13.58 s (+6.00) | 12.65 s (+6.07) |
+| not stopped | 14.90 s (+1.32) | 13.50 s (+0.85) |
+
+So per (2,2) child: o filter ~95 ns (187 entries; 82 ns now), b filter
+~40 ns, cross support ~165 ns per call (~430 cycles for both passes: four
+loops of 3-6 blocks of 8 entries, ~100 cycles of setup and reductions),
+support filter and the survivors' subtrees ~30 ns. A replay harness (the
+(1,2)/(2,1) nodes of prod dumped with their kids, 1 in 150, and TRY_CHILD
+replayed on them without the recursion) and a cross harness (the (2,2)
+states at the cross call, 1 in 200) gave per-phase cycles within ~2%,
+which the end-to-end runs (3-5% noise on this shared machine) cannot; but
+they replay states out of order (siblings are not consecutive), so they
+overstate the cost of branches that siblings predict.
+
+Kept:
+
+* The exactly-once filter on folded words (FILTER_CARRY): the words of
+  u & v are or-ed into one, word w rotated left by r_w with the rotations
+  chosen so that the rotated words of v are disjoint (v has at most 8
+  labels, so they exist; nearly always r = 0 or 1), which keeps the count:
+  one vpopcntq and compare, or without VPOPCNTDQ one "single bit" test
+  (a != 0, a & (a - 1) == 0), instead of a popcount per word and their
+  sum, or the and/sub/ternlog/min chain per word. And no lane masks: a
+  node pads its two lists with 8 full sets (PAD_LIST) before creating its
+  children, which both filters drop (n >= 3). Microbenchmark, 187 entries
+  of 6 of 100 labels, v with 4 labels, TSC cycles per call: Sapphire
+  Rapids 171 -> 142 (padding) -> 136 (fold), Cascade Lake build 218 ->
+  179 -> 137.
+* Cross support: the word and bit of each cell from one pdep per word,
+  without a branch per cell on the split of the cells between the two
+  words: 421 -> 395 cycles per call in the cross harness (native), 421 ->
+  389 (cascadelake build), but in place, where the siblings share most of
+  their cells and the branch was mostly predicted, prod 13.86 -> 13.86 s
+  native, 14.39 -> 14.15 s cascadelake (min of 4).
+
+Together (min of 3 alternating runs; same nodes): `bench/prod.txt`
+14.69 -> 13.72 s native (-6.6%), 16.41 -> 14.18 s cascadelake build
+(-13.6%); `full.txt` 3.70 -> 3.41 s and 4.13 -> 3.54 s; `quick.txt`
+0.307 -> 0.294 s and 0.355 -> 0.303 s. The cascadelake build gains more:
+without VPOPCNTDQ the per-word test was 11 vector ops per 8 entries, now 6.
+
+Not kept (replay = cycles per (2,2) child in the replay harness, before /
+after; prod in seconds, min of alternating runs):
+
+* Node-local renumbering (the children's lists as bitmasks over the
+  parent's list positions, from a kids x list relation computed once per
+  node). Per 8 entries the o filter is ~5 ops of test and ~8 of compress,
+  store and union; the relation needs the same tests (batched over the
+  kids it shares only the loads), and the masks must still be compressed
+  into lists for cross support and the support filter, which read the
+  carried words. How many kids of a (1,2) node keep an entry of its o
+  list: none 12%, 1: 25%, 2: 26%, 3: 19%, 4: 10%, 5 or more 7% (each kid
+  23%), so the kids' lists hold ~1.9x the parent's entries and a scatter
+  would write about as much as the compresses do. One level up, a full
+  local relation at the (1,1) nodes (rows x rows, cols x cols, rows x cols:
+  ~180K pair tests per node, ~20% of a (1,1) subtree's time) would turn
+  both filters into ANDs, but cross support on position masks tests one
+  entry per instruction (a 512-bit vptestmq per cell) instead of 8, 3-4x
+  the cost of the current test, and the unions the forward check and the
+  support filter need take a test per label. Not implemented.
+* Cheaper tests before building a child's lists: cross support of the kids
+  themselves at their parent (unions of the parent's other list through
+  the unmatched cells of the placed vectors of the kids' axis): 0.4% of the
+  kids. Cross support of the (1,2)/(2,1) node's own lists: 2.9% of the
+  nodes, o list 165 -> 139 entries, b list 79 -> 78.5 (less than it costs,
+  as found on the matrix path). A perfect matching of the b candidates on
+  the free cells of the two placed vectors of the other axis, and of the o
+  candidates likewise (4 x 4, from co-occurrence): 0.7% of the (2,2)
+  children at the cross call.
+* Reordering: one support pass on the o list before cross support
+  (replay 643 -> 660); the first cross pass on the longer list (627), the
+  shorter one (667) or always b (656) instead of always o (619), with 2%,
+  28% and 30% more children surviving; cross support with half the cells (the cells of one
+  placed vector) in either or both passes: 1.7-3.5x more children survive
+  cross support (8.6K -> 14.8-30K of 263K kids) and 5-24% slower. In pass 1,
+  the cell with the fewest b candidates loses all of them in 32% of the
+  calls (54% of its kills), so testing that class first would save ~12
+  cycles per call: not tried.
+* vpermq with indices from a 256-entry table instead of vpcompressq (2 uops
+  on port 5): -12% in the filter microbenchmark, but in place: replay
+  620.6 -> 616.5 (native), 625.7 -> 634.5 (cascadelake), prod (cascadelake)
+  14.17 -> 14.23 s; with an 8-byte table and vpmovzxbq: slower; in the
+  cross test: 400 -> 393 / 390 -> 393 (cross harness).
+* No lane masks in KEEP_CARRY (pad with full sets at entry): replay 626 ->
+  643 / 632 -> 635. Choosing the fold rotation without a branch (the
+  smallest of 0-3 by cmov, loop beyond): replay 643 -> 657 / 630 -> 651.
+* MRV by a minimum over the byte counters (count - 1, wrapping, 255 off
+  the unmatched cells; then one compare per word) instead of scanning the
+  classes 1, 2, ... (one compare per word per class, 5-20 classes at the
+  (1,2) nodes): same nodes, `full.txt` 3.42 -> 3.41 s user, no measurable
+  gain.
+* Without GFNI, counting the labels of long lists with few labels to count
+  by one test per label per 8 entries instead of a masked add per entry:
+  167 cols and 4 labels (the free cells of the placed row at a (1,2)
+  child) 249 -> 141 cycles in a microbenchmark, but 81 rows and 10 labels
+  125 -> 164, and much slower on short lists; for lists of 64 or more and
+  at most 4 labels per word, prod (cascadelake) 14.47 -> 14.47 s.
+* Forcing SUPPORT inline into TRY_CHILD: prod -2.5% native, +1.1%
+  cascadelake (noise ~2%); forcing CROSS inline: `full.txt` +1%.
+* Store forwarding: the lists are read right after the filters write them
+  with unaligned 8-lane stores; rewriting them that way or with aligned
+  stores before timing cross support in the cross harness: no difference.

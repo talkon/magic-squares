@@ -472,6 +472,71 @@ void prof_print(void) {
 }
 #endif
 
+#ifdef CHILD_PROF
+/*
+ * Profile of the creation of children on the carried path (build with
+ * -DCHILD_PROF; printed on exit): by the layer of the child (rows, cols
+ * placed), TSC cycles per phase of TRY_CHILD (and for choosing the kids in
+ * SEARCH_REC), how the children die, and the list sizes. The rdtsc pairs
+ * cost ~50% more time, which they add to the short phases most: for the
+ * share of a phase, timing builds that stop after it was more reliable
+ * (see research/ideas.md, "The cost of creating children").
+ */
+#include <x86intrin.h>
+enum { CP_FO, CP_FB, CP_CROSS, CP_SUP, CP_AFTER, CP_COUNT, CP_SEL, CP_NPH };
+enum { CD_CNT_O, CD_FC_O, CD_CNT_B, CD_FC_B, CD_CROSS, CD_SUP, CD_AFTER,
+       CD_LIVE, CD_N };
+#define CP_LAYERS (9 * 9)
+uint64_t cp_cyc[CP_LAYERS][CP_NPH], cp_calls[CP_LAYERS][CP_NPH],
+    cp_die[CP_LAYERS][CD_N], cp_in[CP_LAYERS][2], cp_out[CP_LAYERS][2],
+    cp_total;
+static void __attribute__((destructor)) cp_print(void) {
+  static const char *ph[CP_NPH] = {"filter o", "filter b", "cross",
+                                   "support",  "after",    "count",
+                                   "kids"};
+  static const char *dn[CD_N] = {"count o", "fc o",  "count b", "fc b",
+                                 "cross",   "support", "after", "live"};
+  fprintf(stderr, "search: %.3fG cycles\n", cp_total * 1e-9);
+  for (int l = 0; l < CP_LAYERS; l++) {
+    uint64_t made = 0;
+    for (int k = 0; k < CD_N; k++)
+      made += cp_die[l][k];
+    if (!made)
+      continue;
+    fprintf(stderr,
+            "(%d,%d): %llu children, lists in %.1f / %.1f, after the "
+            "filters %.1f / %.1f (o / b)\n",
+            l / 9, l % 9, (unsigned long long)made,
+            (double)cp_in[l][0] / made, (double)cp_in[l][1] / made,
+            (double)cp_out[l][0] / cp_calls[l][CP_FO],
+            cp_calls[l][CP_FB] ? (double)cp_out[l][1] / cp_calls[l][CP_FB] : 0);
+    for (int p = 0; p < CP_NPH; p++)
+      if (cp_calls[l][p])
+        fprintf(stderr, "  %-8s %11llu calls %7.1f cycles %5.1f%%\n", ph[p],
+                (unsigned long long)cp_calls[l][p],
+                (double)cp_cyc[l][p] / cp_calls[l][p],
+                100.0 * cp_cyc[l][p] / cp_total);
+    fprintf(stderr, "  died:");
+    for (int k = 0; k < CD_N; k++)
+      fprintf(stderr, " %s %.1f%%", dn[k], 100.0 * cp_die[l][k] / made);
+    fprintf(stderr, "\n");
+  }
+}
+#define CP_START() uint64_t cp_t = __rdtsc()
+#define CP_RESET() (cp_t = __rdtsc())
+#define CP_PHASE(l, p)                                                         \
+  do {                                                                         \
+    const uint64_t cp_u = __rdtsc();                                           \
+    cp_cyc[l][p] += cp_u - cp_t;                                               \
+    cp_calls[l][p]++;                                                          \
+    cp_t = cp_u;                                                               \
+  } while (0)
+#else
+#define CP_START()
+#define CP_RESET()
+#define CP_PHASE(l, p)
+#endif
+
 /* instantiate the recursive search for each bitset width */
 #define W 2
 #include "arrange_core.h"
