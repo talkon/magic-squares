@@ -90,18 +90,25 @@
  *   {"type":"dchunk","S":..,"d_lo":..,"d_hi":..,"nd":..,"pairs":..,...}
  * per completed chunk of d, and a final
  *   {"type":"dsum","mode":"dfirst",...,"nd":..,"d_stride":..,"pairs":..,
- *    "est_pairs":..,"time":..,"est_time":..,...,"complete":0|1}
+ *    "est_pairs":..,"time":..,"est_time":..,...,"cpu":..,"complete":0|1}
  * where pairs is the number of (square, SP traversal) pairs (what a magic
- * square needs twice) and complete says that every d of the sum was
+ * square needs twice), cpu the process CPU seconds as in a "sum" record
+ * (the d loop, the reduction and the enumeration share; time: the d loop
+ * only), and complete says that every d of the sum was
  * searched (not a --d-range part, a --d-stride sample, or a truncated
  * run). With --diag-first the "done" record has "mode":"dfirst" (and
  * diag_first_min_n): its range then also holds the d-first sums, which
  * have no "sum" record but are not empty, and with --d-range lo:hi, lo > 0,
  * the plain sums of the range get a "skip" record instead of a search
  * (the unit whose range starts at 0 searches them). Sampled plain searches
- * (--calib-r1-stride, --r1-*) write "csquare" records (the squares of the sampled r1) and a "csum"
- * record with est_squares, se_squares, est_time, se_time (se_strata_missing:
- * the strata with fewer than 2 sampled r1, left out of the se_*).
+ * (--calib-r1-stride, --r1-*) write "csquare" records (the squares of the
+ * sampled r1) and a "csum" record with est_squares, se_squares, est_time,
+ * se_time (se_strata_missing: the strata with fewer than 2 sampled r1, left
+ * out of the se_*; cpu: as in a "sum" record for --r1-*, the sampled search
+ * only for --calib-r1-stride, whose "dsum" record has the rest). A run that
+ * samples its plain sums (--r1-*) writes "r1_sample":1 (and
+ * "mode":"sampled" without --diag-first) in its "done" record: its range
+ * was not searched in full, and the scheduler skips the record.
  */
 #include <getopt.h>
 #include <math.h>
@@ -285,7 +292,7 @@ static uint64_t run_sampled(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
                             const prime_exps_t *p, uint64_t S, size_t raw,
                             const vec_list_t *red, const search_opts_t *so,
                             const char *mode, double enum_share,
-                            double reduce_time) {
+                            double reduce_time, double pre_cpu) {
   ctx->S = S;
   ctx->sampled = 1;
   /* the weight of a square: the stride of its r1 (with strata, see the
@@ -323,8 +330,8 @@ static uint64_t run_sampled(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           "\"reduce_time\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
           (unsigned long)st.r1_sampled, (unsigned long)st.squares,
           (unsigned long)ctx->sp_pairs, (unsigned long)ctx->s_trav,
-          (unsigned long)ctx->p_trav, (unsigned long)st.nodes, st.seconds, cpu,
-          st.setup_seconds, st.est_squares, st.se_squares,
+          (unsigned long)ctx->p_trav, (unsigned long)st.nodes, st.seconds,
+          cpu + pre_cpu, st.setup_seconds, st.est_squares, st.se_squares,
           ctx->weight > 0 ? ctx->weight * (double)ctx->sp_pairs : -1.0,
           st.est_nodes, st.est_seconds, st.se_seconds, st.r1_strata_nose,
           enum_share, reduce_time, st.truncated, ENGINE_VERSION);
@@ -340,7 +347,8 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
                            size_t d_stride, int64_t d_offset, uint64_t seed,
                            size_t d_lo, size_t d_hi, size_t d_chunk,
                            FILE *d_log, uint32_t calib_stride, int top_root,
-                           double enum_share, double reduce_time) {
+                           double enum_share, double reduce_time,
+                           double pre_cpu) {
   const double c0 = cpu_time();
   dfirst_t *df = dfirst_new(red, 0, red->count, all, start_i, raw);
   dfirst_set_top_root(df, top_root);
@@ -427,8 +435,8 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           "\"est_nodes\":%.6g,\"time\":%.6f,\"index_time\":%.6f,"
           "\"vd_time\":%.6f,\"setup_time\":%.6f,\"search_time\":%.6f,"
           "\"est_time\":%.6g,\"se_time\":%.6g,\"enum_time\":%.6f,"
-          "\"reduce_time\":%.6f,\"truncated\":%d,\"complete\":%d,"
-          "\"engine\":%d}\n",
+          "\"reduce_time\":%.6f,\"cpu\":%.6f,\"truncated\":%d,"
+          "\"complete\":%d,\"engine\":%d}\n",
           n, pstr, (unsigned long)pexp_value(p), (unsigned long)S, red->count,
           raw, labels, lo, hi, d_stride, off, (unsigned long)tot.nd,
           tot.nd ? (double)tot.vd_total / (double)tot.nd : 0.0,
@@ -437,15 +445,17 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           k * (double)tot.pairs, se_pairs, k * (double)tot.nodes, cpu, t_index,
           tot.vd_seconds, tot.setup_seconds, tot.search_seconds,
           t_index + k * (cpu - t_index), se_time, enum_share, reduce_time,
-          tot.truncated, complete, ENGINE_VERSION);
+          cpu + pre_cpu, tot.truncated, complete, ENGINE_VERSION);
   fflush(out);
   uint64_t nodes = tot.nodes;
   if (calib_stride > 0) {
     search_opts_t so = *opts;
     so.r1_stride = calib_stride;
     so.r1_offset = (uint32_t)(splitmix(sd + 202) % calib_stride);
+    /* (its "cpu" is the sampled search's only: the reduction and the
+     * enumeration are in the dsum record's) */
     nodes += run_sampled(out, ctx, pstr, n, p, S, raw, red, &so, "calib",
-                         enum_share, reduce_time);
+                         enum_share, reduce_time, 0.0);
   }
   return nodes;
 }
@@ -723,6 +733,10 @@ int main(int argc, char *argv[]) {
         fprintf(out, "sum %lu nvecs %zu\n", (unsigned long)S, red.count);
       char pstr[64];
       pexp_to_str(&p, pstr, ",");
+      /* this sum's share of the enumeration, and the process CPU seconds of
+       * its reduction and enumeration share (in every record's "cpu") */
+      const double share = (double)raw / (all.count ? all.count : 1);
+      const double pre_cpu = cpu_time() - cr + enum_cpu * share;
       if (diag_first && red.count < dfirst_min_n && d_range_lo > 0) {
         /* a plain sum in a --d-range unit: the units of a range split the
          * d of its d-first sums between them, but a plain sum is searched
@@ -739,10 +753,8 @@ int main(int argc, char *argv[]) {
         total_nodes += run_dfirst(out, &ctx, pstr, n, &p, S, &all, start_i,
                                   raw, &red, &opts, d_stride, d_offset, seed,
                                   d_range_lo, d_range_hi, d_chunk, d_log,
-                                  calib_stride, d_top_root,
-                                  enum_time * (double)raw /
-                                      (all.count ? all.count : 1),
-                                  reduce_time);
+                                  calib_stride, d_top_root, enum_time * share,
+                                  reduce_time, pre_cpu);
         if (total_node_limit && total_nodes >= total_node_limit)
           stop = stop_nodes = 1;
         if (time_limit > 0 && wall_time() - t_start >= time_limit)
@@ -767,10 +779,8 @@ int main(int argc, char *argv[]) {
         if (r1_log)
           fprintf(r1_log, "# S %lu N %zu\n", (unsigned long)S, red.count);
         total_nodes += run_sampled(out, &ctx, pstr, n, &p, S, raw, &red, &so,
-                                   "sampled",
-                                   enum_time * (double)raw /
-                                       (all.count ? all.count : 1),
-                                   reduce_time);
+                                   "sampled", enum_time * share, reduce_time,
+                                   pre_cpu);
         if (total_node_limit && total_nodes >= total_node_limit)
           stop = stop_nodes = 1;
         if (time_limit > 0 && wall_time() - t_start >= time_limit)
@@ -780,7 +790,6 @@ int main(int argc, char *argv[]) {
       search_stats_t st =
           search_vectors(&red, 0, red.count, &opts, square_found, &ctx);
       total_nodes += st.nodes;
-      double share = (double)raw / (all.count ? all.count : 1);
       double cpu = cpu_time() - cr + enum_cpu * share;
       if (legacy) {
         fprintf(out, "num searched: %lu\n", (unsigned long)st.nodes);
@@ -826,6 +835,13 @@ int main(int argc, char *argv[]) {
     if (diag_first)
       fprintf(out, ",\"mode\":\"dfirst\",\"diag_first_min_n\":%zu",
               dfirst_min_n);
+    else if (plain_sampled)
+      fprintf(out, ",\"mode\":\"sampled\"");
+    /* r1-sampled plain sums ("csum" records) were not searched in full:
+     * a sampled run's done record says so, and the scheduler skips it (as
+     * every record with "r1_sample") */
+    if (plain_sampled)
+      fprintf(out, ",\"r1_sample\":1");
     fprintf(out, "}\n");
   }
   if (legacy) {
