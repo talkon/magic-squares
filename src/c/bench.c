@@ -263,5 +263,7 @@ int main(int argc, char *argv[]) {
       printf("%d of %d instances FAILED\n", failures, ran);
   }
   free(r1_list);
+  if (opts.r1_log)
+    fclose(opts.r1_log);
   return failures ? 1 : 0;
 }
