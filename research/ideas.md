@@ -1690,3 +1690,83 @@ Tried on top of the new root, not kept:
 
 CPU used: ~31 min (gates ~6, experiments ~3, measurements ~19, the check of
 the plain path ~1.5).
+
+## Integration of cx/wide, cx/pretest and cx/dfirst (October 2026, branch cx/integrated)
+
+The three prototypes, each one commit on fdb77fc, cherry-picked in that
+order onto a3812f0, then the verifiers' required fixes in separate commits.
+
+**The root loop.** All three changed it: per-r1 width runs (wide), the
+stratified r1 sampling (dfirst, in search_opts_t), the top-label root
+(dfirst, `top_root_only`), and wide's env-driven `-DR1_SAMPLE`. Combined:
+
+* the roots are [0, root_limit) (all of N, or with `top_root_only` the
+  prefix of vectors through the top label), and search_root partitions
+  them into the width runs (each run at ceil((x + 1) / 64) words, at least
+  2 and at least `--min-words`; one run at the full width with
+  `--no-r1-width` or on the matrix path);
+* r1 sampling selects on the global index into the root list: strata are
+  equal index ranges of [0, root_limit), each run asks `r1_next` for the
+  first sampled r1 at or after its start, so every sampled r1 is searched
+  exactly once, at the width of its run, and the sample does not depend on
+  the widths (checked: the same r1, strata, strides, squares and nodes per
+  r1 as cx/dfirst's binary, with and without the pretest);
+* `-DR1_SAMPLE` is gone: its stride / offset / log are the opts sampling
+  (`SAMPLE_*` in bench and msearch), and its `SAMPLE_LIST` became
+  `opts.r1_list` (bench reads `SAMPLE_LIST`; the estimates are then the
+  sampled totals, no standard error). The r1 log keeps cx/dfirst's six
+  columns and adds wide's largest label and width, plus wide's "# run"
+  lines.
+
+The default path is node-identical to fdb77fc on bench quick / full / prod
+(1,770,779 / 14,958,507 / 50,375,738 nodes, every instance's squares and
+hash), also with `--no-r1-width`, `--pretest-min 0` and `--min-words 6`.
+
+**Verifier fixes.** The pretest's `filtered:` label is followed by an
+empty statement (a declaration after a label is C23 only); its early
+return counts the child in the `-DPROFILE` counters (the per-depth profile
+is now the same with the pretest on and off); `fuzz_arrange --dfirst`
+applies each variant's pretest and fixw, so the pt_* variants run in the
+V_d searches; new variants run the pretest at 5-8 words (pt_1_w5, pt_3_w6,
+pt_4_w7_fixw, pt_2_w8_xcross, pt_5_w8_fixw). For d-first: "dsum" records
+carry `"mode":"dfirst"` and `complete`, the "done" record of a
+`--diag-first` run `"mode":"dfirst"`, and scheduler.py's Results keeps
+d-first sums out of its fits (`results.dsums`, `results.dmagic`), covering
+a complete one and cutting incomplete ones out of the file's done ranges;
+with `--d-range lo:hi`, lo > 0, plain sums are left to the unit from d 0
+("skip" records); dfirst.c asserts at compile time that inv[] holds the
+involutions of n <= SQ_MAX_N; bench closes the SAMPLE_LOG file; strata
+with fewer than 2 sampled r1 are counted (`r1_strata_nose`,
+"se_strata_missing"), since the standard errors cannot include them.
+
+**The crossover moved to N ~ 5000.** Full searches on the integrated
+binary, process CPU seconds, min of 2 alternating runs, one at a time
+(`nice`, shared machine at load 1-2):
+
+| P | S | N | labels | plain | d-first | ratio | cx/dfirst ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 13 7 4 3 1 1 | 1850 | 2,523 | 115 | 3.00 | 3.63 | 1.21 | 1.2 |
+| 13 7 4 3 1 1 | 1900 | 4,111 | 137 | 23.79 | 31.30 | 1.32 | 0.86 |
+| 13 7 4 3 1 1 | 1950 | 5,896 | 153 | 149.58 | 116.11 | 0.78 | 0.61 |
+| 12 6 3 2 1 1 | 988 | 6,671 | 159 | 245.17 | 155.10 | 0.63 | 0.57 |
+
+The d-first times are those of cx/dfirst (31 s, 115 s, 156 s): the V_d
+searches have ~2 words of labels already. The plain search got 1.5x
+faster at S = 1900 (36 -> 24 s) and 1.25x at 1950 (187 -> 150 s): with
+137-159 labels fdb77fc ran every r1 at 3 words, the per-r1 widths run all
+but the first few at 2. Interpolated, the ratio crosses 1 at N ~ 4,960, so
+`--diag-first-min-n` defaults to 5000 (was 3000), which also keeps the
+plain search's semi-magic squares, for the models, for the sums below.
+At N >= 11k the ratios of cx/dfirst (0.27-0.37) still need re-measuring
+on this binary: wide speeds up the plain search there by 1.0-1.3x where
+the heavy r1 need fewer words (2.8x above 256 labels), and the V_d
+searches by 2.2x above 256 labels; the pretest speeds up the plain search
+by 1.1-1.17x and V_d by ~1.0x.
+
+Gates: `ctest -R fast_` (40 tests) passes; `fuzz_arrange` on fresh seeds
+(52000000-52700199): 500 default, 500 mode 7, 500 `--dfirst` (every
+variant, pt_* included), 200 `--dfirst --mode 7`, 200
+`fuzz_arrange_matrices --dfirst`, 100 matrices mode 7, 200 portable, 20
+mode 6 with the wide and pretest variants: 0 fails; `scripts/
+test_scheduler.py` has a d-first test (synthetic records, and msearch
+output with complete, sampled and d-range units).

@@ -58,12 +58,17 @@ it costs the same as the plain search at N ~ 5000 (the default
 `--diag-first-min-n`; 1.32x at N = 4.1k, 0.78x at 5.9k, 0.63x at 6.7k with
 the integrated search, whose per-r1 widths sped up the plain search there
 more than the V_d searches; 0.27-0.37x at 11-23k on fdb77fc, ideas.md has
-the measurements), but it
-does not enumerate the semi-magic squares: d-first sums write "dsquare" records (one per pair,
-with `set_count` = `sp_count`, `magic`, `partner`; dedupe magic squares by
-`hash`), "dchunk" checkpoint records every `--d-chunk` (256) indices of d
-and a "dsum" record (`pairs`, `est_pairs`, `est_time` with `--d-stride`),
-not "square" / "sum" records (the scheduler ignores them).
+the measurements), but it does not enumerate the semi-magic squares:
+d-first sums write "dsquare" records (one per pair, with `set_count` =
+`sp_count`, `magic`, `partner`; dedupe magic squares by `hash`), "dchunk"
+checkpoint records every `--d-chunk` (256) indices of d and a "dsum"
+record (`pairs`, `est_pairs`, `est_time` with `--d-stride`; `complete` when
+every d was searched), not "square" / "sum" records. The "done" record of a
+`--diag-first` run has `"mode":"dfirst"`; `scripts/scheduler.py` keeps the
+d-first sums out of its fits, counts a complete one as searched and a
+part of one (a `--d-range` unit, a `--d-stride` sample) as not. With
+`--d-range lo:hi`, only the unit with lo = 0 searches the plain sums of the
+range (the others write a "skip" record).
 `--calib-r1-stride k` adds a plain search of every k-th first row (a
 "csum" record with `est_squares`, `se_squares`, the traversal totals, and
 "csquare" records) for the models of semi-magic squares per sum.
@@ -74,11 +79,17 @@ not "square" / "sum" records (the scheduler ignores them).
 ranges of the root list, sampled with their own strides from random
 offsets; the early first rows, whose universes are the largest, hold most of
 the time), and `--r1-log FILE` (one line per first row: r1, stratum,
-stride, squares, nodes, CPU seconds); also the environment variables
-`SAMPLE_STRIDE`, `SAMPLE_OFFSET`, `SAMPLE_LOG` of msearch and bench. The
-searched first rows are independent subproblems (r1 is a square's
-lowest-index vector), so the "csum" record's `est_*` (stride x the sampled
-totals) are unbiased for the whole sum, with stratified standard errors.
+stride, squares, nodes, CPU seconds, its largest label, the width it was
+searched at; a "# run" line per width run); also the environment variables
+`SAMPLE_STRIDE`, `SAMPLE_OFFSET`, `SAMPLE_LOG` of msearch and bench, and
+`SAMPLE_LIST` (r1 by index, comma-separated: the same r1 in two binaries)
+of bench. The r1 are global indices into the root list, whatever width
+each is searched at, so a sample is the same with and without
+`--no-r1-width`. The searched first rows are independent subproblems (r1
+is a square's lowest-index vector), so the "csum" record's `est_*` (stride
+x the sampled totals) are unbiased for the whole sum, with stratified
+standard errors; `se_strata_missing` counts the strata with fewer than 2
+sampled r1, which the standard errors leave out.
 
 ## bench: arrangement benchmark
 
