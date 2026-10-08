@@ -1,0 +1,389 @@
+From 53252f1f5653abedf8f622fe901dc88c569eb15e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 02:47:11 +0000
+Subject: [PATCH 1/2] arrange: scaling instrumentation (-DSCALE_PROF,
+ -DSCALE_FIX), r1 sampling
+
+Scratch instrumentation for profiling how the search's work grows with N
+(not for production; compiled out by default, the default build is
+unchanged):
+
+- -DSCALE_PROF: the -DCHILD_PROF counts by layer without the per-phase
+  rdtsc (~8% overhead), statistics of the searched nodes by layer (list
+  sizes, kids, a log2 histogram of kids, nodes whose subtree has a
+  square), r1 sampling (env SAMPLE_STRIDE, SAMPLE_OFFSET: r1 = off,
+  off + stride, ...), a per-r1 log (env SAMPLE_LOG: label, universe,
+  depth-1 lists and kids, squares, nodes, TSC cycles, thread CPU ns,
+  (1,1)/(1,2)/(2,1)/(2,2) counts), and a JSON dump on exit (env SC_OUT).
+  With -DCHILD_PROF too, the per-phase cycles are in the dump.
+- -DSCALE_FIX (with SCALE_PROF): at each searched (2,2) node, whether
+  cross support + the support filter iterated to their fixpoint would kill
+  it (on a copy of the lists); at the (2,3)/(3,2) children, the number of
+  same-axis candidates disjoint from the new vector without the support
+  test.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ src/c/arrange.c      |  91 ++++++++++++++++++++++++-
+ src/c/arrange_core.h | 154 +++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 237 insertions(+), 8 deletions(-)
+
+diff --git a/src/c/arrange.c b/src/c/arrange.c
+index a8cc3a0..0bb1aa8 100644
+--- a/src/c/arrange.c
++++ b/src/c/arrange.c
+@@ -472,7 +472,10 @@ void prof_print(void) {
+ }
+ #endif
+ 
+-#ifdef CHILD_PROF
++#if defined(CHILD_PROF) || defined(SCALE_PROF)
++#define CPROF 1
++#endif
++#ifdef CPROF
+ /*
+  * Profile of the creation of children on the carried path (build with
+  * -DCHILD_PROF; printed on exit): by the layer of the child (rows, cols
+@@ -481,21 +484,101 @@ void prof_print(void) {
+  * cost ~50% more time, which they add to the short phases most: for the
+  * share of a phase, timing builds that stop after it was more reliable
+  * (see research/ideas.md, "The cost of creating children").
++ *
++ * -DSCALE_PROF (scratch instrumentation, cx/profile): the same counts
++ * without the per-phase rdtsc, plus statistics of the searched nodes by
++ * layer (list sizes, kids), r1 sampling (env SAMPLE_STRIDE, SAMPLE_OFFSET)
++ * and a per-r1 log (env SAMPLE_LOG); everything is dumped as JSON to the
++ * file named by env SC_OUT on exit.
+  */
++#include <time.h>
+ #include <x86intrin.h>
+ enum { CP_FO, CP_FB, CP_CROSS, CP_SUP, CP_AFTER, CP_COUNT, CP_SEL, CP_NPH };
+ enum { CD_CNT_O, CD_FC_O, CD_CNT_B, CD_FC_B, CD_CROSS, CD_SUP, CD_AFTER,
+        CD_LIVE, CD_N };
+ #define CP_LAYERS (9 * 9)
++#define SC_KH 12
+ uint64_t cp_cyc[CP_LAYERS][CP_NPH], cp_calls[CP_LAYERS][CP_NPH],
+     cp_die[CP_LAYERS][CD_N], cp_in[CP_LAYERS][2], cp_out[CP_LAYERS][2],
+     cp_total;
++/* searched nodes by layer: count, list sizes (rows, cols), kids, sum of
++ * squares of kids, histogram of kids (log2 buckets) */
++uint64_t sn_cnt[CP_LAYERS], sn_rows[CP_LAYERS], sn_cols[CP_LAYERS],
++    sn_kids[CP_LAYERS], sn_kids2[CP_LAYERS], sn_khist[CP_LAYERS][SC_KH];
++/* searched nodes whose subtree has a square; and (SCALE_FIX) searched
++ * (2,2) nodes tested by cross + support iterated to their fixpoint: tested,
++ * killed, and the list sizes before / after for the survivors */
++uint64_t sn_prod[CP_LAYERS], fx_tested, fx_killed, fx_in, fx_out;
++/* (SCALE_FIX) at the (2,3)/(3,2) children reaching their b filter: calls,
++ * same-axis candidates disjoint from v (no support test), children with
++ * fewer of those than needed, and the kept count with the support test */
++uint64_t dj_calls, dj_sum, dj_short, dj_kb;
++/* per-r1: the depth-1 node's lists and kids (if it was searched) */
++uint32_t sc_d1_alive, sc_d1_rows, sc_d1_cols, sc_d1_kids;
++uint64_t sc_N, sc_L, sc_W, sc_r1_sampled, sc_stride, sc_off;
++static double sc_cpu_ns(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++  return 1e9 * (double)t.tv_sec + (double)t.tv_nsec;
++}
+ static void __attribute__((destructor)) cp_print(void) {
+   static const char *ph[CP_NPH] = {"filter o", "filter b", "cross",
+                                    "support",  "after",    "count",
+                                    "kids"};
+   static const char *dn[CD_N] = {"count o", "fc o",  "count b", "fc b",
+                                  "cross",   "support", "after", "live"};
++  const char *fn = getenv("SC_OUT");
++  if (fn) {
++    FILE *f = fopen(fn, "w");
++    if (!f)
++      return;
++    fprintf(f, "{\"N\":%llu,\"L\":%llu,\"W\":%llu,\"stride\":%llu,\"off\":%llu,"
++               "\"r1_sampled\":%llu,\"total_cyc\":%llu,",
++            (unsigned long long)sc_N, (unsigned long long)sc_L,
++            (unsigned long long)sc_W, (unsigned long long)sc_stride,
++            (unsigned long long)sc_off, (unsigned long long)sc_r1_sampled,
++            (unsigned long long)cp_total);
++    fprintf(f, "\"fx\":[%llu,%llu,%llu,%llu],", (unsigned long long)fx_tested,
++            (unsigned long long)fx_killed, (unsigned long long)fx_in,
++            (unsigned long long)fx_out);
++    fprintf(f, "\"dj\":[%llu,%llu,%llu,%llu],", (unsigned long long)dj_calls,
++            (unsigned long long)dj_sum, (unsigned long long)dj_short,
++            (unsigned long long)dj_kb);
++    fprintf(f, "\"layers\":[");
++    int first = 1;
++    for (int l = 0; l < CP_LAYERS; l++) {
++      uint64_t made = 0;
++      for (int k = 0; k < CD_N; k++)
++        made += cp_die[l][k];
++      if (!made && !sn_cnt[l])
++        continue;
++      fprintf(f, "%s{\"r\":%d,\"c\":%d,\"made\":%llu,\"in\":[%llu,%llu],"
++                 "\"out\":[%llu,%llu],\"die\":[",
++              first ? "" : ",", l / 9, l % 9, (unsigned long long)made,
++              (unsigned long long)cp_in[l][0], (unsigned long long)cp_in[l][1],
++              (unsigned long long)cp_out[l][0], (unsigned long long)cp_out[l][1]);
++      first = 0;
++      for (int k = 0; k < CD_N; k++)
++        fprintf(f, "%s%llu", k ? "," : "", (unsigned long long)cp_die[l][k]);
++      fprintf(f, "],\"calls\":[");
++      for (int p = 0; p < CP_NPH; p++)
++        fprintf(f, "%s%llu", p ? "," : "", (unsigned long long)cp_calls[l][p]);
++      fprintf(f, "],\"cyc\":[");
++      for (int p = 0; p < CP_NPH; p++)
++        fprintf(f, "%s%llu", p ? "," : "", (unsigned long long)cp_cyc[l][p]);
++      fprintf(f, "],\"prod\":%llu", (unsigned long long)sn_prod[l]);
++      fprintf(f, ",\"sn\":[%llu,%llu,%llu,%llu,%llu],\"khist\":[",
++              (unsigned long long)sn_cnt[l], (unsigned long long)sn_rows[l],
++              (unsigned long long)sn_cols[l], (unsigned long long)sn_kids[l],
++              (unsigned long long)sn_kids2[l]);
++      for (int k = 0; k < SC_KH; k++)
++        fprintf(f, "%s%llu", k ? "," : "", (unsigned long long)sn_khist[l][k]);
++      fprintf(f, "]}");
++    }
++    fprintf(f, "]}\n");
++    fclose(f);
++    return;
++  }
+   fprintf(stderr, "search: %.3fG cycles\n", cp_total * 1e-9);
+   for (int l = 0; l < CP_LAYERS; l++) {
+     uint64_t made = 0;
+@@ -522,6 +605,8 @@ static void __attribute__((destructor)) cp_print(void) {
+     fprintf(stderr, "\n");
+   }
+ }
++#endif
++#ifdef CHILD_PROF
+ #define CP_START() uint64_t cp_t = __rdtsc()
+ #define CP_RESET() (cp_t = __rdtsc())
+ #define CP_PHASE(l, p)                                                         \
+@@ -531,6 +616,10 @@ static void __attribute__((destructor)) cp_print(void) {
+     cp_calls[l][p]++;                                                          \
+     cp_t = cp_u;                                                               \
+   } while (0)
++#elif defined(SCALE_PROF)
++#define CP_START()
++#define CP_RESET()
++#define CP_PHASE(l, p) (cp_calls[l][p]++)
+ #else
+ #define CP_START()
+ #define CP_RESET()
+diff --git a/src/c/arrange_core.h b/src/c/arrange_core.h
+index fdd4e82..e2e12cb 100644
+--- a/src/c/arrange_core.h
++++ b/src/c/arrange_core.h
+@@ -1006,7 +1006,7 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+    * >= min_v are the ones from position min_v on (min_v = 0 below the
+    * root) */
+   uint64_t *uo = s->uni[d + 1][o], *ub = s->uni[d + 1][b];
+-#ifdef CHILD_PROF
++#ifdef CPROF
+   const int pl = 9 * s->np[ROW] + s->np[COL];
+   int why = CD_LIVE; /* the test that killed the child */
+ #define CP_WHY(k) (why = dead && why == CD_LIVE ? (k) : why)
+@@ -1019,7 +1019,7 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+   uint32_t ko = FILTER_CARRY(s, s->vw[d][o] + min_v, s->nvalid[d][o] - min_v,
+                              m, 1, NULL, s->vw[d + 1][o], uo);
+   CP_PHASE(pl, CP_FO);
+-#ifdef CHILD_PROF
++#ifdef CPROF
+   cp_out[pl][0] += ko;
+ #endif
+   s->nvalid[d + 1][o] = ko;
+@@ -1039,10 +1039,26 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+                                s->nvalid[d][b] - min_v, m, 0,
+                                sup ? excl : NULL, s->vw[d + 1][b], ub);
+     CP_PHASE(pl, CP_FB);
+-#ifdef CHILD_PROF
++#ifdef CPROF
+     cp_out[pl][1] += kb;
+ #endif
+     s->nvalid[d + 1][b] = kb;
++#ifdef SCALE_FIX
++    if (s->np[ROW] + s->np[COL] == 5 && s->np[ROW] >= 2 && s->np[COL] >= 2) {
++      uint32_t c = 0;
++      const uint64_t *L0 = s->vw[d][b];
++      for (uint32_t i = 0; i < s->nvalid[d][b]; i++) {
++        uint64_t hit = 0;
++        for (int w = 0; w < W; w++)
++          hit |= L0[w * s->cap + i] & m[w];
++        c += hit == 0;
++      }
++      dj_calls++;
++      dj_sum += c;
++      dj_short += s->np[b] + (int)c < n;
++      dj_kb += kb;
++    }
++#endif
+     if (s->np[b] + (int)kb < n)
+       dead = 1;
+     CP_WHY(CD_CNT_B);
+@@ -1117,10 +1133,57 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+                     s->cnt[d + 1][b]);
+         CP_PHASE(pl, CP_COUNT);
+       }
++#ifdef SCALE_FIX
++      /* diagnostic: would cross support + the support filter, iterated to
++       * their common fixpoint, kill this searched (2,2) node? (on a copy of
++       * the lists, restored afterwards) */
++      if (cross) {
++        static uint64_t sv[2][4 * 4096];
++        uint64_t su[2][4];
++        uint32_t sn[2];
++        for (int a = 0; a < 2; a++) {
++          sn[a] = s->nvalid[d + 1][a];
++          for (int w = 0; w < W; w++) {
++            memcpy(sv[a] + w * 4096, s->vw[d + 1][a] + w * s->cap,
++                   sn[a] * sizeof(uint64_t));
++            su[a][w] = s->uni[d + 1][a][w];
++          }
++        }
++        fx_tested++;
++        fx_in += sn[0] + sn[1];
++        int fd = 0;
++        for (;;) {
++          const uint32_t k0 = s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
++          fd = CROSS(s, d + 1, o);
++          if (!fd)
++            fd = SUPPORT(s, d + 1, o, 1);
++          if (fd || s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL] == k0)
++            break;
++        }
++        fx_killed += fd != 0;
++        if (!fd)
++          fx_out += s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
++        for (int a = 0; a < 2; a++) {
++          s->nvalid[d + 1][a] = sn[a];
++          for (int w = 0; w < W; w++) {
++            memcpy(s->vw[d + 1][a] + w * s->cap, sv[a] + w * 4096,
++                   sn[a] * sizeof(uint64_t));
++            s->uni[d + 1][a][w] = su[a][w];
++          }
++        }
++      }
++#endif
++#ifdef SCALE_PROF
++      const uint64_t sq_before = s->squares;
++      SEARCH_REC(s, d + 1);
++      if (s->squares > sq_before)
++        sn_prod[pl]++;
++#else
+       SEARCH_REC(s, d + 1);
++#endif
+     }
+   }
+-#ifdef CHILD_PROF
++#ifdef CPROF
+   cp_die[pl][why]++;
+ #endif
+ #undef CP_WHY
+@@ -1196,7 +1259,7 @@ static void SEARCH_REC(sstate_t *s, int d) {
+ #endif
+   if (s->stop)
+     return;
+-#if defined(CHILD_PROF) && defined(CARRY)
++#if defined(CPROF) && defined(CARRY)
+   const int pl = 9 * s->np[ROW] + s->np[COL];
+   CP_START();
+ #endif
+@@ -1335,6 +1398,25 @@ static void SEARCH_REC(sstate_t *s, int d) {
+   PAD_LIST(s, s->vw[d][ROW], s->nvalid[d][ROW]);
+   PAD_LIST(s, s->vw[d][COL], s->nvalid[d][COL]);
+   CP_PHASE(pl, CP_SEL);
++#ifdef SCALE_PROF
++  sn_cnt[pl]++;
++  sn_rows[pl] += s->nvalid[d][ROW];
++  sn_cols[pl] += s->nvalid[d][COL];
++  sn_kids[pl] += nk;
++  sn_kids2[pl] += (uint64_t)nk * nk;
++  {
++    int kb = 0;
++    while (kb < SC_KH - 1 && (1u << kb) <= nk)
++      kb++;
++    sn_khist[pl][kb]++; /* bucket kb: nk in [2^(kb-1), 2^kb) (0: nk = 0) */
++  }
++  if (d == 1) {
++    sc_d1_alive = 1;
++    sc_d1_rows = s->nvalid[d][ROW];
++    sc_d1_cols = s->nvalid[d][COL];
++    sc_d1_kids = nk;
++  }
++#endif
+   for (uint32_t i = 0; i < nk && !s->stop; i++) {
+     uint64_t m[W];
+     for (int w = 0; w < W; w++)
+@@ -1375,12 +1457,70 @@ static void SEARCH_ROOT(sstate_t *s) {
+     for (int w = 0; w < W; w++)
+       s->cells[0][a][w] = 0;
+   }
+-#if defined(CHILD_PROF) && defined(CARRY)
++#if defined(CPROF) && defined(CARRY)
+   const uint64_t cp_t0 = __rdtsc();
+ #endif
++#ifdef SCALE_PROF
++  /* r1 sampling: r1 = off, off + stride, ... (env SAMPLE_STRIDE,
++   * SAMPLE_OFFSET), with a per-r1 log (env SAMPLE_LOG) */
++  uint32_t stride = 1, off = 0;
++  {
++    const char *es = getenv("SAMPLE_STRIDE"), *eo = getenv("SAMPLE_OFFSET");
++    if (es)
++      stride = (uint32_t)strtoul(es, 0, 10);
++    if (eo)
++      off = (uint32_t)strtoul(eo, 0, 10);
++    if (stride < 1)
++      stride = 1;
++    off %= stride;
++  }
++  const char *lf = getenv("SAMPLE_LOG");
++  FILE *lg = lf ? fopen(lf, "a") : 0;
++  sc_N = count;
++  sc_L = s->L;
++  sc_W = W;
++  sc_stride = stride;
++  sc_off = off;
++  if (lg)
++    fprintf(lg, "# N %u L %u W %d stride %u off %u\n", count, s->L, W, stride,
++            off);
++  const int L22 = 9 * 2 + 2;
++  for (uint32_t r1 = off; r1 < count && !s->stop; r1 += stride) {
++    const uint64_t sq0 = s->squares, nd0 = s->nodes;
++    uint64_t c22 = 0;
++    for (int k = 0; k < CD_N; k++)
++      c22 += cp_die[L22][k];
++    const uint64_t s11 = sn_cnt[10], s12 = sn_cnt[11] + sn_cnt[19],
++                   s22 = sn_cnt[L22];
++    sc_d1_alive = sc_d1_rows = sc_d1_cols = sc_d1_kids = 0;
++    const double ns0 = sc_cpu_ns();
++    const uint64_t t0 = __rdtsc();
++    TRY_CHILD(s, 0, ROW, s->bits + (uint64_t)r1 * W, r1, r1 + 1);
++    const uint64_t t1 = __rdtsc();
++    const double ns1 = sc_cpu_ns();
++    sc_r1_sampled++;
++    uint64_t c22b = 0;
++    for (int k = 0; k < CD_N; k++)
++      c22b += cp_die[L22][k];
++    if (lg)
++      fprintf(lg, "%u %u %u %u %u %u %u %llu %llu %llu %.0f %llu %llu %llu %llu\n",
++              r1, (unsigned)s->lab[r1][0], count - r1 - 1, sc_d1_alive,
++              sc_d1_rows, sc_d1_cols, sc_d1_kids,
++              (unsigned long long)(s->squares - sq0),
++              (unsigned long long)(s->nodes - nd0),
++              (unsigned long long)(t1 - t0), ns1 - ns0,
++              (unsigned long long)(sn_cnt[10] - s11),
++              (unsigned long long)(sn_cnt[11] + sn_cnt[19] - s12),
++              (unsigned long long)(c22b - c22),
++              (unsigned long long)(sn_cnt[L22] - s22));
++  }
++  if (lg)
++    fclose(lg);
++#else
+   for (uint32_t r1 = 0; r1 < count && !s->stop; r1++)
+     TRY_CHILD(s, 0, ROW, s->bits + (uint64_t)r1 * W, r1, r1 + 1);
+-#if defined(CHILD_PROF) && defined(CARRY)
++#endif
++#if defined(CPROF) && defined(CARRY)
+   cp_total += __rdtsc() - cp_t0;
+ #endif
+ }
+-- 
+2.43.0
+

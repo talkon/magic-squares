@@ -1,0 +1,756 @@
+From 3dc9b05924b9875ebfb2a39194d5c00bf77ff3e6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 03:41:06 +0000
+Subject: [PATCH 2/2] arrange: pruning-at-scale experiments (-DPRETEST,
+ -DSURV_FIX, -DPRUNE_DIAG)
+
+Scratch experiments for the large-N cost study (cx/prune), all compiled
+out by default (the default build visits the same nodes as fdb77fc:
+quick 1,770,779, full 14,958,507, prod 50,375,738).
+
+- PRETEST: the children five or more vectors deep (nearly all (2,3)/(3,2))
+  first run the count and forward checks that follow their two filters on
+  counts and unions only (FILTER_COUNT: no compress, no store); the ones
+  that die there are exactly the ones the real filters would kill, so the
+  nodes and squares are unchanged. Env PRETEST_MIN (default 5).
+- SURV_FIX: the (2,2) children that survive the cascade get cross support
+  and the support filter iterated to their fixpoint (env SURV_FIX_MIN,
+  SURV_FIX_ROUNDS; FORCE_AFTER forces the cascade order).
+- PRUNE_DIAG: reference implementations of cross, cell (exactly-once) and
+  pair support iterated to their fixpoints, evaluated on copies of the
+  lists of sampled (2,2) children, searched (2,2) and (1,2)/(2,1) nodes,
+  with the MRV count before/after; a timed build of the exactly-once
+  relation at the (1,1) nodes; the possible diagonals at (1,2)/(2,1)
+  nodes (PD_DIAG_ONLY). JSON to env PD_OUT.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ src/c/arrange.c      |  99 ++++++++
+ src/c/arrange_core.h | 527 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 626 insertions(+)
+
+diff --git a/src/c/arrange.c b/src/c/arrange.c
+index 0bb1aa8..e5a7782 100644
+--- a/src/c/arrange.c
++++ b/src/c/arrange.c
+@@ -626,6 +626,101 @@ static void __attribute__((destructor)) cp_print(void) {
+ #define CP_PHASE(l, p)
+ #endif
+ 
++#ifdef PRUNE_DIAG
++/*
++ * Scratch diagnostics (cx/prune): kill rates of stronger rules, evaluated
++ * on copies of the lists of sampled nodes (see PD_FIX in arrange_core.h).
++ * Tests: 0 = one round of cross + support fixpoint (the current cascade's
++ * "before" mode), 1 = one round of cell support + support fixpoint,
++ * 2 = cross + support to their fixpoint, 3 = cell + support to their
++ * fixpoint, 4 = cell + pair + cross + support to their fixpoint,
++ * 5 = pair + support to their fixpoint.
++ * Points: 1 = (2,2) children after filter b, 2 = searched (2,2) nodes,
++ * 3 = searched (1,2)/(2,1) nodes. Printed as JSON to env PD_OUT on exit.
++ */
++#include <x86intrin.h>
++#define PD_NT 6
++#define PD_NP 4
++uint64_t pd_tested[PD_NP], pd_prod[PD_NP], pd_alive[PD_NP], pd_nodes[PD_NP],
++    pd_cyc[PD_NP], pd_lists[PD_NP], pd_killed[PD_NP][PD_NT],
++    pd_kprod[PD_NP][PD_NT], pd_knodes[PD_NP][PD_NT], pd_kcyc[PD_NP][PD_NT],
++    pd_tests[PD_NP][PD_NT], pd_left[PD_NP][PD_NT];
++uint32_t pd_tick[PD_NP], pd_last_mrv;
++int pd_diag_only;
++uint64_t pdd_n, pdd_sum, pdd_pair, pdd_kids, pdd_kept, pdd_kd;
++uint64_t pd_mrv_in[PD_NP], pd_mrv_out[PD_NP][PD_NT];
++uint32_t pd_every[PD_NP] = {1, 64, 16, 256};
++/* (1,1) nodes: relation build timing */
++uint64_t pd11_tested, pd11_build, pd11_sub, pd11_pairs, pd11_rows, pd11_cols,
++    pd11_nodes;
++static void __attribute__((constructor)) pd_init(void) {
++  pd_diag_only = getenv("PD_DIAG_ONLY") != 0;
++  const char *e[PD_NP] = {"PD_E0", "PD_E1", "PD_E2", "PD_E3"};
++  for (int p = 0; p < PD_NP; p++)
++    if (getenv(e[p]))
++      pd_every[p] = (uint32_t)strtoul(getenv(e[p]), 0, 10);
++}
++static void __attribute__((destructor)) pd_print(void) {
++  const char *fn = getenv("PD_OUT");
++  FILE *f = fn ? fopen(fn, "w") : stderr;
++  if (!f)
++    return;
++  fprintf(f, "{\"points\":[");
++  for (int p = 1; p < PD_NP; p++) {
++    fprintf(f, "%s{\"p\":%d,\"tested\":%llu,\"prod\":%llu,\"alive\":%llu,"
++               "\"nodes\":%llu,\"cyc\":%llu,\"lists\":%llu,\"t\":[",
++            p > 1 ? "," : "", p, (unsigned long long)pd_tested[p],
++            (unsigned long long)pd_prod[p], (unsigned long long)pd_alive[p],
++            (unsigned long long)pd_nodes[p], (unsigned long long)pd_cyc[p],
++            (unsigned long long)pd_lists[p]);
++    fprintf(f, "],\"mrv_in\":%llu,\"mrv_out\":[", (unsigned long long)pd_mrv_in[p]);
++    for (int t = 0; t < PD_NT; t++)
++      fprintf(f, "%s%llu", t ? "," : "", (unsigned long long)pd_mrv_out[p][t]);
++    fprintf(f, "],\"t2\":[");
++    for (int t = 0; t < PD_NT; t++)
++      fprintf(f, "%s[%llu,%llu,%llu,%llu,%llu,%llu]", t ? "," : "",
++              (unsigned long long)pd_killed[p][t],
++              (unsigned long long)pd_kprod[p][t],
++              (unsigned long long)pd_knodes[p][t],
++              (unsigned long long)pd_kcyc[p][t],
++              (unsigned long long)pd_tests[p][t],
++              (unsigned long long)pd_left[p][t]);
++    fprintf(f, "]}");
++  }
++  fprintf(f, "],\"diag\":[%llu,%llu,%llu,%llu,%llu,%llu]", (unsigned long long)pdd_n,
++          (unsigned long long)pdd_sum, (unsigned long long)pdd_pair,
++          (unsigned long long)pdd_kids, (unsigned long long)pdd_kept,
++          (unsigned long long)pdd_kd);
++  fprintf(f, ",\"r11\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu]}\n",
++          (unsigned long long)pd11_tested, (unsigned long long)pd11_build,
++          (unsigned long long)pd11_sub, (unsigned long long)pd11_pairs,
++          (unsigned long long)pd11_rows, (unsigned long long)pd11_cols,
++          (unsigned long long)pd11_nodes);
++  if (fn)
++    fclose(f);
++}
++#endif
++
++#ifdef SURV_FIX
++static uint32_t surv_fix_min;
++static int surv_fix_rounds = 1000;
++static int force_after; /* env FORCE_AFTER: 1 = support filter first, -1 = cross first */
++static void __attribute__((constructor)) surv_fix_init(void) {
++  if (getenv("SURV_FIX_ROUNDS"))
++    surv_fix_rounds = atoi(getenv("SURV_FIX_ROUNDS"));
++  if (getenv("FORCE_AFTER"))
++    force_after = atoi(getenv("FORCE_AFTER"));
++  if (getenv("SURV_FIX_MIN"))
++    surv_fix_min = (uint32_t)strtoul(getenv("SURV_FIX_MIN"), 0, 10);
++}
++#endif
++#ifdef PRETEST
++static int pretest_min = 5;
++static void __attribute__((constructor)) pretest_init(void) {
++  if (getenv("PRETEST_MIN"))
++    pretest_min = atoi(getenv("PRETEST_MIN"));
++}
++#endif
+ /* instantiate the recursive search for each bitset width */
+ #define W 2
+ #include "arrange_core.h"
+@@ -753,6 +848,10 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
+ 
+   sstate_t s;
+   memset(&s, 0, sizeof(s));
++#ifdef SURV_FIX
++  if (force_after > 0)
++    s.cross_after = 1;
++#endif
+   s.n = n;
+   s.N = (uint32_t)count;
+   s.opts = *opts;
+diff --git a/src/c/arrange_core.h b/src/c/arrange_core.h
+index e2e12cb..01a960d 100644
+--- a/src/c/arrange_core.h
++++ b/src/c/arrange_core.h
+@@ -218,6 +218,71 @@ static inline uint32_t FILTER_CARRY(const sstate_t *s, const uint64_t *in,
+   return k;
+ }
+ 
++#ifdef PRETEST
++/*
++ * Experiment (cx/prune): FILTER_CARRY without the output, for the children
++ * five vectors deep, which nearly all die at the count or forward check
++ * right after the two filters: the number of entries it would keep and
++ * their union, with no compress or store. Same precondition (padding).
++ */
++#define FILTER_COUNT CAT(filter_count, W)
++static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint64_t *in,
++                                    uint32_t cnt, const uint64_t *vb,
++                                    const int once, const uint64_t *excl,
++                                    uint64_t *un /* [W] */) {
++  const size_t cap = s->cap;
++  __m512i V[W], R[W], acc[W];
++  bool tw[W];
++  uint64_t used = 0;
++  for (int w = 0; w < W; w++) {
++    uint64_t t = vb[w] | (!once && excl ? excl[w] : 0);
++    int r = 0;
++    if (once && w > 0)
++      while (rotl64(t, r) & used)
++        r++;
++    t = rotl64(t, r);
++    used |= t;
++    V[w] = _mm512_set1_epi64((long long)t);
++    R[w] = _mm512_set1_epi64(r);
++    acc[w] = _mm512_setzero_si512();
++    tw[w] = W <= 2 || t;
++  }
++  uint32_t k = 0;
++  for (uint32_t i = 0; i < cnt; i += 8) {
++    __m512i x[W];
++    for (int w = 0; w < W; w++)
++      x[w] = _mm512_loadu_si512(in + w * cap + i);
++    __mmask8 keep;
++    if (once) {
++      __m512i c = _mm512_and_si512(x[0], V[0]);
++      for (int w = 1; w < W; w++)
++        if (tw[w])
++          c = _mm512_ternarylogic_epi64(c, _mm512_rolv_epi64(x[w], R[w]),
++                                        V[w], 0xF8);
++#ifdef __AVX512VPOPCNTDQ__
++      keep = _mm512_cmpeq_epi64_mask(_mm512_popcnt_epi64(c),
++                                     _mm512_set1_epi64(1));
++#else
++      keep = _mm512_mask_testn_epi64_mask(
++          _mm512_test_epi64_mask(c, c), c,
++          _mm512_sub_epi64(c, _mm512_set1_epi64(1)));
++#endif
++    } else {
++      keep = 0xff;
++      for (int w = 0; w < W; w++)
++        if (tw[w])
++          keep = _mm512_mask_testn_epi64_mask(keep, x[w], V[w]);
++    }
++    for (int w = 0; w < W; w++)
++      acc[w] = _mm512_mask_or_epi64(acc[w], keep, acc[w], x[w]);
++    k += (uint32_t)__builtin_popcount(keep);
++  }
++  for (int w = 0; w < W; w++)
++    un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
++  return k;
++}
++#endif
++
+ /* pads list[0..cnt) with 8 full sets, for FILTER_CARRY: a node pads its
+  * lists before creating its children, which filter them (once per node,
+  * not at each filter: the store right before the loads of the last group
+@@ -948,6 +1013,329 @@ static __attribute__((noinline)) int SUPPORT_AGAIN(sstate_t *s, int d,
+ 
+ static void SEARCH_REC(sstate_t *s, int d);
+ 
++#if defined(PRUNE_DIAG) && defined(CARRY)
++#define PD_FIX CAT(pd_fix, W)
++#define PD_RUN CAT(pd_run, W)
++#define PD_REL11 CAT(pd_rel11, W)
++#ifndef PR_SUP
++#define PR_SUP 1
++#define PR_CROSS 2
++#define PR_CELL 4
++#define PR_PAIR 8
++#define PR_ONE 16
++#endif
++/*
++ * Reference implementation (plain C, on a copy of the lists of depth d):
++ * the rules in `rules`, on both axis in turn (`first` first), each followed
++ * by the count and forward checks, until no list changes (with PR_ONE: the
++ * non-support rules in the first round only, then the support filter to its
++ * fixpoint, as the cascade does now). For a candidate u of axis f (h the
++ * other axis, Y = the unmatched cells of the placed f vectors, which need
++ * an h vector):
++ *   support: u lies within the placed h vectors and the union of H;
++ *   cross:   u meets U_y (union of the h candidates through y), every y in Y;
++ *   cell:    some h candidate through y meets u exactly once, every y in Y;
++ *   pair:    every free label z of u (not in a placed h vector) is in some
++ *            h candidate meeting u exactly at z.
++ * Returns 1 if the node is dead; *tests += pair tests made; *left = the
++ * entries left if alive.
++ */
++/* the fewest candidates through an unmatched cell (the number of children
++ * MRV would create), over the lists L[0..1] with k[0..1] entries */
++static uint32_t CAT(pd_mrv, W)(const uint64_t (*L)[8192][W], const uint32_t *k,
++                               const uint64_t *const *C) {
++  uint32_t best = ~0u;
++  for (int f = 0; f < 2; f++) {
++    const int h = 1 - f;
++    /* cells of placed h vectors not in placed f vectors need an f vector */
++    for (int w = 0; w < W; w++)
++      for (uint64_t t = C[h][w] & ~C[f][w]; t; t &= t - 1) {
++        const uint64_t bit = t & -t;
++        uint32_t c = 0;
++        for (uint32_t i = 0; i < k[f]; i++)
++          c += (L[f][i][w] & bit) != 0;
++        if (c < best)
++          best = c;
++      }
++  }
++  return best;
++}
++static int PD_FIX(const sstate_t *s, int d, int first, int rules,
++                  uint64_t *tests, uint64_t *left) {
++  const int n = s->n;
++  pd_last_mrv = 0;
++  static uint64_t L[2][8192][W];
++  static uint64_t Uy[64][W];
++  uint32_t k[2];
++  for (int a = 0; a < 2; a++) {
++    k[a] = s->nvalid[d][a];
++    if (k[a] > 8192)
++      return 0;
++    for (uint32_t i = 0; i < k[a]; i++)
++      for (int w = 0; w < W; w++)
++        L[a][i][w] = s->vw[d][a][w * s->cap + i];
++  }
++  const uint64_t *C[2] = {s->cells[d][ROW], s->cells[d][COL]};
++  int quiet = 0, round = 0, f = first;
++  while (quiet < 2) {
++    const int h = 1 - f;
++    int r = rules;
++    if ((rules & PR_ONE) && round >= 2)
++      r = PR_SUP;
++    uint64_t UH[W] = {0}, Y[W];
++    for (uint32_t j = 0; j < k[h]; j++)
++      for (int w = 0; w < W; w++)
++        UH[w] |= L[h][j][w];
++    int ny = 0;
++    int yw[64];
++    uint64_t yb[64];
++    for (int w = 0; w < W; w++) {
++      Y[w] = C[f][w] & ~C[h][w];
++      for (uint64_t t = Y[w]; t; t &= t - 1) {
++        if (ny < 64) {
++          yw[ny] = w;
++          yb[ny] = t & -t;
++        }
++        ny++;
++      }
++    }
++    if (ny > 64)
++      ny = 64;
++    if (r & PR_CROSS) {
++      for (int y = 0; y < ny; y++) {
++        for (int w = 0; w < W; w++)
++          Uy[y][w] = 0;
++        for (uint32_t j = 0; j < k[h]; j++)
++          if (L[h][j][yw[y]] & yb[y])
++            for (int w = 0; w < W; w++)
++              Uy[y][w] |= L[h][j][w];
++      }
++    }
++    uint32_t kk = 0;
++    for (uint32_t i = 0; i < k[f]; i++) {
++      const uint64_t *u = L[f][i];
++      int keep = 1;
++      if (r & PR_SUP)
++        for (int w = 0; w < W; w++)
++          keep &= (u[w] & ~(C[h][w] | UH[w])) == 0;
++      if (keep && (r & PR_CROSS))
++        for (int y = 0; y < ny && keep; y++) {
++          uint64_t hit = 0;
++          for (int w = 0; w < W; w++)
++            hit |= u[w] & Uy[y][w];
++          keep = hit != 0;
++        }
++      if (keep && (r & (PR_CELL | PR_PAIR))) {
++        uint64_t ys[W] = {0}, zs[W] = {0};
++        for (uint32_t j = 0; j < k[h]; j++) {
++          const uint64_t *v = L[h][j];
++          int c = 0;
++          for (int w = 0; w < W; w++)
++            c += __builtin_popcountll(u[w] & v[w]);
++          if (c == 1)
++            for (int w = 0; w < W; w++) {
++              ys[w] |= v[w] & Y[w];
++              zs[w] |= u[w] & v[w];
++            }
++        }
++        *tests += k[h];
++        if (r & PR_CELL)
++          for (int w = 0; w < W; w++)
++            keep &= (Y[w] & ~ys[w]) == 0;
++        if (r & PR_PAIR)
++          for (int w = 0; w < W; w++)
++            keep &= (u[w] & ~C[h][w] & ~zs[w]) == 0;
++      }
++      if (keep) {
++        if (kk != i)
++          for (int w = 0; w < W; w++)
++            L[f][kk][w] = u[w];
++        kk++;
++      }
++    }
++    {
++      const int changed = kk != k[f];
++      const int steady = !(rules & PR_ONE) || round >= 2;
++      quiet = changed || !steady ? 0 : quiet + 1;
++    }
++    k[f] = kk;
++    if (s->np[f] + (int)kk < n)
++      return 1;
++    /* forward check: the cells needing an f vector */
++    uint64_t UF[W] = {0};
++    for (uint32_t j = 0; j < k[f]; j++)
++      for (int w = 0; w < W; w++)
++        UF[w] |= L[f][j][w];
++    for (int w = 0; w < W; w++)
++      if (C[h][w] & ~C[f][w] & ~UF[w])
++        return 1;
++    round++;
++    f = h;
++    if (round > 400)
++      break;
++  }
++  *left += k[0] + k[1];
++  pd_last_mrv = CAT(pd_mrv, W)((const uint64_t(*)[8192][W])L, k, C);
++  return 0;
++}
++
++/* magic-only pruning: D = the vectors meeting every placed vector exactly
++ * once (possible diagonals, from all N vectors); a magic square needs two
++ * disjoint ones. At a (1,2)/(2,1) node: |D|, whether D has a disjoint pair,
++ * and how many of the MRV children keep a disjoint pair in D (the children
++ * a magic-only search would create). */
++#define PD_DIAG CAT(pd_diag, W)
++static void PD_DIAG(const sstate_t *s, int d) {
++  static uint32_t D[1 << 16];
++  uint32_t nd = 0;
++  for (uint32_t v = 0; v < s->N && nd < (1u << 16); v++) {
++    const uint64_t *vb = s->bits + (uint64_t)v * W;
++    int ok = 1;
++    for (int a = 0; a < 2 && ok; a++)
++      for (int i = 0; i < s->np[a] && ok; i++) {
++        int c = 0;
++        for (int w = 0; w < W; w++)
++          c += __builtin_popcountll(vb[w] & s->placedw[a][i][w]);
++        ok = c == 1;
++      }
++    if (ok)
++      D[nd++] = v;
++  }
++  /* disjoint pair within a subset given by a predicate on D */
++  pdd_n++;
++  pdd_sum += nd;
++  int pair = 0;
++  for (uint32_t i = 0; i < nd && !pair; i++)
++    for (uint32_t j = i + 1; j < nd && !pair; j++) {
++      const uint64_t *a = s->bits + (uint64_t)D[i] * W,
++                     *b = s->bits + (uint64_t)D[j] * W;
++      uint64_t hit = 0;
++      for (int w = 0; w < W; w++)
++        hit |= a[w] & b[w];
++      pair = hit == 0;
++    }
++  pdd_pair += pair;
++  /* the MRV cell and its candidates */
++  const uint64_t *C[2] = {s->cells[d][ROW], s->cells[d][COL]};
++  uint32_t best = ~0u;
++  int bf = -1, bw = 0;
++  uint64_t bbit = 0;
++  for (int f = 0; f < 2; f++) {
++    const int h = 1 - f;
++    for (int w = 0; w < W; w++)
++      for (uint64_t t = C[h][w] & ~C[f][w]; t; t &= t - 1) {
++        const uint64_t bit = t & -t;
++        uint32_t c = 0;
++        for (uint32_t i = 0; i < s->nvalid[d][f]; i++)
++          c += (s->vw[d][f][w * s->cap + i] & bit) != 0;
++        if (c < best) {
++          best = c;
++          bf = f;
++          bw = w;
++          bbit = bit;
++        }
++      }
++  }
++  if (bf < 0)
++    return;
++  uint32_t kids = 0, kept = 0, dsum = 0;
++  for (uint32_t i = 0; i < s->nvalid[d][bf]; i++) {
++    if (!(s->vw[d][bf][bw * s->cap + i] & bbit))
++      continue;
++    uint64_t kv[W];
++    for (int w = 0; w < W; w++)
++      kv[w] = s->vw[d][bf][w * s->cap + i];
++    kids++;
++    /* D of the child: D entries meeting the kid exactly once */
++    static uint32_t Dk[1 << 16];
++    uint32_t nk = 0;
++    for (uint32_t j = 0; j < nd; j++) {
++      const uint64_t *a = s->bits + (uint64_t)D[j] * W;
++      int c = 0;
++      for (int w = 0; w < W; w++)
++        c += __builtin_popcountll(a[w] & kv[w]);
++      if (c == 1)
++        Dk[nk++] = D[j];
++    }
++    dsum += nk;
++    int pr = 0;
++    for (uint32_t a1 = 0; a1 < nk && !pr; a1++)
++      for (uint32_t b1 = a1 + 1; b1 < nk && !pr; b1++) {
++        const uint64_t *a = s->bits + (uint64_t)Dk[a1] * W,
++                       *b = s->bits + (uint64_t)Dk[b1] * W;
++        uint64_t hit = 0;
++        for (int w = 0; w < W; w++)
++          hit |= a[w] & b[w];
++        pr = hit == 0;
++      }
++    kept += pr;
++  }
++  pdd_kids += kids;
++  pdd_kept += kept;
++  pdd_kd += dsum;
++}
++
++/* run the tests of point p on the node at depth d, as a bit set of kills */
++static int PD_RUN(const sstate_t *s, int d, int first, int p) {
++  static const int rules[PD_NT] = {
++      PR_ONE | PR_CROSS | PR_SUP, PR_ONE | PR_CELL | PR_SUP,
++      PR_CROSS | PR_SUP,          PR_CELL | PR_SUP,
++      PR_CELL | PR_PAIR | PR_CROSS | PR_SUP, PR_PAIR | PR_SUP};
++  int res = 0;
++  /* the MRV count before (PD_FIX with no rule = the lists as they are) */
++  {
++    uint64_t dummy = 0;
++    PD_FIX(s, d, first, 0, &dummy, &dummy);
++    pd_mrv_in[p] += pd_last_mrv;
++  }
++  for (int t = 0; t < PD_NT; t++) {
++    if (p != 1 && (t == 0 || t == 1))
++      continue;
++    if (p == 3 && t == 4)
++      continue; /* (2,2)-only */
++    if (PD_FIX(s, d, first, rules[t], &pd_tests[p][t], &pd_left[p][t]))
++      res |= 1 << t;
++    else
++      pd_mrv_out[p][t] += pd_last_mrv;
++  }
++  return res;
++}
++
++/* time a vectorized build of the exactly-once relation between the row and
++ * col lists of the (1,1) node at depth d (bit (i, j): |row i & col j| == 1),
++ * as a stand-in for its cost; returns TSC cycles */
++static uint64_t PD_REL11(const sstate_t *s, int d) {
++  const uint32_t kr = s->nvalid[d][ROW], kc = s->nvalid[d][COL];
++  const size_t cap = s->cap;
++  const uint64_t *R = s->vw[d][ROW], *Cl = s->vw[d][COL];
++  static uint8_t E[1 << 24];
++  const uint32_t stride = (kc + 7) / 8;
++  if ((uint64_t)kr * stride > sizeof E)
++    return 0;
++  const __m512i one = _mm512_set1_epi64(1);
++  const uint64_t t0 = __rdtsc();
++  for (uint32_t i = 0; i < kr; i++) {
++    __m512i rv[W];
++    for (int w = 0; w < W; w++)
++      rv[w] = _mm512_set1_epi64((long long)R[w * cap + i]);
++    uint8_t *row = E + (size_t)i * stride;
++    for (uint32_t j = 0; j < kc; j += 8) {
++      __m512i acc = _mm512_popcnt_epi64(
++          _mm512_and_si512(_mm512_loadu_si512(Cl + j), rv[0]));
++      for (int w = 1; w < W; w++)
++        acc = _mm512_add_epi64(
++            acc, _mm512_popcnt_epi64(_mm512_and_si512(
++                     _mm512_loadu_si512(Cl + w * cap + j), rv[w])));
++      row[j / 8] = (uint8_t)_mm512_cmpeq_epi64_mask(acc, one);
++    }
++  }
++  const uint64_t t1 = __rdtsc();
++  /* keep the stores */
++  __asm__ volatile("" : : "r"(E) : "memory");
++  return t1 - t0;
++}
++#endif
++
+ /*
+  * Create the child of depth d+1 obtained by placing v (index v, bitset m)
+  * on axis b, and search it unless it is pruned. min_v restricts candidates
+@@ -1006,6 +1394,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+    * >= min_v are the ones from position min_v on (min_v = 0 below the
+    * root) */
+   uint64_t *uo = s->uni[d + 1][o], *ub = s->uni[d + 1][b];
++#ifdef PRUNE_DIAG
++  int pd1 = -1;
++  uint64_t pd1_sq = 0, pd1_nd = 0;
++#endif
+ #ifdef CPROF
+   const int pl = 9 * s->np[ROW] + s->np[COL];
+   int why = CD_LIVE; /* the test that killed the child */
+@@ -1014,6 +1406,35 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+   cp_in[pl][1] += s->nvalid[d][b] - min_v;
+ #else
+ #define CP_WHY(k)
++#endif
++#ifdef PRETEST
++  /* the children five or more vectors deep: the count and forward checks
++   * that follow the two filters, on counts and unions only; the children
++   * they kill are exactly the ones those checks would kill after the
++   * filters, without compressing and storing the lists */
++  if (s->np[ROW] + s->np[COL] >= pretest_min && s->opts.forward_check &&
++      min_v == 0) {
++    uint64_t pu[W], pb[W];
++    const uint32_t pko =
++        FILTER_COUNT(s, s->vw[d][o], s->nvalid[d][o], m, 1, NULL, pu);
++    int pdead = s->np[o] + (int)pko < n;
++    for (int w = 0; w < W; w++)
++      pdead |= (ncell_b[w] & ~ncell_o[w] & ~pu[w]) != 0;
++    if (!pdead) {
++      uint64_t pex[W];
++      for (int w = 0; w < W; w++)
++        pex[w] = ~(ncell_o[w] | pu[w]);
++      const uint32_t pkb = FILTER_COUNT(s, s->vw[d][b], s->nvalid[d][b], m, 0,
++                                        sup ? pex : NULL, pb);
++      pdead = s->np[b] + (int)pkb < n;
++      for (int w = 0; w < W; w++)
++        pdead |= (ncell_o[w] & ~ncell_b[w] & ~pb[w]) != 0;
++    }
++    if (pdead) {
++      s->np[b]--;
++      return;
++    }
++  }
+ #endif
+   CP_START();
+   uint32_t ko = FILTER_CARRY(s, s->vw[d][o] + min_v, s->nvalid[d][o] - min_v,
+@@ -1083,6 +1504,15 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+     const int cross = sup && s->np[ROW] == 2 && s->np[COL] == 2 &&
+                       (s->opts.cross > 1 || (s->opts.cross && n <= 6));
+     int after = 0; /* cross support after the support filter */
++#ifdef PRUNE_DIAG
++    if (!dead && cross && ++pd_tick[1] >= pd_every[1]) {
++      pd_tick[1] = 0;
++      pd1 = PD_RUN(s, d + 1, o, 1);
++      pd1_sq = s->squares;
++      pd1_nd = s->nodes;
++      pd_lists[1] += s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
++    }
++#endif
+     if (!dead && cross) {
+       after = s->cross_after || (++s->xs_tick & 15) == 0;
+       if (!after) {
+@@ -1103,6 +1533,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+       s->xs_k += dead != 0;
+       if (++s->xs_n == 256) {
+         s->cross_after = s->xs_k > 192;
++#ifdef SURV_FIX
++        if (force_after)
++          s->cross_after = force_after > 0;
++#endif
+         s->xs_n = 128; /* (decay) */
+         s->xs_k /= 2;
+       }
+@@ -1116,6 +1550,23 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+         CP_WHY(CD_AFTER);
+       }
+     }
++#ifdef SURV_FIX
++    /* experiment (cx/prune): the (2,2) children that survive the cascade
++     * get cross support and the support filter iterated to their common
++     * fixpoint, when their lists are long enough (env SURV_FIX_MIN, sum of
++     * the two lists; default 0 = always) */
++    if (!dead && cross && s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL] >=
++                              surv_fix_min) {
++      for (int rd = 0; rd < surv_fix_rounds; rd++) {
++        const uint32_t k0 = s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
++        dead = CROSS(s, d + 1, o);
++        if (!dead)
++          dead = SUPPORT_AGAIN(s, d + 1, o);
++        if (dead || s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL] == k0)
++          break;
++      }
++    }
++#endif
+     if (!dead) {
+       /* the child survives: count the labels of its lists, for the cells
+        * each list covers (the unmatched cells of the other axis); only
+@@ -1173,6 +1624,38 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+         }
+       }
+ #endif
++#ifdef PRUNE_DIAG
++      int pdp = 0, pdr = 0;
++      uint64_t pd_t0 = 0, pd_n0 = 0, pd_s0 = 0;
++      if (cross && ++pd_tick[2] >= pd_every[2]) {
++        pd_tick[2] = 0;
++        pdp = 2;
++      } else if (((s->np[ROW] == 1 && s->np[COL] == 2) ||
++                  (s->np[ROW] == 2 && s->np[COL] == 1)) &&
++                 ++pd_tick[3] >= pd_every[3]) {
++        pd_tick[3] = 0;
++        pdp = 3;
++      } else if (s->np[ROW] == 1 && s->np[COL] == 1 &&
++                 ++pd_tick[0] >= pd_every[0]) {
++        pd_tick[0] = 0;
++        pdp = 11;
++      }
++      if (pdp == 3 && pd_diag_only) {
++        PD_DIAG(s, d + 1);
++      } else if (pdp == 2 || pdp == 3) {
++        pdr = PD_RUN(s, d + 1, o, pdp);
++        pd_lists[pdp] += s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
++      } else if (pdp == 11) {
++        pd11_build += PD_REL11(s, d + 1);
++        pd11_pairs += (uint64_t)s->nvalid[d + 1][ROW] * s->nvalid[d + 1][COL];
++        pd11_rows += s->nvalid[d + 1][ROW];
++        pd11_cols += s->nvalid[d + 1][COL];
++        pd11_tested++;
++      }
++      pd_n0 = s->nodes;
++      pd_s0 = s->squares;
++      pd_t0 = __rdtsc();
++#endif
+ #ifdef SCALE_PROF
+       const uint64_t sq_before = s->squares;
+       SEARCH_REC(s, d + 1);
+@@ -1180,9 +1663,48 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+         sn_prod[pl]++;
+ #else
+       SEARCH_REC(s, d + 1);
++#endif
++#ifdef PRUNE_DIAG
++      if (pdp) {
++        const uint64_t cyc = __rdtsc() - pd_t0, nd = s->nodes - pd_n0;
++        const int prod = s->squares > pd_s0;
++        if (pdp == 11) {
++          pd11_sub += cyc;
++          pd11_nodes += nd;
++        } else {
++          pd_tested[pdp]++;
++          pd_prod[pdp] += prod;
++          pd_alive[pdp]++;
++          pd_nodes[pdp] += nd;
++          pd_cyc[pdp] += cyc;
++          for (int t = 0; t < PD_NT; t++)
++            if (pdr >> t & 1) {
++              pd_killed[pdp][t]++;
++              pd_kprod[pdp][t] += prod;
++              pd_knodes[pdp][t] += nd;
++              pd_kcyc[pdp][t] += cyc;
++            }
++        }
++      }
+ #endif
+     }
+   }
++#ifdef PRUNE_DIAG
++  if (pd1 >= 0) {
++    const int prod = s->squares > pd1_sq;
++    const uint64_t nd = s->nodes - pd1_nd;
++    pd_tested[1]++;
++    pd_prod[1] += prod;
++    pd_alive[1] += !dead;
++    pd_nodes[1] += nd;
++    for (int t = 0; t < PD_NT; t++)
++      if (pd1 >> t & 1) {
++        pd_killed[1][t]++;
++        pd_kprod[1][t] += prod;
++        pd_knodes[1][t] += nd;
++      }
++  }
++#endif
+ #ifdef CPROF
+   cp_die[pl][why]++;
+ #endif
+@@ -1543,6 +2065,11 @@ static void SEARCH_ROOT(sstate_t *s) {
+ #undef CROSS_TEST
+ #undef CROSS
+ #undef SUPPORT_AGAIN
++#undef PD_FIX
++#undef PD_RUN
++#undef PD_REL11
++#undef PD_DIAG
++#undef FILTER_COUNT
+ #undef TRY_CHILD_INLINE
+ #undef CROSS_SIMD
+ #undef COUNT_BYTES
+-- 
+2.43.0
+

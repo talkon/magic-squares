@@ -1,0 +1,512 @@
+From 4e425b49514750b5228f91bc06feb0d0c35855e0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 15:11:48 +0000
+Subject: [PATCH 4/5] scheduler v2: faster unit evaluation, per-pool profile
+ stores, docs
+
+* eval_sums/next_unit: per-P cached contiguous profile rows and inlined
+  time law and cells (next_unit 0.33 -> 0.18 ms; a 1 CPU-year forecast
+  over the 378k-P pool simulates in ~3.5 min); node predictions only for
+  launched units.
+* Profiles live in profiles_6/<pool kind>-<key>/, so changing the pool
+  options never discards a filled store.
+* A gap of sums below the model's first valid point (e.g. between ceil(S0)
+  and the S_min another search started from) counts as covered.
+* forecast --shipped (prior calibration and time law, no per-P factors);
+  regression mode reads .jsonl.gz unit files too.
+* Docstring and README describe the analytic model, the pool and the new
+  commands.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ README.md                 |  35 +++---
+ scripts/scheduler.py      | 240 +++++++++++++++++++++++++++-----------
+ scripts/test_scheduler.py |   2 +-
+ 3 files changed, 195 insertions(+), 82 deletions(-)
+
+diff --git a/README.md b/README.md
+index 8bca540..10b1894 100644
+--- a/README.md
++++ b/README.md
+@@ -20,6 +20,7 @@ bin/msearch --min-sum 320 --max-sum 340 10 4 3 2    # P = 2^10 3^4 5^3 7^2
+ 
+ # adaptive search over (P, S), using all cores, resumable (state in data/sched)
+ python3 scripts/scheduler.py import-legacy stats/stats_short.txt
++python3 scripts/scheduler.py profile           # once: the model of 378k P (~1 CPU-hour, niced)
+ python3 scripts/scheduler.py plan              # what it would run next, and why
+ python3 scripts/scheduler.py forecast --hours 1000
+ python3 scripts/scheduler.py run --hours 24
+@@ -37,7 +38,7 @@ scripts/test_calibrate.py` for the calibration ladder).
+ | `bin/msearch` | enumerate + arrange + diagonal check for one P and a range of sums, in one process, writing JSON lines as it goes (or the legacy text format) |
+ | `bin/bench` | arrangement benchmark on fixed (P, S) instances, checking the squares found against expected counts and hashes |
+ | `bin/enumerate` | write enumeration files (drop-in replacement for `enumeration.cpp`), vector counts per sum, or the smallest sum |
+-| `scripts/scheduler.py` | chooses which (P, S) to search next to maximize the expected number of magic squares per CPU-second, runs `msearch` workers, refits its model as results come in |
++| `scripts/scheduler.py` | chooses which (P, S) to search next to maximize the expected number of magic squares per CPU-second, runs `msearch` workers, refits its model as results come in (model: `scripts/amodel.py`, candidate pool: `scripts/pool.py`) |
+ | `submit-sc-plan.sh` | runs a static plan from `scheduler.py emit` on SuperCloud with LLsub |
+ | `bin/arrangement_{5,6,7}`, `bin/enumeration`, `src/py/`, `run.sh`, `submit-sc*.sh` | the original pipeline (still works) |
+ 
+@@ -71,18 +72,26 @@ faster near the smallest possible sum S_min(P) (about 600 to 10,000 per
+ CPU-hour depending on P, versus ~80 per hour on average in the first search),
+ and squares with a smaller S are also more likely to be magic. The scheduler models
+ 
+-    magic squares per CPU-second = (semi-magic squares per CPU-second)
+-                                   * 5400 * (rho * p_S * p_P)^2
+-
+-where p_S, p_P are the probabilities that a traversal (a possible diagonal)
+-has the magic sum / product and rho ~ 2 corrects for these not being
+-independent. The first factor is a Poisson regression on the number of
+-vectors N, S / S_min, and the divisor structure of P, fitted to our runs and to
+-the per-P totals of the first search; p_S and p_P are fitted to the traversal
+-counts of the squares found. Each P also gets its own correction factors
+-(empirical Bayes) as its results come in, with an optimism bonus to explore
+-new P. Each P is searched in increasing order of S; the scheduler always runs
+-the next chunk of sums of the P with the best predicted yield.
++    magic squares per CPU-second = (semi-magic squares per sum) / (CPU-seconds per sum)
++                                   * P(a semi-magic square is magic)
++
++per (P, S) with the analytic model of research/existence.md
++(`scripts/amodel.py`: a max-entropy local limit theorem with exact lattice
++factors and ~3 fitted constants, which predicts the number of vectors N, the
++squares per sum and P(magic | square) = 5400 kappa p_pair, and was tested on
++held-out data up to N = 45k), times the review corrections of that study, and
++a time law in N and the predicted number of distinct entries. The candidates
++are every exponent assignment of P over 2..29 within a small factor of the
++sorted one (`scripts/pool.py`, 377,908 P: most of the yield is in exponents
++that are not non-increasing, e.g. 13 7 4 3 0 0 1 1). The model of each P is
++computed once on 24 sums; then a lazy greedy planner always runs the next
++chunk of sums of the P with the best predicted yield, searching each P in
++increasing order of S from ceil(6 P^(1/6)). As results come in it refits
++class factors (squares, S and P traversals, by N band, number of primes,
++assignment ratio and S / S_min), the time law, and per-P factors (empirical
++Bayes); `report` compares observed and predicted counts. The previous
++scheduler (a Poisson regression fitted to our runs, over non-increasing
++exponents) is still available as `--model regression --pool classic`.
+ 
+ ### Running on a cluster (SuperCloud)
+ 
+diff --git a/scripts/scheduler.py b/scripts/scheduler.py
+index 72d33aa..b1d2464 100644
+--- a/scripts/scheduler.py
++++ b/scripts/scheduler.py
+@@ -10,55 +10,97 @@ parallel, and keeps learning from the results.
+         = (semi-magic squares per sum at (P, S)) / (CPU-seconds per sum)
+         * P(a semi-magic square at (P, S) is magic)
+ 
+-The number of squares per sum is a Poisson regression on the number of
+-vectors N (piecewise linear in log N), how far S is above the smallest
+-possible sum S_min(P), and the divisor structure of P (number of divisors,
+-number of distinct primes, largest prime). It is fitted to our own runs (one
+-observation per sum) and to the per-P totals of the first search (one
+-observation per P, the sum over its range of sums). The time per sum is a
++Two models are available (--model).
++
++analytic (the default, "v2"): the existence study's calibrated analytic
++model (scripts/amodel.py; research/existence/analytic.md, existence.md 2-4).
++For each P it predicts, as a function of S, the number of vectors N, the
++semi-magic squares per sum and P(magic | square) = D_n kappa p_pair from a
++max-entropy local limit theorem with exact lattice factors and ~3 fitted
++constants; it was tested on held-out data up to N = 45k (the regression
++below stops growing at N ~ 5.5k). On top of it:
++  * the review factors of existence.md 4.1 (x1.23 squares at N' >= 12k;
++    x1.35 P(magic) at N' >= 3k, x0.85 at 7+ primes, x0.92 at x =
++    ln(S / S_min) < 0.1, pair factor x0.87) as the priors of three
++    main-effects Poisson GLMs (squares, S traversals, P traversals) over
++    216 calibration cells (N' band x primes x assignment ratio x x band),
++    refit every --refit-every units by MAP;
++  * per-P gamma factors (a = 40 on squares, 30 on traversals), posterior
++    means (no exploration bonus by default, --explore);
++  * time per sum ln t = th . [1, ln(N'/4000), ln(L/150), max(0, ln(N'/8000))]
++    with N' the model's N (bias corrected) and L its predicted number of
++    distinct entries (labels), refit per msearch engine (Bayesian ridge).
++The candidates are a wide pool (scripts/pool.py, --pool wide): every
++exponent assignment over 2..29 with S0 = 6 P^(1/6) <= 6000, tau >= 1000,
++4-10 primes and (P / P_sorted)^(1/6) <= 1.2 (377,908 P), since most of the
++yield is in exponents that are not non-increasing. Each P's model is
++evaluated once on 24 sums S0 (1 + u), u = 0.01..1 (`profile`: ~1 CPU-hour
++for the pool, 2 niced processes, resumable) and interpolated in S. Units
++start at ceil(S0) (no S_min computation) and stop at 2 S0. A lazy greedy
++planner keeps all P in a heap keyed by an upper bound of their density and
++replaces it by the exact score of the next unit when popped. bin/enumerate
++is never called.
++
++regression ("v1", --model regression --pool classic): the number of squares
++per sum is a Poisson regression on the number of vectors N (piecewise
++linear in log N), how far S is above the smallest possible sum S_min(P),
++and the divisor structure of P, fitted to our own runs (one observation per
++sum) and to the per-P totals of the first search. The time per sum is a
+ power law in N. The probability of being magic is estimated from the
+ traversals of the squares found: if p_S and p_P are the probabilities that a
+ traversal (a possible diagonal) has the magic sum / product, and rho corrects
+ for these not being independent, then a square has 5400 (unordered) pairs of
+-possible diagonals and
+-
+-    P(magic) ~= 5400 * (rho * p_S * p_P)^2.
+-
+-The fitted model says, roughly: p_S ~ 1/S, p_P ~ tau(P)^-0.7 (fewer primes is
+-better), rho ~ 2.1, CPU time per sum ~ N^5, and squares per CPU-second rise
+-with N up to N ~ 2000 and then fall, so the best sums are close to S_min.
+-
+-All of these are multiplied by per-P factors (empirical Bayes: gamma priors
+-centered on the global model) learned from each P's own results, with an
+-optimistic bonus so new P's get explored. Each P is searched in increasing
+-order of S (the yield tends to decrease with S), so the scheduler keeps a
+-frontier S per P and repeatedly runs the next chunk of sums of the P whose
+-frontier has the highest score. The model is refit every few dozen units.
++possible diagonals and P(magic) ~= 5400 * (rho * p_S * p_P)^2. These are
++multiplied by per-P factors (empirical Bayes, with an optimistic bonus), and
++the candidates are gen_candidates (non-increasing exponents on 2, 3, 5, 7
++plus 0/1 on at most two of 11..19), with S_min and vector counts from
++bin/enumerate.
++
++With both, each P is searched in increasing order of S, the scheduler keeps
++a frontier S per P and repeatedly runs the next chunk of sums (a unit: about
++--unit-time predicted CPU-seconds, cut where the predicted density falls
++below --unit-drop x the unit's best) of the P whose next unit has the
++highest predicted magic squares per CPU-second.
+ 
+ All state lives in a directory (default data/sched):
+-    units/*.jsonl    raw msearch output, one file per unit of work
+-    pinfo_6.json     cache of S_min(P) and the number of vectors per sum
+-    model_6.json     fitted model (written by `fit` and during `run`; until
+-                     then a built-in default model is used)
+-    legacy.json      per-P totals of the first search (`import-legacy`)
++    units/*.jsonl[.gz]  raw msearch output, one file per unit of work
++    legacy.json         per-P totals of the first search (`import-legacy`)
++    pinfo_6.json        regression: S_min(P) and vector counts (read by
++                        analytic for exact S_min where present)
++    model_6.json        regression: fitted model (else a built-in default)
++    pool_6.npz          analytic: the wide pool (rebuilt if its options change)
++    profiles_6/         analytic: model profiles per pool (memmap) + extra.json
++    summary_6.json/npz  analytic: everything learned from units/, updated
++                        incrementally (rebuilt when missing or the model changes)
++    calib_6.json, time_6.json   analytic: learned class factors, time laws
++    launched_6.jsonl    analytic: every unit launched, with its predictions
+ The state is rebuilt from units/ on every start, so runs can be interrupted
+ and resumed at any time; partially finished units keep their completed sums.
+ 
+ usage:
+     scheduler.py import-legacy stats/stats_short.txt   (once; skips the sums
+                                           the first search already did)
++    scheduler.py profile [--workers K]    analytic: model profiles of the pool
++                                          (otherwise done by the first command)
+     scheduler.py run [--workers K] [--hours H] [--unit-time T]
+     scheduler.py plan [--top K]           show the current ranking
+     scheduler.py forecast [--hours H]     predicted squares and magic squares
+-                                          for the next H CPU-hours
++                                          for the next H CPU-hours (analytic:
++                                          composition, uncertainty band;
++                                          --sample F for a faster estimate)
+     scheduler.py fit                      refit the model from all results
+-    scheduler.py report                   summary of results and best squares
++    scheduler.py report                   summary of results, calibration
++                                          (obs/pred), best squares
+     scheduler.py emit [--units K]         print msearch arguments for a static
+                                           plan (e.g. SuperCloud, see
+                                           submit-sc-plan.sh)
+     scheduler.py ingest FILE...           add msearch outputs run elsewhere
+-Global options (before the command): --state DIR, --vec-size N.
+-Needs numpy for `fit` (and for refits during `run`).
++    scheduler.py pool [--stats]           analytic: the candidate pool
++    scheduler.py compact                  gzip finished unit files
++Global options (before the command): --state DIR, --vec-size N. Model and
++pool options (after the command): --model, --pool, --pool-ratio,
++--pool-s0-max, --pool-primes, --tau-min, --explore, --profile-workers.
++Needs numpy (always for analytic; for `fit` and refits with regression).
+ """
+ import argparse
+ import collections
+@@ -219,7 +261,11 @@ class Results:
+ 
+     def add_file(self, path):
+         try:
+-            f = open(path)
++            if path.endswith(".gz"):
++                import gzip
++                f = gzip.open(path, "rt")
++            else:
++                f = open(path)
+         except OSError:
+             return
+         with f:
+@@ -837,7 +883,7 @@ class Scheduler:
+                 for r in json.load(f):
+                     if r.get("n", 6) == self.n:
+                         self.results.legacy[norm_p(r["P"])] = r
+-        for path in sorted(glob.glob(os.path.join(self.dir, "units", "*.jsonl"))):
++        for path in unit_files(os.path.join(self.dir, "units")):
+             self.results.add_file(path)
+         self.model = Model.load(self.model_path, self.n)
+         if self.model is None and need_model:
+@@ -1051,7 +1097,7 @@ def cmd_fit(args):
+     sch.n = args.vec_size
+     pinfo = PInfo(os.path.join(args.state, f"pinfo_{args.vec_size}.json"), args.vec_size)
+     results = Results(args.vec_size)
+-    for path in sorted(glob.glob(os.path.join(args.state, "units", "*.jsonl"))):
++    for path in unit_files(os.path.join(args.state, "units")):
+         results.add_file(path)
+     legacy_path = os.path.join(args.state, "legacy.json")
+     if os.path.exists(legacy_path) and not args.no_legacy:
+@@ -1243,6 +1289,7 @@ RBAND_NAMES = ("sorted", "r<=1.1", "r>1.1")
+ XBAND_NAMES = ("x<0.1", "x 0.1-0.25", "x>=0.25")
+ NCELLS = 6 * 4 * 3 * 3
+ LN12K = math.log(12000)
++LN8K = math.log(8000)
+ # class rates of S and P traversals that the shipped P(magic | square)
+ # corresponds to (analytic.md 4.3: 0.86 and 0.64 near S_min)
+ TRAV_BASE = (0.86, 0.64)
+@@ -1544,16 +1591,20 @@ class ProfileStore:
+                 self.extra = d["P"]
+         self.tag = tag
+         self.guards = {g: 0 for g in am.GUARDS}
+-        self.arr = self.valid = self.done = None
++        self.arr = self.valid = self.done = self.pdir = None
+         if pool is None:
+             return
+         meta = dict(tag, pool=pool.key(), nP=len(pool), params=pool.params, kind=pool.kind)
+-        mpath = os.path.join(self.dir, "meta.json")
++        # one subdirectory per pool, so that switching pools (e.g. --pool-ratio)
++        # never discards a filled store
++        self.pdir = os.path.join(self.dir, f"{pool.kind}-{pool.key()}")
++        os.makedirs(self.pdir, exist_ok=True)
++        mpath = os.path.join(self.pdir, "meta.json")
+         old = None
+         if os.path.exists(mpath):
+             with open(mpath) as f:
+                 old = json.load(f)
+-        files = [os.path.join(self.dir, x) for x in ("arrays.f16", "valid.u1", "done.u1")]
++        files = [os.path.join(self.pdir, x) for x in ("arrays.f16", "valid.u1", "done.u1")]
+         fresh = (old is None or {k: old.get(k) for k in meta} != meta
+                  or not all(os.path.exists(x) for x in files))
+         shape = (len(pool), self.nf, self.ng)
+@@ -1578,7 +1629,7 @@ class ProfileStore:
+         self.meta = meta
+ 
+     def _write_meta(self, meta):
+-        path = os.path.join(self.dir, "meta.json")
++        path = os.path.join(self.pdir, "meta.json")
+         with open(path + ".tmp", "w") as f:
+             json.dump(meta, f)
+         os.replace(path + ".tmp", path)
+@@ -2044,8 +2095,21 @@ class AnalyticScorer:
+         self.calib = calib
+         self.ln_gsq, self.ln_rS, self.ln_rP, self.ln_m = calib.rates()
+ 
++    @property
++    def tm(self):
++        return self._tm
++
++    @tm.setter
++    def tm(self, tm):
++        self._tm = tm
++        th = [float(v) for v in tm.th]
++        # ln t = c0 + th1 lN' + th2 lL + th3 max(0, lN' - ln 8000), + sd^2/2 for the mean
++        self._tc = (th[0] - th[1] * math.log(4000) - th[2] * math.log(150) + 0.5 * tm.sd ** 2,
++                    th[1], th[2], th[3])
++
+     def prof(self, a):
+-        """(S of the valid grid points, arr [fields, valid points]) of cand a"""
++        """per cand: S of the valid grid points, lN, lEs, lPm, L_raw there
++        (float64), and the cell offset of its k and ratio bin"""
+         hit = self._cache.get(a)
+         if hit is not None:
+             return hit
+@@ -2053,12 +2117,15 @@ class AnalyticScorer:
+         am = _am()
+         src = self.c.src[a]
+         if src >= 0:
+-            A = np.asarray(self.store.arr[src], np.float32)
++            A = np.asarray(self.store.arr[src], np.float64)
+             v = np.asarray(self.store.valid[src], bool)
+         else:
+             A, v = self.store.get(self.c.P(a))
+-        out = (self.c.S0[a] * (1 + am.GRID_U[v]), A[:, v])
+-        if len(self._cache) > 50000:
++            A = A.astype(np.float64)
++        kb = min(max(int(self.c.k[a]) - 5, 0), 3)
++        out = (self.c.S0[a] * (1 + am.GRID_U[v]), A[0, v].copy(), A[1, v].copy(), A[2, v].copy(),
++               A[6, v].copy(), kb * 9 + int(self.c.rbin[a]) * 3, math.log(self.c.smin[a]))
++        if len(self._cache) > 100000:
+             self._cache.clear()
+         self._cache[a] = out
+         return out
+@@ -2091,27 +2158,42 @@ class AnalyticScorer:
+         lt = np.log(self.tm.time(lNp, lL))
+         return np.where(V, lem - lt, -np.inf)
+ 
++    _NB = None
++
+     def eval_sums(self, a, S):
+-        """per sum: squares, magic squares, CPU seconds, lN', L_raw, cell"""
++        """per sum: squares, magic squares, CPU seconds, lN', L_raw, cell
++        (the same as grid_density, at any S, by linear interpolation of the
++        profile's logs in S; written for speed)"""
+         np = _np()
+         am = _am()
+-        Sg, A = self.prof(a)
++        Sg, gN, gEs, gPm, gL, base, lsmin = self.prof(a)
+         S = np.asarray(S, float)
+         if len(Sg) == 0:
+             z = np.zeros(len(S))
+             return z, z, z + am.SUM_OVERHEAD, z, z, np.zeros(len(S), int)
+-        lN = np.interp(S, Sg, A[0])
+-        lEs = np.interp(S, Sg, A[1])
+-        lPm = np.interp(S, Sg, A[2])
+-        lL = np.interp(S, Sg, A[6])
+-        lNp = lN + am.n_bias(lN)
+-        cell = cell_index(lNp, self.c.k[a], self.c.rbin[a], np.log(S / self.c.smin[a]))
+-        lsq = lEs + self.ln_gsq[cell] + math.log(am.SQ12) * (lNp >= LN12K) + self.lnfsq[a]
+-        lpm = np.minimum(lPm + self.ln_m[cell], am.LOG_PM_CAP) + self.lnFm[a]
+-        inside = (S >= Sg[0] - 1e-9) & (S <= Sg[-1] + 1e-9)
+-        sq = np.where(inside, np.exp(lsq), 0.0)
++        if AnalyticScorer._NB is None:
++            AnalyticScorer._NB = (np.log(np.array(NBAND_EDGES, float)), np.array([0.1, 0.25]))
++        nbe, xbe = AnalyticScorer._NB
++        lN = np.interp(S, Sg, gN)
++        lNp = lN + am.NBIAS_SLOPE * np.maximum(0.0, lN - am.NBIAS_KNOT)
++        lL = np.interp(S, Sg, gL)
++        cell = (np.searchsorted(nbe, lNp, side="right") * 36 + base
++                + np.searchsorted(xbe, np.log(S) - lsmin, side="right"))
++        lsq = np.interp(S, Sg, gEs) + self.ln_gsq[cell] + self.lnfsq[a]
++        big = lNp >= LN12K
++        if big.any():
++            lsq = lsq + math.log(am.SQ12) * big
++        lpm = np.minimum(np.interp(S, Sg, gPm) + self.ln_m[cell], am.LOG_PM_CAP) + self.lnFm[a]
++        sq = np.exp(lsq)
++        lo, hi = Sg[0] - 1e-9, Sg[-1] + 1e-9
++        below = S < lo
++        outside = below | (S > hi)
++        c0, c1, c2, c3 = self._tc
++        t = np.exp(c0 + c1 * lNp + c2 * lL + c3 * np.maximum(0.0, lNp - LN8K)) + am.SUM_OVERHEAD
++        if outside.any():
++            sq[outside] = 0.0
++            t[below] = am.SUM_OVERHEAD
+         m = sq * np.exp(lpm)
+-        t = np.where(S < Sg[0] - 1e-9, am.SUM_OVERHEAD, self.tm.time(lNp, lL))
+         return sq, m, t, lNp, lL, cell
+ 
+     def next_unit(self, a, lo, hi_max, unit_time, drop, detail=False):
+@@ -2127,27 +2209,28 @@ class AnalyticScorer:
+         best = 0.0
+         hi = lo - 1
+         start = lo
+-        size = 32
++        size = 64
+         cells, mv = [], []
+-        last = None
+         while start <= hi_max:
+-            S = np.arange(start, min(start + size, hi_max + 1))
++            S = np.arange(start, min(start + size, hi_max + 1), dtype=float)
+             sq, m, t, lNp, lL, cell = self.eval_sums(a, S)
+             dens = m / t
+-            ct = acc_t + np.cumsum(t)
+-            rm = np.maximum(best, np.maximum.accumulate(dens))
+-            prev = np.concatenate(([best], rm[:-1]))
+-            ok = (ct <= unit_time) & (dens >= drop * prev)
++            ct = np.cumsum(t)
++            ct += acc_t
++            rm = np.maximum.accumulate(dens)
++            np.maximum(rm, best, out=rm)
++            ok = ct <= unit_time
++            ok[1:] &= dens[1:] >= drop * rm[:-1]
++            ok[0] &= dens[0] >= drop * best
+             if acc_t == 0:
+                 ok[0] = True
+-            cut = len(S) if ok.all() else int(np.argmin(ok))
++            cut = len(S) if ok.all() else int(ok.argmin())
+             if cut:
+                 acc_t = float(ct[cut - 1])
+                 acc_m += float(m[:cut].sum())
+                 acc_sq += float(sq[:cut].sum())
+                 best = float(rm[cut - 1])
+                 hi = int(S[cut - 1])
+-                last = (lNp[cut - 1], lL[cut - 1])
+                 if detail:
+                     cells.append(cell[:cut])
+                     mv.append(m[:cut])
+@@ -2156,14 +2239,19 @@ class AnalyticScorer:
+             start = int(S[-1]) + 1
+             size = min(size * 4, 2048)
+         tot_t = acc_t + am.UNIT_OVERHEAD
+-        nodes = float(np.exp(am.log_nodes(last[0], last[1], self.c.k[a]))) if last else 0.0
+-        return UnitV2(self.c.P(a), lo, hi, acc_m / tot_t, tot_t, acc_sq, acc_m, a, nodes,
++        return UnitV2(self.c.P(a), lo, hi, acc_m / tot_t, tot_t, acc_sq, acc_m, a, None,
+                       np.concatenate(cells) if detail else None,
+                       np.concatenate(mv) if detail else None)
+ 
++    def unit_nodes(self, u):
++        """predicted search nodes of the unit's largest (last) sum"""
++        am = _am()
++        _, _, _, lNp, lL, _ = self.eval_sums(u.a, [float(u.hi)])
++        return float(math.exp(am.log_nodes(lNp[0], lL[0], int(self.c.k[u.a]))))
++
+     def limits(self, u, unit_time):
+         """msearch --node-limit (per sum) and --time-limit (per unit)"""
+-        return int(max(2e10, 10 * u.nodes)), max(2 * unit_time, 3 * u.time)
++        return int(max(2e10, 10 * self.unit_nodes(u))), max(2 * unit_time, 3 * u.time)
+ 
+     def set_factors(self, summary, explore=EXPLORE_V2):
+         """per-P gamma factors f_sq and F_m from each P's observed counts and
+@@ -2730,6 +2818,15 @@ def v2_forecast(args):
+     predicted squares"""
+     np = _np()
+     sch = SchedulerV2(args)
++    if args.shipped:
++        # the shipped calibration: prior class factors and time law, no per-P
++        # factors (the state still sets the frontiers)
++        sch.calib = Calibration()
++        sch.tm = _am().TimeModel()
++        sch.scorer.set_calibration(sch.calib)
++        sch.scorer.tm = sch.tm
++        sch.scorer.lnfsq[:] = 0.0
++        sch.scorer.lnFm[:] = 0.0
+     frac = args.sample
+     if frac < 1:
+         # a uniform sample of the candidates with the budget scaled: the
+@@ -2836,13 +2933,17 @@ def v2_profile(args):
+     if st.valid is not None and len(st.valid):
+         done = np.asarray(st.done, bool)
+         V = np.asarray(st.valid, bool)[done]
+-        bad = (~V[:, am.GRID_U >= 0.03]).any(1)
++        u3 = am.GRID_U >= 0.03
++        bad = (~V[:, u3]).any(1)
++        small = np.asarray(st.arr[:, 0, :], np.float32)[done] < math.log(2 * sch.n)
++        ill = (~V & ~small)[:, u3].any(1)
+         print(f"pool rows profiled: {done.sum()} of {len(done)}; grid points invalid: "
+               f"{(~V).sum()} of {V.size}; P with an invalid point at u >= 0.03: {bad.sum()} "
+-              f"({100 * bad.mean():.2f}%)")
++              f"({100 * bad.mean():.2f}%), of which not merely N < {2 * sch.n} (ill-conditioned): "
++              f"{ill.sum()} ({100 * ill.mean():.2f}%)")
+         print("invalid grid points by guard (non-exclusive, counted when computed): " +
+               ", ".join(f"{g} {st.guards.get(g, 0)}" for g in am.GUARDS))
+-        size = sum(os.path.getsize(os.path.join(st.dir, x)) for x in os.listdir(st.dir))
++        size = sum(os.path.getsize(os.path.join(st.pdir, x)) for x in os.listdir(st.pdir))
+         print(f"store size {size / 1e6:.0f} MB")
+     if st.extra:
+         V = np.array([e["v"] for e in st.extra.values()], bool)
+@@ -2983,6 +3084,9 @@ def main():
+     p.add_argument("--seed", type=int, default=1, help="seed of --sample")
+     p.add_argument("--draws", type=int, default=50,
+                    help="analytic: posterior draws for the uncertainty band")
++    p.add_argument("--shipped", action="store_true",
++                   help="analytic: use the shipped calibration (no learned class, time or "
++                        "per-P factors)")
+     p.set_defaults(func=dispatch(cmd_forecast, v2_forecast))
+ 
+     p = sub.add_parser("fit")
+diff --git a/scripts/test_scheduler.py b/scripts/test_scheduler.py
+index 0f64108..f667ab5 100644
+--- a/scripts/test_scheduler.py
++++ b/scripts/test_scheduler.py
+@@ -539,7 +539,7 @@ def test_no_enumerate():
+                                    tau_min=1000, tau_max=12000, explore=None, profile_workers=1,
+                                    no_legacy=False, workers=1, unit_time=60.0, unit_drop=0.5,
+                                    node_limit=0, active=300, only=SMALL, top=5, units=3,
+-                                   hours=0.5, sample=1.0, seed=1, draws=5)
++                                   hours=0.5, sample=1.0, seed=1, draws=5, shipped=False)
+             import contextlib
+             import io
+             buf = io.StringIO()
+-- 
+2.43.0
+

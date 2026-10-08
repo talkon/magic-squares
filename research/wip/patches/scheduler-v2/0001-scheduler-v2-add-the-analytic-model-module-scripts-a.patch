@@ -1,0 +1,495 @@
+From db41d2fb97caf8861a945a739bdb5fc37f51e032 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 14:16:16 +0000
+Subject: [PATCH 1/5] scheduler v2: add the analytic model module
+ (scripts/amodel.py)
+
+The existence study's calibrated analytic model (max-entropy local CLT with
+exact lattice factors, K_n and kappa calibration) predicts vectors, squares
+per sum, P(magic | square), traversal rates and labels per (P, S) with ~3
+fitted constants, and was tested on held-out data up to N = 45k, where the
+scheduler's regression has no growth beyond N ~ 5.5k. This ports it into the
+repo, vectorised over S, with validity guards for the ill-conditioned points
+near S_min, the review factors, the N bias correction, the label predictor,
+and the label-aware time law (prior refit on the model's own N' and L_raw)
+with an online Bayesian-ridge refit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ scripts/amodel.py           | 453 ++++++++++++++++++++++++++++++++++++
+ scripts/amodel_lattice.json |   1 +
+ 2 files changed, 454 insertions(+)
+ create mode 100644 scripts/amodel.py
+ create mode 100644 scripts/amodel_lattice.json
+
+diff --git a/scripts/amodel.py b/scripts/amodel.py
+new file mode 100644
+index 0000000..4bad2d8
+--- /dev/null
++++ b/scripts/amodel.py
+@@ -0,0 +1,453 @@
++#!/usr/bin/env python3
++"""
++The analytic model of the existence study (research/existence/analytic.md,
++research/existence.md sections 2-4) for scheduler v2: for one P and an array
++of sums S it predicts
++
++    N(P, S)        number of vectors (n-sets of distinct divisors of P with
++                   sum S and product P), before msearch's reduction
++    E_semi(P, S)   expected number of semi-magic squares with sum S
++    P(magic | semi-magic square at (P, S))
++    p_S, p_P, p_SP probabilities that a traversal (a possible diagonal) has
++                   the magic sum / product / both
++    L_raw          expected number of distinct divisors among n N draws (what
++                   msearch's "labels" count, up to a fitted factor)
++
++How. Put on the divisors d of P the tilted (max-entropy) measure
++mu(d) ~ exp(-beta d / (S/n) + sum_p lambda_p e_p(d)) with E[d] = S/n and
++E[e_p(d)] = a_p/n (Newton on the convex dual, vectorised over S). With H its
++entropy and C the covariance of (d, e_2(d), e_3(d), ...), a local central
++limit theorem with exact per-prime lattice factors (amodel_lattice.json,
++from the exact exponent-matrix counts H_n, M_n) gives
++
++    N      ~ e^{nH} (2 pi)^{-q/2} det(nC)^{-1/2} L_vec P_dist(n) / n!
++    E_semi ~ e^{n^2 H} / [(2 pi)^{(2n-1)q/2} det C^{(2n-1)/2} n^{(n-1)q}]
++             L_semi P_dist(n^2) / (2 (n!)^2) x K_n
++    P(magic | semi) = D_n kappa p_pair,  p_pair = L_M / [(2 pi)^q det C ((n-1)^2 - c^2)^{q/2}]
++
++where q = 1 + (number of distinct primes), P_dist(m) is the probability that
++m draws from mu are distinct (saddle point), D_n = 5400 pairs of diagonals
++for n = 6, and the calibration (fitted on n = 5, 6, 7 and tested on held-out
++data up to N = 45k: squares obs/pred 1.04 on the first search, 0.78 at N
++3.4-8.9k, 1.23 at N 15-45k) is
++
++    log K_n = C0 + B log P_dist(n^2) + DN (n - 6),    kappa = KAPPA.
++
++The review corrections of existence.md 4.1 (REVIEW below) and the bias of
++N above ~2.5k (n_bias) are kept separate: profile() returns the model
++itself, and the scheduler applies (and learns) the factors on top.
++
++Grid. The scheduler evaluates each P once on S_j = S0 (1 + u_j), u_j in
++GRID_U (24 points from 0.01 to 1, S0 = n P^{1/n} the AM-GM bound) and
++interpolates in S. Points that are numerically meaningless (very close to
++S_min the dual is ill-conditioned and N, E come out astronomically large)
++are marked invalid: non-finite values, Newton not converged, N < 2n, or at
++or before the last decrease of N along the grid.
++
++Time. TimeModel: CPU seconds per sum as a function of the model's N (bias
++corrected) and L_raw, ln t = th . [1, ln(N'/4000), ln(L_raw/150),
++max(0, ln(N'/8000))], refit online per msearch engine (Bayesian ridge).
++node_law(): predicted search nodes, used only for --node-limit.
++
++Needs numpy. AMODEL_VERSION changes whenever the numbers profile() returns
++change (constants, grid, lattice table): it invalidates cached profiles.
++"""
++import json
++import math
++import os
++
++import numpy as np
++
++AMODEL_VERSION = 1
++
++PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53)
++HERE = os.path.dirname(os.path.abspath(__file__))
++
++# calibration of the analytic model (analytic.md 4.2-4.3)
++C0, B, DN, KAPPA = -0.597, 0.1365, -2.455, 0.57
++D_6 = 5400
++
++# review corrections (existence.md 4.1): multipliers on squares (SQ12) or on
++# P(magic | square) (the others); the scheduler's learning priors start here
++SQ12 = 1.23     # squares per sum at N' >= 12000
++NTR = 1.35      # P(magic) at N' >= 3000 (traversal rates rise with N)
++K7 = 0.85       # P(magic) at k >= 7 distinct primes
++X01 = 0.92      # P(magic) at x = ln(S / smin_approx) < 0.1
++PAIR = 0.87     # P(magic): the pair factor
++REVIEW = dict(SQ12=SQ12, NTR=NTR, K7=K7, X01=X01, PAIR=PAIR)
++
++# sanity cap on P(magic | square)
++LOG_PM_CAP = math.log(1e-6)
++
++# observed msearch labels / L_raw = exp(LAB0 + LAB1 ln(N'/4000) + LAB2 (k - 6))
++# (sd 0.032 over 646 engine-2 sums, 10 of them at N 6.7-45k)
++LAB0, LAB1, LAB2 = -0.391, -0.035, -0.016
++
++# the model's N runs 4-6% high above 3-4k: N' = N exp(n_bias(ln N))
++NBIAS_SLOPE, NBIAS_KNOT = -0.045, math.log(2500)
++
++GRID_U = np.geomspace(0.01, 1.0, 24)
++FIELDS = ("lN", "lEs", "lPm", "lpS", "lpP", "lpSP", "lLraw", "ld")
++
++# divisors above CAP_FACTOR * max(S) / n are left out of the measure (their
++# weight is negligible: |dlog E| p90 6e-5 against 80 max(S) / n on 115 P)
++CAP_FACTOR = 24.0
++A_MAX = 40      # the lattice table covers exponents 0..40
++
++with open(os.path.join(HERE, "amodel_lattice.json")) as _f:
++    _LAT = {int(n): v for n, v in json.load(_f).items()}
++
++
++# --------------------------------------------------------------------------
++# helpers on P (an exponent tuple over PRIMES)
++
++
++def tau(P):
++    t = 1
++    for a in P:
++        t *= a + 1
++    return t
++
++
++def log_p(P):
++    return sum(a * math.log(p) for p, a in zip(PRIMES, P))
++
++
++def s0(P, n=6):
++    """AM-GM bound n P^(1/n): no vector has a smaller sum"""
++    return n * math.exp(log_p(P) / n)
++
++
++def smin_approx(P, n=6):
++    """S_min ~ S0 (1 + 10/tau): median error 0.03%, 90% within 0.17%, max
++    1.2% (5,492 P with exact S_min)"""
++    return s0(P, n) * (1 + 10.0 / tau(P))
++
++
++def ratio(P, n=6):
++    """assignment ratio (P / P_sorted)^(1/n) >= 1, where P_sorted puts the
++    same exponents in non-increasing order on 2, 3, 5, ..."""
++    srt = sorted((a for a in P if a), reverse=True)
++    return math.exp((log_p(P) - log_p(srt)) / n)
++
++
++def num_primes(P):
++    return sum(1 for a in P if a)
++
++
++def ndiag_pairs(n):
++    """unordered pairs of possible diagonals of a semi-magic square: 5400 for n = 6"""
++    f = math.factorial(n)
++    if n % 2 == 0:
++        inv = 1
++        for j in range(n - 1, 0, -2):
++            inv *= j
++    else:
++        inv = n
++        for j in range(n - 2, 0, -2):
++            inv *= j
++    return f * inv // 2
++
++
++def lattice(kind, n, a):
++    if a > A_MAX:
++        raise ValueError(f"exponent {a} > {A_MAX}: outside the lattice table")
++    return _LAT[n][kind][a]
++
++
++def n_bias(lN):
++    """log correction of the model's N: dN = -0.045 max(0, lN - ln 2500)"""
++    return NBIAS_SLOPE * np.maximum(0.0, np.asarray(lN, float) - NBIAS_KNOT)
++
++
++def labels_obs(lNp, lLraw, k):
++    """predicted msearch 'labels' (distinct entries after reduction) from the
++    bias-corrected lN' and L_raw"""
++    return np.exp(np.asarray(lLraw, float) + LAB0 + LAB1 * (np.asarray(lNp, float) - math.log(4000))
++                  + LAB2 * (k - 6))
++
++
++# --------------------------------------------------------------------------
++# the model
++
++
++def divisors_capped(P, cap):
++    """divisors d <= cap of P, their exponent matrix, and the exponents a_p
++    of the primes present"""
++    idx = [i for i, a in enumerate(P) if a > 0]
++    ds = np.array([1.0])
++    E = np.zeros((1, 0))
++    for i in idx:
++        p, a = PRIMES[i], P[i]
++        pw = np.array([float(p) ** j for j in range(a + 1)])
++        nd = ds[:, None] * pw[None, :]
++        rows, cols = np.nonzero(nd <= cap)
++        E = np.concatenate([E[rows], cols[:, None].astype(float)], axis=1)
++        ds = nd[rows, cols]
++    return ds, E, np.array([P[i] for i in idx], dtype=float)
++
++
++def log_pdist(W, m, iters=60):
++    """log P(m iid draws from each row of W are distinct) = log(m! e_m(w)),
++    by a saddle point (existence/analytic esym2.py)"""
++    R = W.shape[0]
++    lo = np.full(R, -60.0)
++    hi = np.full(R, 60.0)
++    t = np.full(R, math.log(m))
++    for _ in range(iters):
++        wz = W * np.exp(t)[:, None]
++        f = (wz / (1 + wz)).sum(1) - m
++        fp = (wz / (1 + wz) ** 2).sum(1)
++        lo = np.where(f < 0, t, lo)
++        hi = np.where(f >= 0, t, hi)
++        tn = t - f / np.maximum(fp, 1e-300)
++        if np.abs(tn - t).max() < 1e-9:
++            t = tn
++            break
++        bad = (tn < lo) | (tn > hi) | ~np.isfinite(tn)
++        t = np.where(bad, 0.5 * (lo + hi), tn)
++    wz = W * np.exp(t)[:, None]
++    V = (wz / (1 + wz) ** 2).sum(1)
++    return np.log1p(wz).sum(1) - m * t - 0.5 * np.log(2 * math.pi * V) + math.lgamma(m + 1)
++
++
++def _maxent(X, T, S, n, k):
++    """Newton (Armijo backtracking) on the dual of the max-entropy problem,
++    one row per sum; returns (log partition - theta.T, weights, converged)"""
++    m = len(S)
++    q = 1 + k
++    XX = (X[:, :, None] * X[:, None, :]).reshape(len(X), q * q)
++    th = np.zeros((m, q))
++    th[:, 0] = n / S
++
++    def evalf(th):
++        Z = th @ X.T
++        zm = Z.max(1, keepdims=True)
++        W = np.exp(Z - zm)
++        Zs = W.sum(1, keepdims=True)
++        W /= Zs
++        return (np.log(Zs[:, 0]) + zm[:, 0]) - (th * T).sum(1), W
++
++    val, W = evalf(th)
++    scale = np.concatenate([(S / n)[:, None], np.ones((m, k))], 1)
++    conv = np.zeros(m, bool)
++    for _ in range(60):
++        M = W @ X
++        g = M - T
++        conv = np.abs(g / scale).max(1) < 1e-10
++        if conv.all():
++            break
++        Hs = (W @ XX).reshape(m, q, q) - M[:, :, None] * M[:, None, :]
++        step = np.linalg.solve(Hs + 1e-14 * np.eye(q)[None], g[:, :, None])[:, :, 0]
++        step[conv] = 0.0
++        t = np.ones(m)
++        for _ in range(30):
++            nv, nW = evalf(th - t[:, None] * step)
++            bad = (nv > val - 1e-4 * t * (g * step).sum(1) + 1e-12 * np.abs(val)) & ~conv
++            if not bad.any():
++                break
++            t = np.where(bad, t * 0.5, t)
++        th = th - t[:, None] * step
++        val, W = nv, nW
++    else:
++        g = W @ X - T
++        conv = np.abs(g / scale).max(1) < 1e-10
++    return val, W, XX, conv
++
++
++def profile(P, S, n=6, cap=None):
++    """the calibrated analytic model of one P at the sums S (1-d array,
++    ascending for the monotonicity guard); returns a dict of arrays over S:
++    lN, lEs, lPm, lpS, lpP, lpSP, lLraw, ld (= log P_dist(n^2)), converged,
++    valid, and the number of distinct primes k. No review factors applied."""
++    P = tuple(int(a) for a in P)
++    while P and P[-1] == 0:
++        P = P[:-1]
++    if any(a > A_MAX for a in P):
++        raise ValueError(f"exponent > {A_MAX} in {P}")
++    S = np.atleast_1d(np.asarray(S, dtype=float))
++    if cap is None:
++        cap = CAP_FACTOR * S.max() / n
++    ds, E, a = divisors_capped(P, cap)
++    k = len(a)
++    q = 1 + k
++    X = np.concatenate([-ds[:, None], E], axis=1)
++    T = np.concatenate([-(S / n)[:, None], np.tile(a / n, (len(S), 1))], axis=1)
++    with np.errstate(all="ignore"):
++        H, W, XX, conv = _maxent(X, T, S, n, k)
++        m = len(S)
++        M = W @ X
++        C = (W @ XX).reshape(m, q, q) - M[:, :, None] * M[:, None, :]
++        ldC = np.linalg.slogdet(C)[1]
++        ldCe = np.linalg.slogdet(C[:, 1:, 1:])[1] if k > 0 else np.zeros(m)
++        L2P = math.log(2 * math.pi)
++        loc = {kk: sum(lattice(kk, n, int(x)) for x in a) for kk in ("vec", "semi", "T", "M")}
++        tup = n * H - 0.5 * q * L2P - 0.5 * (q * math.log(n) + ldC) + loc["vec"]
++        grid = (n * n * H - 0.5 * (2 * n - 1) * q * L2P - 0.5 * (2 * n - 1) * ldC
++                - (n - 1) * q * math.log(n) + loc["semi"])
++        lpS = -0.5 * (math.log(2 * math.pi * (n - 1)) + np.log(C[:, 0, 0]))
++        lpP = -0.5 * (k * math.log(2 * math.pi * (n - 1)) + ldCe) + loc["T"]
++        lpSP = -0.5 * (q * math.log(2 * math.pi * (n - 1)) + ldC) + loc["T"]
++        cdd = -1.0 if n % 2 == 0 else 0.0
++        lpair = -(q * L2P + ldC + 0.5 * q * math.log((n - 1) ** 2 - cdd ** 2)) + loc["M"]
++        sel = W.max(0) > 1e-16
++        Wsel = W[:, sel]
++        ld_n = log_pdist(Wsel, n)
++        ld_n2 = log_pdist(Wsel, n * n)
++        lN = tup + ld_n - math.lgamma(n + 1)
++        lK = C0 + B * ld_n2 + DN * (n - 6)
++        lEs = grid + ld_n2 - math.log(2) - 2 * math.lgamma(n + 1) + lK
++        lPm = math.log(ndiag_pairs(n)) + math.log(KAPPA) + lpair
++        Lraw = (1.0 - np.exp(-n * np.exp(lN)[:, None] * Wsel)).sum(1)
++        lLraw = np.log(np.maximum(Lraw, 1.0))
++    out = dict(lN=lN, lEs=lEs, lPm=np.minimum(lPm, LOG_PM_CAP), lpS=lpS, lpP=lpP, lpSP=lpSP,
++               lLraw=lLraw, ld=ld_n2)
++    finite = np.ones(len(S), bool)
++    for key in FIELDS:
++        finite &= np.isfinite(out[key])
++    valid = finite & conv & (lN >= math.log(2 * n))
++    # ill-conditioned points near S_min: lN falls along the grid there
++    lNf = np.where(finite, lN, np.inf)
++    dec = np.nonzero(np.diff(lNf) < -1e-7)[0]
++    if len(dec):
++        valid[:dec[-1] + 2] = False
++    out.update(converged=conv, valid=valid, k=k)
++    return out
++
++
++def grid_sums(P, n=6, u=GRID_U):
++    return s0(P, n) * (1 + np.asarray(u))
++
++
++GUARDS = ("nonfinite", "not_converged", "small_N", "invalid")
++STORE_CLIP = 60.0   # stored values are clipped to +-60 (e^-60 is nothing)
++
++
++def profile_rows(Ps, n=6):
++    """profiles of several P on the grid, as stored by the scheduler:
++    float16 [m, len(FIELDS), len(GRID_U)], valid uint8 [m, len(GRID_U)],
++    guard counts int32 [m, len(GUARDS)] (ProcessPoolExecutor worker)"""
++    m = len(Ps)
++    arr = np.zeros((m, len(FIELDS), len(GRID_U)), np.float16)
++    val = np.zeros((m, len(GRID_U)), np.uint8)
++    gc = np.zeros((m, len(GUARDS)), np.int32)
++    for i, P in enumerate(Ps):
++        try:
++            pr = profile(P, grid_sums(P, n), n)
++        except (ValueError, IndexError):   # exponent or prime outside the tables
++            gc[i] = [len(GRID_U), 0, 0, len(GRID_U)]
++            continue
++        for j, key in enumerate(FIELDS):
++            arr[i, j] = np.clip(np.nan_to_num(pr[key], nan=0.0, posinf=STORE_CLIP, neginf=-STORE_CLIP),
++                                -STORE_CLIP, STORE_CLIP)
++        val[i] = pr["valid"]
++        g = guard_counts(pr)
++        gc[i] = [g[key] for key in GUARDS]
++    return arr, val, gc
++
++
++def worker_init():
++    """ProcessPoolExecutor initializer: lowest priority, one BLAS thread"""
++    for v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
++        os.environ[v] = "1"
++    try:
++        os.nice(19)
++    except OSError:
++        pass
++
++
++def guard_counts(prof):
++    """number of grid points failing each guard (for `scheduler.py profile`)"""
++    finite = np.ones(len(prof["lN"]), bool)
++    for key in FIELDS:
++        finite &= np.isfinite(prof[key])
++    return {"nonfinite": int((~finite).sum()), "not_converged": int((~prof["converged"]).sum()),
++            "small_N": int((finite & (prof["lN"] < math.log(12))).sum()),
++            "invalid": int((~prof["valid"]).sum())}
++
++
++# --------------------------------------------------------------------------
++# time and nodes per sum
++
++UNIT_OVERHEAD = 0.05    # CPU seconds per unit (process start)
++SUM_OVERHEAD = 0.002    # CPU seconds per sum
++
++# ln t = th . [1, ln(N'/4000), ln(Lraw/150), max(0, ln(N'/8000))], msearch
++# engine 2, fitted with the model's N' and L_raw at each sum's S (as the
++# scheduler uses them, not the observed N and labels) on 594 full sums with
++# N >= 1000 and 10 r1-sampled sums at N 6.7-45k (weight 30). Residual sd
++# 0.25 (0.17 with the observed N: the model's N carries a few % of error,
++# which the N^5 law multiplies); band means within +-0.04 except +0.42 on
++# the 6 full sums at N 3-6k (known: the label bitset grows to 3 words).
++TIME_PRIOR = {"th": [3.6717, 5.2827, -2.2092, 0.5531], "sd": 0.25, "engine": 2}
++# prior precision of th for an online refit, and of the residual variance
++# (in pseudo-sums at sd 0.17)
++TIME_LAMBDA = (50.0, 50.0, 50.0, 200.0)
++TIME_SD_PSEUDO = 20.0
++
++# ln nodes = NODE_TH . [1, ln(N'/4000), ln(labels/150), max(0, ln(N'/8000))]
++NODE_TH = (17.375, 5.756, -5.765, 0.639)
++
++
++def time_features(lNp, lLraw):
++    x = np.asarray(lNp, float) - math.log(4000)
++    return np.stack([np.ones_like(x), x, np.asarray(lLraw, float) - math.log(150),
++                     np.maximum(0.0, np.asarray(lNp, float) - math.log(8000))], -1)
++
++
++def log_nodes(lNp, lLraw, k):
++    lab = labels_obs(lNp, lLraw, k)
++    x = np.asarray(lNp, float) - math.log(4000)
++    return (NODE_TH[0] + NODE_TH[1] * x + NODE_TH[2] * np.log(lab / 150)
++            + NODE_TH[3] * np.maximum(0.0, np.asarray(lNp, float) - math.log(8000)))
++
++
++class TimeModel:
++    """CPU seconds per sum from the model's N' and L_raw; one coefficient
++    vector per msearch engine (and search mode). fit() is a Bayesian ridge
++    towards the prior: b = (A + Lam0)^-1 (c + Lam0 b0) with A = F'F / s^2,
++    c = F'y / s^2 and Lam0 = diag(TIME_LAMBDA); s^2 is pooled with
++    TIME_SD_PSEUDO pseudo-sums at the prior sd."""
++
++    def __init__(self, th=None, sd=None, engine=None, n=0):
++        self.th = np.array(TIME_PRIOR["th"] if th is None else th, float)
++        self.sd = float(TIME_PRIOR["sd"] if sd is None else sd)
++        self.engine = TIME_PRIOR["engine"] if engine is None else engine
++        self.n = n  # rows in the last fit
++
++    def log_time(self, lNp, lLraw):
++        return time_features(lNp, lLraw) @ self.th
++
++    def time(self, lNp, lLraw):
++        """expected CPU seconds per sum"""
++        return np.exp(np.minimum(self.log_time(lNp, lLraw), 60.0) + 0.5 * self.sd ** 2) + SUM_OVERHEAD
++
++    @staticmethod
++    def stats(F, y):
++        """sufficient statistics of rows (F, y): n, F'F, F'y, y'y"""
++        F = np.asarray(F, float).reshape(-1, 4)
++        y = np.asarray(y, float)
++        return {"n": len(y), "FF": F.T @ F, "Fy": F.T @ y, "yy": float(y @ y)}
++
++    def fit(self, st, prior=None, iters=4):
++        """posterior from sufficient statistics st (see stats), starting from
++        prior (a TimeModel; default the shipped prior)"""
++        prior = prior or TimeModel()
++        b0, s0_ = prior.th, prior.sd
++        lam = np.diag(TIME_LAMBDA)
++        s2 = s0_ ** 2
++        th = b0.copy()
++        for _ in range(iters):
++            A = st["FF"] / s2 + lam
++            c = st["Fy"] / s2 + lam @ b0
++            th = np.linalg.solve(A, c)
++            rss = st["yy"] - 2 * th @ st["Fy"] + th @ st["FF"] @ th
++            s2 = (max(rss, 0.0) + TIME_SD_PSEUDO * s0_ ** 2) / (st["n"] + TIME_SD_PSEUDO)
++        return TimeModel(th, math.sqrt(s2), self.engine, st["n"])
++
++    def to_json(self):
++        return {"th": [float(v) for v in self.th], "sd": self.sd, "engine": self.engine, "n": self.n}
++
++    @staticmethod
++    def from_json(d):
++        return TimeModel(d["th"], d["sd"], d.get("engine"), d.get("n", 0))
+diff --git a/scripts/amodel_lattice.json b/scripts/amodel_lattice.json
+new file mode 100644
+index 0000000..d588dde
+--- /dev/null
++++ b/scripts/amodel_lattice.json
+@@ -0,0 +1 @@
++{"5": {"vec": [0.0, -0.085207, -0.056143, -0.051214, -0.049775, -0.049152, -0.048786, -0.048524, -0.048317, -0.048142, -0.047992, -0.047859, -0.047742, -0.047636, -0.047542, -0.047456, -0.047378, -0.047307, -0.047241, -0.047181, -0.047126, -0.047075, -0.047028, -0.046984, -0.046943, -0.046905, -0.046869, -0.046836, -0.046804, -0.046775, -0.046747, -0.046721, -0.046696, -0.046672, -0.04665, -0.046629, -0.046608, -0.046589, -0.046571, -0.046554, -0.046537], "semi": [0.0, -1.260987, -0.811142, -0.653261, -0.568613, -0.514627, -0.476836, -0.448784, -0.427093, -0.409805, -0.395697, -0.383964, -0.374053, -0.36557, -0.358229, -0.351812, -0.346158, -0.341137, -0.336649, -0.332615, -0.328968, -0.325656, -0.322634, -0.319867, -0.317323, -0.314977, -0.312807, -0.310793, -0.308919, -0.307171, -0.305537, -0.304007, -0.30257, -0.301218, -0.299945, -0.298742, -0.297606, -0.29653, -0.295509, -0.29454, -0.294357], "T": [0.0, -0.285034, -0.166801, -0.115082, -0.087858, -0.071058, -0.059602, -0.051317, -0.045046, -0.040141, -0.036233, -0.032995, -0.030287, -0.027988, -0.026012, -0.024295, -0.022791, -0.021461, -0.020277, -0.019216, -0.01826, -0.017394, -0.016606, -0.015885, -0.015225, -0.014616, -0.014054, -0.013534, -0.01305, -0.012599, -0.012178, -0.011784, -0.011415, -0.011068, -0.010741, -0.010432, -0.010141, -0.009865, -0.009604, -0.009356, -0.00912], "M": [0.0, -0.40017, -0.309723, -0.21519, -0.168897, -0.138351, -0.116778, -0.100939, -0.090547, -0.081688, -0.074558, -0.068696, -0.063792, -0.059628, -0.056049, -0.052939, -0.050212, -0.047802, -0.045655, -0.043732, -0.041999, -0.040429, -0.039, -0.037694, -0.036495, -0.035392, -0.034373, -0.033428, -0.032551, -0.031733, -0.030969, -0.030255, -0.029585, -0.028955, -0.028361, -0.027802, -0.027273, -0.026773, -0.026299, -0.025849, -0.025421]}, "6": {"vec": [0.0, -0.08383, -0.055948, -0.049609, -0.046613, -0.044655, -0.043197, -0.042045, -0.041107, -0.040327, -0.039667, -0.039103, -0.038616, -0.03819, -0.037816, -0.037485, -0.03719, -0.036925, -0.036687, -0.036471, -0.036274, -0.036095, -0.035931, -0.035779, -0.03564, -0.035511, -0.035391, -0.035279, -0.035176, -0.035078, -0.034987, -0.034902, -0.034822, -0.034746, -0.034675, -0.034607, -0.034543, -0.034483, -0.034425, -0.034371, -0.034319], "semi": [0.0, -1.431277, -0.870296, -0.659195, -0.541992, -0.465947, -0.412273, -0.37229, -0.341349, -0.316705, -0.296626, -0.279961, -0.265917, -0.253926, -0.243574, -0.23455, -0.226616, -0.219589, -0.213323, -0.207702, -0.202632, -0.198037, -0.193854, -0.19003, -0.186521, -0.183291, -0.180307, -0.177543, -0.174975, -0.172584, -0.170351, -0.168263, -0.166305, -0.164465, -0.162734, -0.161101, -0.15956, -0.158102, -0.156721, -0.15541, -0.153944], "T": [0.0, -0.266685, -0.125413, -0.077095, -0.050948, -0.034728, -0.023683, -0.015558, -0.009417, -0.004593, -0.000703, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "M": [0.0, -0.56208, -0.256761, -0.155246, -0.102589, -0.069906, -0.047994, -0.03214, -0.020161, -0.010792, -0.003263, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, "7": {"vec": [0.0, -0.083041, -0.055148, -0.047297, -0.042936, -0.039908, -0.037628, -0.035841, -0.034403, -0.033223, -0.03224, -0.03141, -0.030702, -0.03009, -0.029558, -0.029091, -0.028678, -0.028311, -0.027982, -0.027687, -0.02742, -0.027177, -0.026956, -0.026754, -0.026569, -0.026398, -0.02624, -0.026093, -0.025958, -0.025831, -0.025713, -0.025602, -0.025499, -0.025401, -0.02531, -0.025224, -0.025142, -0.025065, -0.024992, -0.024923, -0.024858], "semi": [0.0, -1.599272, -0.924098, -0.660631, -0.512578, -0.416387, -0.348722, -0.298592, -0.26084, -0.230607, -0.206059, -0.185731, -0.168619, -0.154018, -0.141412, -0.130418, -0.120746, -0.11217, -0.104515, -0.09764, -0.091431, -0.085796, -0.080658, -0.075956, -0.071635, -0.067651, -0.063967, -0.060549, -0.05737, -0.054405, -0.051634, -0.049038, -0.046601, -0.044309, -0.04215, -0.040111, -0.038184, -0.036359, -0.034629, -0.032986, -0.031424], "T": [0.0, -0.234734, -0.102314, -0.054703, -0.029528, -0.013986, -0.003433, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "M": [0.0, -0.509425, -0.208297, -0.112307, -0.060888, -0.028826, -0.006932, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}}
+\ No newline at end of file
+-- 
+2.43.0
+

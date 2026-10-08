@@ -1,0 +1,334 @@
+From fbe180556c136b55e430a1a56ecbac5ffe162e57 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 04:25:58 +0000
+Subject: [PATCH] research: sampled drivers for the diagonal-first (V_d) and
+ both-diagonals (V_{d1,d2}) searches
+
+dsample: d = off, off + k, ... over the unreduced list, the semi-magic search
+on V_d = { v : |v & d| = 1 } (as dsearch), one log line per d; k times the
+sampled totals estimates the whole d-first search of a sum.
+dpair: d1 sampled by stride, m random disjoint d2 > d1 per d1, the search on
+V_{d1,d2}; estimates the total over all disjoint pairs.
+Not built by CMake; e.g.
+  gcc -O3 -march=native -flto -o dsample dsample.c enumerate.c arrange.c square.c -lm
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ src/c/dpair.c   | 125 +++++++++++++++++++++++++++++++++++
+ src/c/dsample.c | 171 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 296 insertions(+)
+ create mode 100644 src/c/dpair.c
+ create mode 100644 src/c/dsample.c
+
+diff --git a/src/c/dpair.c b/src/c/dpair.c
+new file mode 100644
+index 0000000..34fcc0e
+--- /dev/null
++++ b/src/c/dpair.c
+@@ -0,0 +1,125 @@
++/*
++ * dpair: sampled cost of the "both diagonals first" search: for d1 = off,
++ * off + k, ... and m random d2 > d1 disjoint from d1, the semi-magic search
++ * on V_{d1,d2} = { v : |v & d1| = |v & d2| = 1 }. Estimates the total over
++ * all unordered disjoint pairs: k * sum_{d1} |D(d1)| * mean cost.
++ * usage: dpair --sum S [--stride k] [--offset o] [--m m] e1 e2 ...
++ */
++#include <getopt.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include "enumerate.h"
++#include "arrange.h"
++#include "square.h"
++
++static double cpu_time(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
++}
++static int cb(const square_t *sq, void *vctx) {
++  (void)sq;
++  (*(uint64_t *)vctx)++;
++  return 0;
++}
++#define HB 16
++static uint64_t hkey[1 << HB];
++static int hval[1 << HB];
++static int hid(uint64_t x, int *L) {
++  uint32_t h = (uint32_t)((x * 0x9E3779B97F4A7C15ull) >> (64 - HB));
++  while (hval[h] && hkey[h] != x)
++    h = (h + 1) & ((1 << HB) - 1);
++  if (!hval[h]) {
++    hkey[h] = x;
++    hval[h] = ++*L;
++  }
++  return hval[h] - 1;
++}
++static inline int meet(const uint64_t *a, const uint64_t *b) {
++  int k = 0;
++  for (int w = 0; w < 8; w++)
++    k += __builtin_popcountll(a[w] & b[w]);
++  return k;
++}
++int main(int argc, char *argv[]) {
++  search_opts_t opts;
++  search_opts_default(&opts);
++  static struct option lo[] = {{"sum", 1, 0, 's'}, {"stride", 1, 0, 'k'},
++                               {"offset", 1, 0, 'o'}, {"m", 1, 0, 'm'}, {0, 0, 0, 0}};
++  int opt;
++  uint64_t S = 0;
++  size_t stride = 1, off = 0, m = 10;
++  while ((opt = getopt_long(argc, argv, "s:k:o:m:", lo, NULL)) != -1) {
++    if (opt == 's') S = strtoull(optarg, NULL, 10);
++    else if (opt == 'k') stride = strtoull(optarg, NULL, 10);
++    else if (opt == 'o') off = strtoull(optarg, NULL, 10);
++    else if (opt == 'm') m = strtoull(optarg, NULL, 10);
++    else return 2;
++  }
++  prime_exps_t p;
++  if (!S || optind >= argc || pexp_parse(&p, argc - optind, argv + optind)) return 2;
++  const int n = 6;
++  vec_list_t all, red;
++  vec_list_init(&all, n);
++  vec_list_init(&red, n);
++  enum_vectors(&p, n, S, S, &all);
++  reduce_vectors(&all, 0, all.count, &red, 0);
++  int L = 0;
++  uint64_t *ab = calloc(all.count * 8, sizeof(uint64_t));
++  uint64_t *rb = calloc(red.count * 8, sizeof(uint64_t));
++  for (size_t v = 0; v < all.count; v++)
++    for (int i = 0; i < n; i++) {
++      int x = hid(vec_list_get(&all, v)[i], &L);
++      ab[v * 8 + x / 64] |= 1ull << (x % 64);
++    }
++  for (size_t v = 0; v < red.count; v++)
++    for (int i = 0; i < n; i++) {
++      int x = hid(vec_list_get(&red, v)[i], &L);
++      rb[v * 8 + x / 64] |= 1ull << (x % 64);
++    }
++  srand(12345 + (unsigned)off);
++  vec_list_t sub;
++  vec_list_init(&sub, n);
++  size_t *D = malloc(all.count * sizeof(size_t));
++  double est = 0, pairs = 0, sumV = 0, ncalls = 0, est_nodes = 0, est_srch = 0, est_setup = 0;
++  uint64_t found = 0;
++  double c0 = cpu_time();
++  for (size_t d1 = off; d1 < all.count; d1 += stride) {
++    size_t nd = 0;
++    for (size_t d2 = d1 + 1; d2 < all.count; d2++)
++      if (meet(ab + d1 * 8, ab + d2 * 8) == 0)
++        D[nd++] = d2;
++    pairs += (double)nd;
++    if (!nd) continue;
++    double tsum = 0, nsum = 0, ssum = 0, usum = 0;
++    for (size_t j = 0; j < m; j++) {
++      size_t d2 = D[(size_t)rand() % nd];
++      double c1 = cpu_time();
++      sub.count = 0;
++      for (size_t v = 0; v < red.count; v++)
++        if (meet(ab + d1 * 8, rb + v * 8) == 1 && meet(ab + d2 * 8, rb + v * 8) == 1)
++          vec_list_push(&sub, vec_list_get(&red, v));
++      search_stats_t st = {0};
++      if (sub.count >= 12)
++        st = search_vectors(&sub, 0, sub.count, &opts, cb, &found);
++      tsum += cpu_time() - c1;
++      ssum += st.seconds;
++      usum += st.setup_seconds;
++      nsum += (double)st.nodes;
++      sumV += (double)sub.count;
++      ncalls++;
++    }
++    est += (double)nd * tsum / (double)m;
++    est_nodes += (double)nd * nsum / (double)m;
++    est_srch += (double)nd * ssum / (double)m;
++    est_setup += (double)nd * usum / (double)m;
++  }
++  printf("S %lu N %zu: pairs (est) %.4g  avg|V_d1d2| %.1f  calls %.0f  est total cpu %.4g s  est nodes %.4g  "
++         "(cpu used %.1f s, found %lu) search-only %.4g s setup %.4g s\n",
++         (unsigned long)S, all.count, pairs * stride, sumV / ncalls, ncalls, est * stride,
++         est_nodes * stride, cpu_time() - c0, (unsigned long)found, est_srch * stride, est_setup * stride);
++  return 0;
++}
+diff --git a/src/c/dsample.c b/src/c/dsample.c
+new file mode 100644
+index 0000000..0d51604
+--- /dev/null
++++ b/src/c/dsample.c
+@@ -0,0 +1,171 @@
++/*
++ * dsample: r1-style sampling for the diagonal-first search (dsearch.c).
++ *
++ * For one (P, S): enumerate the vectors, reduce, then for d = off, off + k,
++ * off + 2k, ... (d over the unreduced list, as in dsearch) run the
++ * semi-magic search on V_d = { v in reduced list : |v & d| = 1 } and log one
++ * line per d: d, |V_d|, labels, nodes, squares (= (square, d) pairs), magic,
++ * setup and search seconds. k times the sampled totals estimates the whole
++ * d-first search of the sum.
++ *
++ * usage: dsample --sum S [--stride k] [--offset o] [--log FILE] e1 e2 ...
++ */
++#include <getopt.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include "enumerate.h"
++#include "arrange.h"
++#include "square.h"
++
++static double cpu_time(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
++}
++
++typedef struct {
++  uint64_t squares, magic, sp_other;
++} d_ctx_t;
++
++static int d_cb(const square_t *sq, void *vctx) {
++  d_ctx_t *c = vctx;
++  c->squares++;
++  diag_stats_t ds;
++  square_diag_stats(sq, &ds);
++  c->sp_other += ds.sp_count;
++  if (ds.best_score >= 14) {
++    c->magic++;
++    fprintf(stderr, "!!! MAGIC SQUARE !!!\n");
++    grid_print_json(stderr, &ds.best);
++    fputc('\n', stderr);
++  }
++  return 0;
++}
++
++/* value -> dense id (open addressing) */
++#define HB 16
++static uint64_t hkey[1 << HB];
++static int hval[1 << HB];
++static int hid(uint64_t x, int *L) {
++  uint32_t h = (uint32_t)((x * 0x9E3779B97F4A7C15ull) >> (64 - HB));
++  while (hval[h] && hkey[h] != x)
++    h = (h + 1) & ((1 << HB) - 1);
++  if (!hval[h]) {
++    hkey[h] = x;
++    hval[h] = ++*L;
++  }
++  return hval[h] - 1;
++}
++
++int main(int argc, char *argv[]) {
++  search_opts_t opts;
++  search_opts_default(&opts);
++  static struct option long_options[] = {{"sum", required_argument, 0, 's'},
++                                         {"stride", required_argument, 0, 'k'},
++                                         {"offset", required_argument, 0, 'o'},
++                                         {"log", required_argument, 0, 'l'},
++                                         {"no-cross", no_argument, 0, 'c'},
++                                         {0, 0, 0, 0}};
++  int opt;
++  uint64_t S = 0;
++  size_t stride = 1, off = 0;
++  const char *logf = NULL;
++  while ((opt = getopt_long(argc, argv, "s:k:o:l:c", long_options, NULL)) != -1) {
++    switch (opt) {
++    case 's':
++      S = strtoull(optarg, NULL, 10);
++      break;
++    case 'k':
++      stride = strtoull(optarg, NULL, 10);
++      break;
++    case 'o':
++      off = strtoull(optarg, NULL, 10);
++      break;
++    case 'l':
++      logf = optarg;
++      break;
++    case 'c':
++      opts.cross = 0;
++      break;
++    default:
++      return 2;
++    }
++  }
++  prime_exps_t p;
++  if (!S || optind >= argc || pexp_parse(&p, argc - optind, argv + optind)) {
++    fprintf(stderr, "usage: dsample --sum S [--stride k] [--offset o] e1 e2 ...\n");
++    return 2;
++  }
++  const int n = 6;
++  vec_list_t all, red;
++  vec_list_init(&all, n);
++  vec_list_init(&red, n);
++  enum_vectors(&p, n, S, S, &all);
++  reduce_vectors(&all, 0, all.count, &red, 0);
++  /* label bitsets of 8 words */
++  int L = 0;
++  uint64_t *ab = calloc(all.count * 8, sizeof(uint64_t));
++  uint64_t *rb = calloc(red.count * 8, sizeof(uint64_t));
++  for (size_t v = 0; v < all.count; v++)
++    for (int i = 0; i < n; i++) {
++      int x = hid(vec_list_get(&all, v)[i], &L);
++      ab[v * 8 + x / 64] |= 1ull << (x % 64);
++    }
++  for (size_t v = 0; v < red.count; v++)
++    for (int i = 0; i < n; i++) {
++      int x = hid(vec_list_get(&red, v)[i], &L);
++      rb[v * 8 + x / 64] |= 1ull << (x % 64);
++    }
++  if (L > 512) {
++    fprintf(stderr, "too many labels\n");
++    return 1;
++  }
++  FILE *lg = logf ? fopen(logf, "w") : NULL;
++  d_ctx_t dc = {0, 0, 0};
++  vec_list_t sub;
++  vec_list_init(&sub, n);
++  double t_setup = 0, t_search = 0, sum_sub = 0;
++  uint64_t nodes = 0, nd = 0;
++  double c0 = cpu_time();
++  for (size_t d = off; d < all.count; d += stride) {
++    const uint64_t *db = ab + d * 8;
++    double c1 = cpu_time();
++    sub.count = 0;
++    for (size_t v = 0; v < red.count; v++) {
++      const uint64_t *vb = rb + v * 8;
++      int k = 0;
++      for (int w = 0; w < 8; w++)
++        k += __builtin_popcountll(db[w] & vb[w]);
++      if (k == 1)
++        vec_list_push(&sub, vec_list_get(&red, v));
++    }
++    sum_sub += (double)sub.count;
++    nd++;
++    uint64_t sq0 = dc.squares;
++    search_stats_t st = {0};
++    if (sub.count >= (size_t)(2 * n))
++      st = search_vectors(&sub, 0, sub.count, &opts, d_cb, &dc);
++    double c2 = cpu_time();
++    nodes += st.nodes;
++    t_setup += st.setup_seconds;
++    t_search += st.seconds;
++    if (lg)
++      fprintf(lg, "%zu %zu %d %lu %lu %.6f %.6f %.6f\n", d, sub.count, st.num_labels,
++              (unsigned long)st.nodes, (unsigned long)(dc.squares - sq0),
++              st.setup_seconds, st.seconds, c2 - c1);
++  }
++  double cpu = cpu_time() - c0;
++  printf("S %lu N %zu Nred %zu labels %d stride %zu offset %zu | d sampled %lu avg|V_d| %.1f "
++         "nodes %lu (est %.4g) pairs %lu (est %.4g) magic %lu sp_total %lu | cpu %.2f s (est %.4g) "
++         "setup %.2f search %.2f\n",
++         (unsigned long)S, all.count, red.count, L, stride, off, (unsigned long)nd,
++         sum_sub / (double)(nd ? nd : 1), (unsigned long)nodes, (double)nodes * stride,
++         (unsigned long)dc.squares, (double)dc.squares * stride, (unsigned long)dc.magic,
++         (unsigned long)dc.sp_other, cpu, cpu * stride, t_setup, t_search);
++  if (lg)
++    fclose(lg);
++  return 0;
++}
+-- 
+2.43.0
+

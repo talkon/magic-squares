@@ -1,0 +1,787 @@
+From fd93d091f1ed45ff35a0fea7bae9813008dea40b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 03:55:19 +0000
+Subject: [PATCH] arrange: node-local position-space prototype below (1,1)
+ (-DLOCAL11), d-sampled drivers
+
+Prototype for the decomposition study (not for merging): with -DLOCAL11
+and LOCAL=1, the subtree of every (1,1) node is searched with bitmasks
+over the positions of its two lists (exactly-once and disjoint matrices
+built per node, forward checking via label -> position masks). Same
+squares on quick.txt and full.txt, but 3.3x slower at N = 7.6k (8x more
+nodes without the label-union support filter). LOCAL=2 records the
+distinct labels at the (1,1) and (1,2)/(2,1) nodes, time-weighted.
+SAMPLE_STRIDE / SAMPLE_OFFSET / SAMPLE_LOG sample r1. The default build
+is unchanged (quick.txt 1,770,779 nodes).
+
+research/decomp: dsample.c (diagonal-first search on sampled d),
+dsample2.c (two-diagonal-first on sampled pairs), mbench.c (exactly-once
+filter vs cached masks + gather).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ research/decomp/dsample.c  |  88 +++++++++++++++
+ research/decomp/dsample2.c |  76 +++++++++++++
+ research/decomp/mbench.c   | 115 +++++++++++++++++++
+ src/c/arrange.c            | 107 ++++++++++++++++++
+ src/c/arrange_core.h       |  74 +++++++++++++
+ src/c/local11.h            | 220 +++++++++++++++++++++++++++++++++++++
+ 6 files changed, 680 insertions(+)
+ create mode 100644 research/decomp/dsample.c
+ create mode 100644 research/decomp/dsample2.c
+ create mode 100644 research/decomp/mbench.c
+ create mode 100644 src/c/local11.h
+
+diff --git a/research/decomp/dsample.c b/research/decomp/dsample.c
+new file mode 100644
+index 0000000..c6276cc
+--- /dev/null
++++ b/research/decomp/dsample.c
+@@ -0,0 +1,88 @@
++/* sampled diagonal-first search: for d = off, off + k, ... (indices into the
++ * unreduced list), search V_d = {v in reduced list: |v & d| = 1}; prints the
++ * sampled totals and k times them (unbiased for the full d-first run). */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/time.h>
++#include <time.h>
++#include "enumerate.h"
++#include "arrange.h"
++#include "square.h"
++static double cpu_time(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++  return t.tv_sec + 1e-9 * t.tv_nsec;
++}
++typedef struct { uint64_t squares, magic, sp; } ctx_t;
++static int cb(const square_t *sq, void *v) {
++  ctx_t *c = v;
++  c->squares++;
++  diag_stats_t ds;
++  square_diag_stats(sq, &ds);
++  c->sp += ds.sp_count;
++  if (ds.best_score >= 14) {
++    c->magic++;
++    fprintf(stderr, "!!! MAGIC SQUARE !!!\n");
++  }
++  return 0;
++}
++static int inter_count(const uint64_t *a, const uint64_t *b, int n) {
++  int k = 0;
++  for (int i = 0; i < n; i++)
++    for (int j = 0; j < n; j++)
++      k += a[i] == b[j];
++  return k;
++}
++int main(int argc, char **argv) {
++  if (argc < 5) {
++    fprintf(stderr, "usage: dsample S stride offset e1 e2 ...\n");
++    return 2;
++  }
++  uint64_t S = strtoull(argv[1], 0, 10);
++  size_t k = strtoull(argv[2], 0, 10), off = strtoull(argv[3], 0, 10);
++  prime_exps_t p;
++  if (pexp_parse(&p, argc - 4, argv + 4))
++    return 2;
++  const int n = 6;
++  vec_list_t all, red, sub;
++  vec_list_init(&all, n);
++  vec_list_init(&red, n);
++  vec_list_init(&sub, n);
++  enum_vectors(&p, n, S, S, &all);
++  reduce_vectors(&all, 0, all.count, &red, 0);
++  search_opts_t opts;
++  search_opts_default(&opts);
++  ctx_t c = {0};
++  double tsearch = 0, tsetup = 0, sumsub = 0, t0 = cpu_time();
++  uint64_t nodes = 0, nd = 0;
++  for (size_t d = off; d < all.count; d += k) {
++    const uint64_t *dv = vec_list_get(&all, d);
++    sub.count = 0;
++    for (size_t v = 0; v < red.count; v++)
++      if (inter_count(dv, vec_list_get(&red, v), n) == 1)
++        vec_list_push(&sub, vec_list_get(&red, v));
++    sumsub += sub.count;
++    nd++;
++    if (sub.count < 12)
++      continue;
++    double a = cpu_time();
++    search_stats_t st = search_vectors(&sub, 0, sub.count, &opts, cb, &c);
++    double b = cpu_time();
++    nodes += st.nodes;
++    tsearch += b - a;
++    tsetup += st.setup_seconds;
++    printf("d %zu |V_d| %zu labels %d nodes %lu sq %lu cpu %.3f\n", d,
++           sub.count, st.num_labels, (unsigned long)st.nodes,
++           (unsigned long)c.squares, b - a);
++    fflush(stdout);
++  }
++  printf("SUMMARY S %lu N %zu Nred %zu stride %zu off %zu sampled %lu mean|V_d| "
++         "%.1f cpu(search+setup) %.2f (setup %.2f) total %.2f nodes %lu "
++         "pairs %lu sp %lu | x%zu: cpu %.0f nodes %.3g pairs %.0f\n",
++         (unsigned long)S, all.count, red.count, k, off, (unsigned long)nd,
++         sumsub / nd, tsearch, tsetup, cpu_time() - t0, (unsigned long)nodes,
++         (unsigned long)c.squares, (unsigned long)c.sp, k, tsearch * k,
++         (double)nodes * k, (double)c.squares * k);
++  return 0;
++}
+diff --git a/research/decomp/dsample2.c b/research/decomp/dsample2.c
+new file mode 100644
+index 0000000..c6914ae
+--- /dev/null
++++ b/research/decomp/dsample2.c
+@@ -0,0 +1,76 @@
++/* sampled two-diagonal-first: random pairs (d1 < d2, disjoint) from the
++ * unreduced list; V = {v in reduced list : |v & d1| = |v & d2| = 1};
++ * estimates the total over all disjoint pairs. */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include "enumerate.h"
++#include "arrange.h"
++#include "square.h"
++static double cpu_time(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++  return t.tv_sec + 1e-9 * t.tv_nsec;
++}
++typedef struct { uint64_t squares, magic; } ctx_t;
++static int cb(const square_t *sq, void *v) {
++  ctx_t *c = v;
++  c->squares++;
++  diag_stats_t ds;
++  square_diag_stats(sq, &ds);
++  if (ds.best_score >= 14) { c->magic++; fprintf(stderr, "!!! MAGIC\n"); }
++  return 0;
++}
++static int ic(const uint64_t *a, const uint64_t *b) {
++  int k = 0;
++  for (int i = 0; i < 6; i++)
++    for (int j = 0; j < 6; j++)
++      k += a[i] == b[j];
++  return k;
++}
++static uint64_t rng = 88172645463325252ull;
++static uint64_t xr(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng; }
++int main(int argc, char **argv) {
++  uint64_t S = strtoull(argv[1], 0, 10);
++  long npairs = atol(argv[2]);
++  rng += strtoull(argv[3], 0, 10);
++  prime_exps_t p;
++  if (pexp_parse(&p, argc - 4, argv + 4)) return 2;
++  vec_list_t all, red, sub;
++  vec_list_init(&all, 6); vec_list_init(&red, 6); vec_list_init(&sub, 6);
++  enum_vectors(&p, 6, S, S, &all);
++  reduce_vectors(&all, 0, all.count, &red, 0);
++  search_opts_t opts; search_opts_default(&opts);
++  ctx_t c = {0};
++  /* fraction of disjoint pairs, by sampling */
++  long dis = 0, tries = 0;
++  double ts = 0, tsu = 0, sv = 0; uint64_t nodes = 0, maxn = 0; long done = 0, nonempty = 0;
++  while (done < npairs) {
++    size_t a = xr() % all.count, b = xr() % all.count;
++    if (a == b) continue;
++    tries++;
++    const uint64_t *d1 = vec_list_get(&all, a), *d2 = vec_list_get(&all, b);
++    if (ic(d1, d2)) continue;
++    dis++;
++    sub.count = 0;
++    for (size_t v = 0; v < red.count; v++) {
++      const uint64_t *vv = vec_list_get(&red, v);
++      if (ic(d1, vv) == 1 && ic(d2, vv) == 1) vec_list_push(&sub, vv);
++    }
++    sv += sub.count; done++;
++    if (sub.count < 12) continue;
++    double t0 = cpu_time();
++    search_stats_t st = search_vectors(&sub, 0, sub.count, &opts, cb, &c);
++    ts += cpu_time() - t0; tsu += st.setup_seconds;
++    nodes += st.nodes; nonempty++;
++    if (st.nodes > maxn) maxn = st.nodes;
++  }
++  double pairs = 0.5 * (double)all.count * (all.count - 1) * dis / tries;
++  printf("S %lu N %zu sampled %ld pairs (disjoint frac %.3f, total disjoint unordered %.3g) mean|V| %.1f "
++         "mean nodes %.1f max %lu cpu/pair %.2e s (setup %.2e) -> est total nodes %.3g cpu %.0f s; pair-squares %lu\n",
++         (unsigned long)S, all.count, done, (double)dis / tries, pairs, sv / done,
++         (double)nodes / done, (unsigned long)maxn, ts / done, tsu / done,
++         pairs * nodes / done, pairs * ts / done, (unsigned long)c.squares);
++  return 0;
++}
+diff --git a/research/decomp/mbench.c b/research/decomp/mbench.c
+new file mode 100644
+index 0000000..ebf3906
+--- /dev/null
++++ b/research/decomp/mbench.c
+@@ -0,0 +1,115 @@
++/* microbenchmark: exactly-once filter over a long carried list (as
++ * FILTER_CARRY, W = 4, folded words) vs. AND of cached masks + materializing
++ * the kept entries (bit iteration, or index extraction + gathers). */
++#include <immintrin.h>
++#include <x86intrin.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#define W 4
++#define CAP 4096
++static uint64_t in[W * CAP] __attribute__((aligned(64))), out[W * CAP] __attribute__((aligned(64)));
++static uint64_t rng = 12345;
++static uint64_t xr(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng; }
++static inline uint64_t rotl(uint64_t y, int r) { return r ? y << r | y >> (64 - r) : y; }
++static uint32_t filt(const uint64_t *in, uint32_t cnt, const uint64_t *vb, uint64_t *out) {
++  __m512i V[W], R[W];
++  uint64_t used = 0;
++  for (int w = 0; w < W; w++) {
++    uint64_t t = vb[w]; int r = 0;
++    if (w > 0) while (rotl(t, r) & used) r++;
++    t = rotl(t, r); used |= t;
++    V[w] = _mm512_set1_epi64(t); R[w] = _mm512_set1_epi64(r);
++  }
++  uint32_t k = 0;
++  for (uint32_t i = 0; i < cnt; i += 8) {
++    __m512i x[W];
++    for (int w = 0; w < W; w++) x[w] = _mm512_loadu_si512(in + w * CAP + i);
++    __m512i c = _mm512_and_si512(x[0], V[0]);
++    for (int w = 1; w < W; w++)
++      c = _mm512_ternarylogic_epi64(c, _mm512_rolv_epi64(x[w], R[w]), V[w], 0xF8);
++    __mmask8 keep = _mm512_cmpeq_epi64_mask(_mm512_popcnt_epi64(c), _mm512_set1_epi64(1));
++    for (int w = 0; w < W; w++)
++      _mm512_storeu_si512(out + w * CAP + k, _mm512_maskz_compress_epi64(keep, x[w]));
++    k += __builtin_popcount(keep);
++  }
++  return k;
++}
++/* materialize by mask: masks a & b & c over nw words */
++static uint32_t mat_bits(const uint64_t *a, const uint64_t *b, const uint64_t *c, uint32_t nw, uint64_t *out) {
++  uint32_t k = 0;
++  for (uint32_t j = 0; j < nw; j++)
++    for (uint64_t x = a[j] & b[j] & c[j]; x; x &= x - 1) {
++      uint32_t i = 64 * j + __builtin_ctzll(x);
++      for (int w = 0; w < W; w++) out[w * CAP + k] = in[w * CAP + i];
++      k++;
++    }
++  return k;
++}
++static uint32_t mat_gather(const uint64_t *a, const uint64_t *b, const uint64_t *c, uint32_t nw, uint64_t *out) {
++  /* indices of set bits via vpcompressb on a byte table (VBMI2) */
++  static uint32_t idx[CAP + 64] __attribute__((aligned(64)));
++  const __m512i iota = _mm512_set_epi8(63,62,61,60,59,58,57,56,55,54,53,52,51,50,49,48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);
++  uint32_t k = 0;
++  for (uint32_t j = 0; j < nw; j++) {
++    uint64_t x = a[j] & b[j] & c[j];
++    if (!x) continue;
++    __m512i bytes = _mm512_maskz_compress_epi8(_cvtu64_mask64(x), iota);
++    int m = __builtin_popcountll(x);
++    /* widen up to 64 byte indices to dwords, 16 at a time */
++    for (int t = 0; t < m; t += 16) {
++      __m128i b16 = _mm512_extracti32x4_epi32(bytes, 0);
++      __m512i d = _mm512_add_epi32(_mm512_cvtepu8_epi32(b16), _mm512_set1_epi32(64 * j));
++      _mm512_storeu_si512(idx + k + t, d);
++      bytes = _mm512_alignr_epi32(_mm512_setzero_si512(), bytes, 4);
++    }
++    k += m;
++  }
++  for (uint32_t t = 0; t < k; t += 8) {
++    __m256i ii = _mm256_loadu_si256((const __m256i *)(idx + t));
++    for (int w = 0; w < W; w++)
++      _mm512_storeu_si512(out + w * CAP + t, _mm512_i32gather_epi64(ii, (const long long *)(in + w * CAP), 8));
++  }
++  return k;
++}
++int main(int argc, char **argv) {
++  int n = atoi(argv[1]), L = atoi(argv[2]);
++  /* random 6-label sets over L labels */
++  for (int i = 0; i < n + 8; i++) {
++    uint64_t b[W] = {0};
++    if (i < n) for (int c = 0; c < 6;) { int l = xr() % L; if (!(b[l / 64] >> (l % 64) & 1)) { b[l / 64] |= 1ull << (l % 64); c++; } }
++    else for (int w = 0; w < W; w++) b[w] = ~0ull;
++    for (int w = 0; w < W; w++) in[w * CAP + i] = b[w];
++  }
++  uint32_t nw = (n + 63) / 64;
++  uint64_t *ma = aligned_alloc(64, 8 * 64), *mb = aligned_alloc(64, 8 * 64), *mc = aligned_alloc(64, 8 * 64);
++  uint64_t best[3] = {~0ull, ~0ull, ~0ull}; uint64_t kept = 0, reps = 2000;
++  for (uint64_t r = 0; r < reps; r++) {
++    uint64_t vb[W] = {0};
++    for (int c = 0; c < 6;) { int l = xr() % L; if (!(vb[l / 64] >> (l % 64) & 1)) { vb[l / 64] |= 1ull << (l % 64); c++; } }
++    uint64_t t0 = __rdtsc();
++    uint32_t k = filt(in, n, vb, out);
++    uint64_t t1 = __rdtsc();
++    /* the same kept set as a mask (split into 3 masks whose AND is it) */
++    memset(ma, 0, 512); 
++    for (uint32_t i = 0; i < k; i++) {}
++    for (int i = 0; i < n; i++) {
++      int pc = 0; for (int w = 0; w < W; w++) pc += __builtin_popcountll(in[w * CAP + i] & vb[w]);
++      if (pc == 1) ma[i / 64] |= 1ull << (i % 64);
++    }
++    for (uint32_t j = 0; j < nw; j++) { mb[j] = ma[j] | xr(); mc[j] = ma[j] | xr(); }
++    uint64_t t2 = __rdtsc();
++    uint32_t k2 = mat_bits(ma, mb, mc, nw, out);
++    uint64_t t3 = __rdtsc();
++    uint32_t k3 = mat_gather(ma, mb, mc, nw, out);
++    uint64_t t4 = __rdtsc();
++    if (k2 != k || k3 != k) { printf("mismatch %u %u %u\n", k, k2, k3); return 1; }
++    kept += k;
++    uint64_t d[3] = {t1 - t0, t3 - t2, t4 - t3};
++    for (int q = 0; q < 3; q++) best[q] += d[q];
++  }
++  printf("n %d L %d kept %.1f  cycles/call (mean): filter %.0f  mask+bits %.0f  mask+gather %.0f\n", n, L, (double)kept / reps,
++         (double)(best[0] + 1) / reps, (double)(best[1] + 1) / reps, (double)(best[2] + 1) / reps);
++  return 0;
++}
+diff --git a/src/c/arrange.c b/src/c/arrange.c
+index a8cc3a0..9b263c3 100644
+--- a/src/c/arrange.c
++++ b/src/c/arrange.c
+@@ -194,6 +194,7 @@ typedef struct {
+   int cross_after;
+   uint32_t xs_tick, xs_n, xs_k;
+   int stop;
++  int lstat_in[2];
+ } sstate_t;
+ 
+ static inline bool bit_get(const uint64_t *row, uint32_t u) {
+@@ -537,6 +538,112 @@ static void __attribute__((destructor)) cp_print(void) {
+ #define CP_PHASE(l, p)
+ #endif
+ 
++#ifdef LOCAL11
++#include <x86intrin.h>
++/*
++ * Prototype (cx/decomp): below every (1,1) node (r1, c1), a search in the
++ * node-local position space of its two lists R and C: the relations "meets
++ * exactly once" (R x C) and "disjoint" (R x R, C x C) as bit matrices over
++ * list positions, built once per (1,1) node, and the candidate sets of the
++ * nodes below as bitmasks over those positions (children by ANDs). Env:
++ * LOCAL=1 enables it, LORDER selects the branching rule, SAMPLE_STRIDE /
++ * SAMPLE_OFFSET sample r1.
++ */
++typedef struct {
++  uint32_t nR, nC, WR, WC; /* list sizes; mask words (multiples of 8) */
++  size_t capR, capC;
++  uint64_t *rT, *cT; /* SoA bitsets: word w of entry i at rT[w * capR + i] */
++  uint64_t *rb, *cb; /* AoS bitsets: rb[i * 4 + w] */
++  uint64_t *Mr, *Mc, *Dr, *Dc, *tR, *tC, *Rm, *Cm, *K;
++} lstate_t;
++static lstate_t g_ls;
++static int g_local = -1, g_lorder = 0, g_lsup = 0;
++static uint64_t g_lsetup, g_lsearch, g_lnodes, g_lcalls, g_lR, g_lC;
++static uint64_t g_lnode_lay[8][8];
++/* LOCAL=2: label statistics, time-weighted, by the number of distinct labels
++ * in the lists (plus placed vectors) at the (1,1) nodes [0] and at the
++ * (1,2)/(2,1) nodes [1]; also by the largest label used [2], [3] */
++static double g_lab_cyc[4][260];
++static uint64_t g_lab_cnt[4][260];
++static void __attribute__((destructor)) lab_print(void) {
++  if (g_local != 2)
++    return;
++  for (int k = 0; k < 4; k++) {
++    double tot = 0, acc = 0;
++    for (int i = 0; i < 260; i++)
++      tot += g_lab_cyc[k][i];
++    if (tot <= 0)
++      continue;
++    fprintf(stderr, "LABSTAT %s:",
++            k == 0 ? "(1,1) distinct" : k == 1 ? "A distinct" : k == 2 ? "(1,1) maxlab" : "A maxlab");
++    for (int i = 0; i < 260; i++) {
++      acc += g_lab_cyc[k][i];
++      if (i == 64 || i == 128 || i == 160 || i == 192 || i == 224 || i == 256)
++        fprintf(stderr, " <=%d:%.3f", i, acc / tot);
++    }
++    double m = 0, c = 0;
++    for (int i = 0; i < 260; i++) { m += i * g_lab_cyc[k][i]; c += g_lab_cnt[k][i]; }
++    fprintf(stderr, " mean(time-weighted) %.1f nodes %.0f\n", m / tot, c);
++  }
++}
++static void __attribute__((destructor)) local_print(void) {
++  if (g_lcalls)
++    fprintf(stderr,
++            "LOCAL: %llu (1,1) nodes, mean R %.0f C %.0f, setup %.3g cyc "
++            "(%.0f per node), search %.3g cyc, local nodes %llu\n",
++            (unsigned long long)g_lcalls, (double)g_lR / g_lcalls,
++            (double)g_lC / g_lcalls, (double)g_lsetup,
++            (double)g_lsetup / g_lcalls, (double)g_lsearch,
++            (unsigned long long)g_lnodes);
++  if (g_lcalls && getenv("LOCAL_LAY")) {
++    for (int r = 1; r < 8; r++)
++      for (int c = 1; c < 8; c++)
++        if (g_lnode_lay[r][c])
++          fprintf(stderr, "  (%d,%d) %llu\n", r, c,
++                  (unsigned long long)g_lnode_lay[r][c]);
++  }
++}
++static void local_init(void) {
++  if (g_local >= 0)
++    return;
++  const char *e = getenv("LOCAL");
++  g_local = e ? atoi(e) : 0;
++  e = getenv("LORDER");
++  g_lorder = e ? atoi(e) : 0;
++  e = getenv("LSUP");
++  g_lsup = e ? atoi(e) : 0;
++}
++static void *lrealloc(void *p, size_t words) {
++  free(p);
++  void *q = aligned_alloc(64, (words * 8 + 63) & ~(size_t)63);
++  memset(q, 0, (words * 8 + 63) & ~(size_t)63);
++  return q;
++}
++#define LMAXD 16
++static void local_reserve(lstate_t *L, uint32_t nR, uint32_t nC) {
++  if (nR <= L->capR && nC <= L->capC && L->Mr)
++    return;
++  size_t cR = ((nR > L->capR ? nR : L->capR) + 511) & ~(size_t)511;
++  size_t cC = ((nC > L->capC ? nC : L->capC) + 511) & ~(size_t)511;
++  L->capR = cR;
++  L->capC = cC;
++  size_t wR = cR / 64, wC = cC / 64;
++  L->rT = lrealloc(L->rT, 4 * cR);
++  L->cT = lrealloc(L->cT, 4 * cC);
++  L->rb = lrealloc(L->rb, 4 * cR);
++  L->cb = lrealloc(L->cb, 4 * cC);
++  L->Mr = lrealloc(L->Mr, cR * wC);
++  L->Mc = lrealloc(L->Mc, cC * wR);
++  L->Dr = lrealloc(L->Dr, cR * wR);
++  L->Dc = lrealloc(L->Dc, cC * wC);
++  L->tR = lrealloc(L->tR, 256 * wR);
++  L->tC = lrealloc(L->tC, 256 * wC);
++  L->Rm = lrealloc(L->Rm, LMAXD * wR);
++  L->Cm = lrealloc(L->Cm, LMAXD * wC);
++  L->K = lrealloc(L->K, LMAXD * (wR > wC ? wR : wC));
++}
++#endif
++
+ /* instantiate the recursive search for each bitset width */
+ #define W 2
+ #include "arrange_core.h"
+diff --git a/src/c/arrange_core.h b/src/c/arrange_core.h
+index fdd4e82..0885fee 100644
+--- a/src/c/arrange_core.h
++++ b/src/c/arrange_core.h
+@@ -948,6 +948,10 @@ static __attribute__((noinline)) int SUPPORT_AGAIN(sstate_t *s, int d,
+ 
+ static void SEARCH_REC(sstate_t *s, int d);
+ 
++#if defined(LOCAL11) && defined(CARRY)
++#include "local11.h"
++#endif
++
+ /*
+  * Create the child of depth d+1 obtained by placing v (index v, bitset m)
+  * on axis b, and search it unless it is pruned. min_v restricts candidates
+@@ -1196,6 +1200,39 @@ static void SEARCH_REC(sstate_t *s, int d) {
+ #endif
+   if (s->stop)
+     return;
++#if defined(LOCAL11) && defined(CARRY)
++  if (g_local == 1 && s->np[ROW] == 1 && s->np[COL] == 1) {
++    CAT(local_solve, W)(s, d);
++    return;
++  }
++  if (g_local == 2 && s->np[ROW] + s->np[COL] <= 3 && s->np[ROW] &&
++      s->np[COL] && !s->lstat_in[s->np[ROW] + s->np[COL] - 2]) {
++    const int k = s->np[ROW] + s->np[COL] - 2; /* 0: (1,1), 1: A */
++    uint64_t u[W];
++    for (int w = 0; w < W; w++)
++      u[w] = s->cells[d][ROW][w] | s->cells[d][COL][w];
++    for (int a = 0; a < 2; a++)
++      for (uint32_t i = 0; i < s->nvalid[d][a]; i++)
++        for (int w = 0; w < W; w++)
++          u[w] |= s->vw[d][a][w * s->cap + i];
++    int nl = 0, ml = 0;
++    for (int w = 0; w < W; w++) {
++      nl += __builtin_popcountll(u[w]);
++      if (u[w])
++        ml = 64 * w + 64 - __builtin_clzll(u[w]);
++    }
++    s->lstat_in[k] = 1;
++    const uint64_t t0 = __rdtsc();
++    SEARCH_REC(s, d);
++    const double c = (double)(__rdtsc() - t0);
++    s->lstat_in[k] = 0;
++    g_lab_cyc[k][nl] += c;
++    g_lab_cnt[k][nl]++;
++    g_lab_cyc[k + 2][ml] += c;
++    g_lab_cnt[k + 2][ml]++;
++    return;
++  }
++#endif
+ #if defined(CHILD_PROF) && defined(CARRY)
+   const int pl = 9 * s->np[ROW] + s->np[COL];
+   CP_START();
+@@ -1378,8 +1415,45 @@ static void SEARCH_ROOT(sstate_t *s) {
+ #if defined(CHILD_PROF) && defined(CARRY)
+   const uint64_t cp_t0 = __rdtsc();
+ #endif
++#ifdef LOCAL11
++  local_init();
++  uint32_t stride = 1, off = 0;
++  {
++    const char *es = getenv("SAMPLE_STRIDE"), *eo = getenv("SAMPLE_OFFSET");
++    if (es)
++      stride = (uint32_t)strtoul(es, 0, 10);
++    if (eo)
++      off = (uint32_t)strtoul(eo, 0, 10);
++    if (stride < 1)
++      stride = 1;
++    off %= stride;
++  }
++  const char *lf = getenv("SAMPLE_LOG");
++  FILE *lg = lf ? fopen(lf, "a") : 0;
++  if (lg)
++    fprintf(lg, "# N %u L %u W %d stride %u off %u local %d order %d\n",
++            count, s->L, W, stride, off, g_local, g_lorder);
++  for (uint32_t r1 = off; r1 < count && !s->stop; r1 += stride) {
++    const uint64_t sq0 = s->squares, nd0 = s->nodes, ln0 = g_lnodes,
++                   lc0 = g_lcalls, ls0 = g_lsetup;
++    const uint64_t t0 = __rdtsc();
++    TRY_CHILD(s, 0, ROW, s->bits + (uint64_t)r1 * W, r1, r1 + 1);
++    const uint64_t t1 = __rdtsc();
++    if (lg)
++      fprintf(lg, "%u %u %llu %llu %llu %llu %llu %llu\n", r1,
++              (unsigned)s->lab[r1][0], (unsigned long long)(s->squares - sq0),
++              (unsigned long long)(s->nodes - nd0),
++              (unsigned long long)(t1 - t0),
++              (unsigned long long)(g_lnodes - ln0),
++              (unsigned long long)(g_lcalls - lc0),
++              (unsigned long long)(g_lsetup - ls0));
++  }
++  if (lg)
++    fclose(lg);
++#else
+   for (uint32_t r1 = 0; r1 < count && !s->stop; r1++)
+     TRY_CHILD(s, 0, ROW, s->bits + (uint64_t)r1 * W, r1, r1 + 1);
++#endif
+ #if defined(CHILD_PROF) && defined(CARRY)
+   cp_total += __rdtsc() - cp_t0;
+ #endif
+diff --git a/src/c/local11.h b/src/c/local11.h
+new file mode 100644
+index 0000000..97f67e6
+--- /dev/null
++++ b/src/c/local11.h
+@@ -0,0 +1,220 @@
++/*
++ * Prototype (cx/decomp): the subtree of a (1,1) node in the node-local
++ * position space of its lists (see lstate_t in arrange.c). Included from
++ * arrange_core.h on the carried path (W <= 4), with W defined.
++ */
++#define LOCAL_SOLVE CAT(local_solve, W)
++#define LREC CAT(lrec, W)
++#define LBUILD CAT(lbuild, W)
++
++/* out[i * nw + ...] = bitmask over B of the entries of B meeting A_i exactly
++ * once (once = 1) or disjoint from it (once = 0); A in AoS (4 words per
++ * entry), B in SoA with capacity capB, nw words per mask (multiple of 8) */
++static void LBUILD(const uint64_t *A, uint32_t nA, const uint64_t *BT,
++                   size_t capB, uint32_t nB, uint32_t nw, int once,
++                   uint64_t *out) {
++  const uint32_t nwb = (nB + 63) / 64; /* words with entries */
++  const uint64_t lastm =
++      (nB % 64) ? (((uint64_t)1 << (nB % 64)) - 1) : ~(uint64_t)0;
++  for (uint32_t i = 0; i < nA; i++) {
++    __m512i a[W];
++    for (int w = 0; w < W; w++)
++      a[w] = _mm512_set1_epi64((long long)A[i * 4 + w]);
++    uint64_t *row = out + (size_t)i * nw;
++    for (uint32_t jb = 0; jb < nwb; jb++) {
++      uint64_t word = 0;
++      for (int g = 0; g < 8; g++) {
++        const size_t j0 = (size_t)jb * 64 + 8 * g;
++        __mmask8 m;
++        if (once) {
++          __m512i pc = _mm512_popcnt_epi64(
++              _mm512_and_si512(_mm512_load_si512(BT + j0), a[0]));
++          for (int w = 1; w < W; w++)
++            pc = _mm512_add_epi64(
++                pc, _mm512_popcnt_epi64(_mm512_and_si512(
++                        _mm512_load_si512(BT + w * capB + j0), a[w])));
++          m = _mm512_cmpeq_epi64_mask(pc, _mm512_set1_epi64(1));
++        } else {
++          __m512i x = _mm512_and_si512(_mm512_load_si512(BT + j0), a[0]);
++          for (int w = 1; w < W; w++)
++            x = _mm512_ternarylogic_epi64(
++                x, _mm512_load_si512(BT + w * capB + j0), a[w], 0xF8);
++          m = _mm512_testn_epi64_mask(x, x);
++        }
++        word |= (uint64_t)m << (8 * g);
++      }
++      row[jb] = jb == nwb - 1 ? word & lastm : word;
++    }
++    for (uint32_t jb = nwb; jb < nw; jb++)
++      row[jb] = 0;
++  }
++}
++
++#ifndef LOCAL11_HELPERS
++#define LOCAL11_HELPERS
++static inline uint32_t lpopand(const uint64_t *a, const uint64_t *b,
++                               uint32_t nw) {
++  __m512i acc = _mm512_setzero_si512();
++  for (uint32_t i = 0; i < nw; i += 8)
++    acc = _mm512_add_epi64(
++        acc, _mm512_popcnt_epi64(_mm512_and_si512(_mm512_load_si512(a + i),
++                                                  _mm512_load_si512(b + i))));
++  return (uint32_t)_mm512_reduce_add_epi64(acc);
++}
++
++static inline void land(uint64_t *o, const uint64_t *a, const uint64_t *b,
++                        uint32_t nw) {
++  for (uint32_t i = 0; i < nw; i += 8)
++    _mm512_store_si512(o + i, _mm512_and_si512(_mm512_load_si512(a + i),
++                                               _mm512_load_si512(b + i)));
++}
++
++#endif
++
++/* lab bit of a W-word label set */
++#define LBIT(x, l) (((x)[(l) / 64] >> ((l) % 64)) & 1)
++
++static void LREC(sstate_t *s, lstate_t *L, int dep, int nr, int nc,
++                 const uint64_t *rc, const uint64_t *cc) {
++  const int n = s->n;
++  g_lnodes++;
++  g_lnode_lay[nr][nc]++;
++  if (nr == n && nc == n) {
++    report_bits(s, W);
++    return;
++  }
++  const uint32_t WR = L->WR, WC = L->WC;
++  const uint64_t *Rm = L->Rm + (size_t)dep * WR, *Cm = L->Cm + (size_t)dep * WC;
++  /* unmatched cells: of placed rows (need a col), of placed cols (need a
++   * row); the forward check and the cell with the fewest candidates */
++  int best = -1, bax = -1;
++  uint32_t bk = ~0u;
++  const int rows_only = g_lorder == 1 && nr < 3;
++  const int cols_only = g_lorder == 2 && nc < 3;
++  for (int w = 0; w < W; w++) {
++    uint64_t needc = rc[w] & ~cc[w], needr = cc[w] & ~rc[w];
++    for (; needr; needr &= needr - 1) {
++      const int l = 64 * w + __builtin_ctzll(needr);
++      const uint32_t k = lpopand(Rm, L->tR + (size_t)l * WR, WR);
++      if (!k)
++        return;
++      if (k < bk && !cols_only) {
++        bk = k;
++        best = l;
++        bax = ROW;
++      }
++    }
++    for (; needc; needc &= needc - 1) {
++      const int l = 64 * w + __builtin_ctzll(needc);
++      const uint32_t k = lpopand(Cm, L->tC + (size_t)l * WC, WC);
++      if (!k)
++        return;
++      if (k < bk && !rows_only) {
++        bk = k;
++        best = l;
++        bax = COL;
++      }
++    }
++  }
++  if (best < 0)
++    return;
++  uint64_t *Rn = L->Rm + (size_t)(dep + 1) * WR,
++           *Cn = L->Cm + (size_t)(dep + 1) * WC;
++  const uint32_t nwk = bax == ROW ? WR : WC;
++  uint64_t *K = L->K + (size_t)dep * (L->capR > L->capC ? L->capR : L->capC) / 64;
++  if (bax == ROW)
++    land(K, Rm, L->tR + (size_t)best * WR, WR);
++  else
++    land(K, Cm, L->tC + (size_t)best * WC, WC);
++  for (uint32_t kw = 0; kw < nwk; kw++)
++    for (uint64_t x = K[kw]; x; x &= x - 1) {
++      const uint32_t i = 64 * kw + (uint32_t)__builtin_ctzll(x);
++      uint64_t nrc[W], ncc[W];
++      if (bax == ROW) {
++        land(Rn, Rm, L->Dr + (size_t)i * WR, WR);
++        land(Cn, Cm, L->Mr + (size_t)i * WC, WC);
++        for (int w = 0; w < W; w++) {
++          nrc[w] = rc[w] | L->rb[i * 4 + w];
++          ncc[w] = cc[w];
++          s->placedw[ROW][nr][w] = L->rb[i * 4 + w];
++        }
++        LREC(s, L, dep + 1, nr + 1, nc, nrc, ncc);
++      } else {
++        land(Cn, Cm, L->Dc + (size_t)i * WC, WC);
++        land(Rn, Rm, L->Mc + (size_t)i * WR, WR);
++        for (int w = 0; w < W; w++) {
++          ncc[w] = cc[w] | L->cb[i * 4 + w];
++          nrc[w] = rc[w];
++          s->placedw[COL][nc][w] = L->cb[i * 4 + w];
++        }
++        LREC(s, L, dep + 1, nr, nc + 1, nrc, ncc);
++      }
++    }
++}
++
++/* the subtree of the (1,1) node at depth d */
++static void LOCAL_SOLVE(sstate_t *s, int d) {
++  lstate_t *L = &g_ls;
++  const uint64_t t0 = __rdtsc();
++  const uint32_t nR = s->nvalid[d][ROW], nC = s->nvalid[d][COL];
++  local_reserve(L, nR, nC);
++  L->nR = nR;
++  L->nC = nC;
++  L->WR = ((nR + 511) / 512) * 8;
++  L->WC = ((nC + 511) / 512) * 8;
++  const size_t cap = s->cap, capR = L->capR, capC = L->capC;
++  const uint32_t WR = L->WR, WC = L->WC;
++  /* the lists: SoA (zero-padded to whole masks) and AoS */
++  for (int w = 0; w < 4; w++) {
++    for (uint32_t i = 0; i < 64 * WR; i++) {
++      const uint64_t x = w < W && i < nR ? s->vw[d][ROW][w * cap + i] : 0;
++      if (w < W)
++        L->rT[w * capR + i] = x;
++      L->rb[i * 4 + w] = x;
++    }
++    for (uint32_t i = 0; i < 64 * WC; i++) {
++      const uint64_t x = w < W && i < nC ? s->vw[d][COL][w * cap + i] : 0;
++      if (w < W)
++        L->cT[w * capC + i] = x;
++      L->cb[i * 4 + w] = x;
++    }
++  }
++  LBUILD(L->rb, nR, L->cT, capC, nC, WC, 1, L->Mr);
++  LBUILD(L->cb, nC, L->rT, capR, nR, WR, 1, L->Mc);
++  LBUILD(L->rb, nR, L->rT, capR, nR, WR, 0, L->Dr);
++  LBUILD(L->cb, nC, L->cT, capC, nC, WC, 0, L->Dc);
++  memset(L->tR, 0, 256 * WR * 8);
++  memset(L->tC, 0, 256 * WC * 8);
++  for (uint32_t i = 0; i < nR; i++)
++    for (int w = 0; w < W; w++)
++      for (uint64_t x = L->rb[i * 4 + w]; x; x &= x - 1)
++        L->tR[(size_t)(64 * w + __builtin_ctzll(x)) * WR + i / 64] |=
++            (uint64_t)1 << (i % 64);
++  for (uint32_t i = 0; i < nC; i++)
++    for (int w = 0; w < W; w++)
++      for (uint64_t x = L->cb[i * 4 + w]; x; x &= x - 1)
++        L->tC[(size_t)(64 * w + __builtin_ctzll(x)) * WC + i / 64] |=
++            (uint64_t)1 << (i % 64);
++  /* all entries are candidates */
++  for (uint32_t k = 0; k < WR; k++)
++    L->Rm[k] = k < nR / 64 ? ~(uint64_t)0
++               : k == nR / 64 ? (((uint64_t)1 << (nR % 64)) - 1)
++                              : 0;
++  for (uint32_t k = 0; k < WC; k++)
++    L->Cm[k] = k < nC / 64 ? ~(uint64_t)0
++               : k == nC / 64 ? (((uint64_t)1 << (nC % 64)) - 1)
++                              : 0;
++  const uint64_t t1 = __rdtsc();
++  LREC(s, L, 0, 1, 1, s->cells[d][ROW], s->cells[d][COL]);
++  const uint64_t t2 = __rdtsc();
++  g_lsetup += t1 - t0;
++  g_lsearch += t2 - t1;
++  g_lcalls++;
++  g_lR += nR;
++  g_lC += nC;
++}
++
++#undef LOCAL_SOLVE
++#undef LREC
++#undef LBUILD
++#undef LBIT
+-- 
+2.43.0
+
