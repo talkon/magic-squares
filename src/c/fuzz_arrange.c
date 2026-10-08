@@ -919,6 +919,13 @@ static const variant_t variants[] = {
     {"pt_3", 1, 1, 1, 0, 0, 1, 0, 3},    {"pt_4", 1, 1, 1, 0, 0, 1, 0, 4},
     {"pt_1_w4", 1, 1, 1, 4, 0, 1, 0, 1}, {"pt_2_nosup", 1, 1, 0, 0, 0, 1, 0, 2},
     {"pt_2_nomrv", 1, 0, 1, 0, 0, 1, 0, 2}, {"pt_2_xcross", 1, 1, 1, 0, 0, 2, 0, 2},
+    /* the pretest on the carried path with 5-8 words (with the per-r1
+     * widths, every r1 at the width of all labels, and cross support
+     * everywhere) */
+    {"pt_1_w5", 1, 1, 1, 5, 0, 1, 0, 1}, {"pt_3_w6", 1, 1, 1, 6, 0, 1, 0, 3},
+    {"pt_4_w7_fixw", 1, 1, 1, 7, 0, 1, 1, 4},
+    {"pt_2_w8_xcross", 1, 1, 1, 8, 0, 2, 0, 2},
+    {"pt_5_w8_fixw", 1, 1, 1, 8, 0, 1, 1, 5},
 };
 #define NVAR (int)(sizeof(variants) / sizeof(variants[0]))
 
