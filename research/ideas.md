@@ -1040,3 +1040,146 @@ after; prod in seconds, min of alternating runs):
 * Store forwarding: the lists are read right after the filters write them
   with unaligned 8-lane stores; rewriting them that way or with aligned
   stores before timing cross support in the cross harness: no difference.
+
+## A residual solver near the leaves (October 2026, branch opt2/residual)
+
+(Commits d574254 and 4690dc0, from f61e719, where everything below was
+measured. The label -> position masks kept on that branch are not
+integrated: they replace the exactly-once filter, which the folded test
+of the two sections above made about twice as cheap without VPOPCNTDQ,
+and on top of it they cost time with -march=cascadelake (paired runs,
+median ratio of user CPU time with / without the masks):
+`bench/prod.txt` 1.022 from 8 children (the branch's threshold), 1.002
+from 16, 0.995 from 32; `full.txt` 1.030 from 8, 1.010 from 16. See
+"Integration of round 2" below.)
+
+The idea: at a node with r rows and c cols placed, the rest is a small
+exact-cover problem (the n - r rows are pairwise disjoint candidate rows,
+one through each col-unmatched cell of a placed col, the n - c cols
+likewise, every remaining row meets every remaining col exactly once), so a
+specialized solver with node-local bitmasks over list positions might
+finish it faster than the generic search. It does not: below the nodes
+where it applies there is almost nothing left to save, and where the time
+is, its setup costs more than the generic filters. What came out of it is a
+use of those masks one level up (label -> position masks, kept, see the
+end).
+
+Where the nodes and the time are (`bench/prod.txt`, f61e719, native build,
+rdtsc at every change of layer, so the cycle shares include ~15% of timer
+overhead; "(r,c)" = rows and cols placed in the child):
+
+| children | created | searched | cycles creating them | lists at the searched nodes |
+| --- | ---: | ---: | ---: | --- |
+| (1,1) | 182k | 182k | 0.8% | 250 rows, 234 cols, 26.8 kids |
+| (1,2) | 3.41M | 3.37M | 7.1% | 82 rows, 168 cols, 8.5 kids |
+| (2,1) | 1.44M | 1.41M | 2.8% | 159 rows, 74 cols, 7.6 kids |
+| (2,2) | 39.24M | 1.32M | 75% | 34 rows, 34 cols, 4.5 kids |
+| (2,3), (3,2) | 6.01M | 1637 | 2.3% | 3-4 entries |
+| (3,3) and deeper | ~2k | ~600 | 0.0% | |
+
+The searched nodes themselves (choosing the cell and the kids) take another
+~12% (6.5% at (1,2)). So 78% of the nodes are the (2,2) children and
+creating them is three quarters of the time; per child (cycles with the
+timers, and the share killed at that stage): exactly-once filter of the
+other axis 245 (1.3%), disjoint filter of the same axis 129 (5.1%), cross
+support 331 (50.3%), support filter 124 (35.7%), cross support after it 57
+(4.3%); 3.4% survive. On `bench/full.txt` 0.4% survive (51k of 12.6M).
+
+* Room below the searched (2,2) nodes: dropping them (wrongly, after all
+  their filters, before their counts) takes prod from 14.77 to 14.24 s and
+  15.02 to 14.58 s (3.0-3.6%); on `full.txt` ~0.5%. Their subtree costs
+  714-719 TSC cycles per searched (2,2) node in the native build, 933-1025
+  built with -march=cascadelake (rdtsc around counts + SEARCH_REC). Of the
+  1.32M, at most 55 (the squares) have a completion; the rest die one
+  level down (6.0M children, 1637 searched), 40% by the forward check after
+  the first filter, 57% after the second (with the support filter's first
+  pass), 3% by the support filter.
+* Residual solvers at the searched (2,2) nodes (lists of at most 64
+  entries, masks over the positions, a pass over a list per chosen vector):
+  (a) rows first, an exact cover of the col-unmatched cells by disjoint
+  rows (branching on the uncovered cell with the fewest rows left), keeping
+  the mask of the cols that meet every chosen row once, then the cols as an
+  exact cover of the row-unmatched cells by disjoint cols of that mask:
+  24.8M solver nodes instead of 6.0M children, prod ~10% slower. (b) Both
+  axes, branching on the uncovered cell of the 16 unmatched cells of the
+  node with the fewest candidates, forward checking on those cells only:
+  11.5M solver nodes, 4-6% slower. (c) As (b), with the forward check of
+  TRY_CHILD on all unmatched cells (the unions of the kept entries) and the
+  support filter's first pass (the same axis within the other axis' cells
+  and union): 6.15M solver nodes (the generic search: 6.0M + 1637), and the
+  same time: prod CPU time 14.95 vs 15.05 s (min of 3), 15.08 vs 15.28
+  (median), 730-745 vs 714-719 TSC cycles per searched (2,2) node native,
+  1023-1068 vs 933-1025 cascadelake; `full.txt` 3.72 vs 3.68 s. The setup
+  (masks of the rows / cols through each of the 16 unmatched cells: a test
+  per cell and 8 entries) and two passes per solver node cost what the
+  generic search spends on its counts and children, whose lists are just
+  as short. With pairwise tables instead of passes (rows disjoint from each
+  row, cols meeting each row once, ~34 x 68 pair tests) the setup alone
+  would be ~1000 cycles, more than the whole generic subtree.
+* At the (2,2) children (75% of the time), an exact solve would need those
+  pairwise tables on lists of ~47 entries (~2200 pair tests, over 1000
+  cycles) where cross support and the support filter cost ~430 and leave
+  3.4%. At the (1,2) nodes, the 5 remaining rows from ~82 candidates (5
+  classes of ~16, pairwise disjoint with p ~ 0.5) give ~16^5 p^10 ~ 1000
+  row completions, each still to be matched with the cols, against ~6500
+  cycles for all the children of such a node in the generic search. Not
+  tried.
+
+Label -> position masks (kept, `LABEL_MASKS` in arrange_core.h). The
+exactly-once filter of the other axis' list, done for every child (at a
+(1,2) node: 8.5 children x 168 cols, a popcount test per entry and word),
+only depends on the child's labels outside the placed vectors of that
+axis (4 of them), so with the mask of the list entries containing each such
+label (built once per node) the entries meeting a child exactly once are
+those in exactly one of its 4 masks, and the child only compresses them
+(FILTER_KEEP). In a microbenchmark (168 entries, 2 words) the exactly-once
+filter takes ~150-230 TSC cycles native and ~200 built with
+-march=cascadelake, the compress with a known mask ~90-95. Building the
+masks is a 64 x 64 bit transpose per 64 entries and word of labels.
+
+* First version: byte transpose of each 8 entries (vpermb, or vpshufb +
+  vpermw without VBMI), an 8 x 8 qword transpose across the registers, a
+  vptestmb per label, per-child scalar loops over the 64-entry groups. On
+  the cascadelake build: `full.txt` -3% from 4 children, -5% from 12; prod
+  16.57 -> 16.39 (8), 16.04 (12), 16.18 s (20). In situ (prod, with
+  timers), the filter went from 354 to 262 cycles per (2,2) child but the
+  masks cost ~650 cycles per (1,2) node. Native: no gain from 12
+  children, 3-5% slower from 4-8.
+* Final version: vpshufb (byte j of the 2 entries of a lane into word j)
+  then an 8 x 8 transpose of words with three rounds of unpacks, no vpermw
+  (32 single-uop shuffles per 64 entries and word); the bits come out
+  permuted (entry 8 b + 2 L + t at bit 16 L + 2 b + t), which a pext per 8
+  entries undoes in FILTER_KEEP; the per-child exactly-one-of with the 8
+  words of a label's masks in one register (2 operations per label).
+  `LABEL_MASKS` costs 515-520 TSC cycles per call in situ (307 in a loop),
+  on prod (cascadelake) 2.76M calls with 11.9 children and 206 entries on
+  average (1.90M of the 3.37M (1,2) nodes, 0.65M of the 1.41M (2,1), 0.17M
+  (1,1)): ~4% of the time to build masks, ~9% saved in the filter.
+  Applying the masks with a loop over the bytes of the needed labels and a
+  doubling chain + vpmovb2m instead of vptestmb (to take the tests off
+  port 5): 3.5x slower in a microbenchmark (branches).
+* Threshold (children per node; lists of 64-512 entries), cascadelake,
+  CPU time, min of 3: prod 16.13 s without, 15.57 (4), 15.66 (6), 15.53
+  (8); `full.txt` 4.11 without, 3.94 (4), 3.97 (6), 4.00 (8), 3.98 (12).
+  Native (VPOPCNTDQ): prod 14.74 without, 15.29 (4), 14.91 (8): the masks
+  are only used without VPOPCNTDQ (Skylake-X, Cascade Lake), from 8
+  children.
+* With the masks' child loop inlined into SEARCH_REC (two copies of
+  TRY_CHILD there) the native build was 1.7% slower on `full.txt` even with
+  the masks unused, so that loop is a separate function.
+
+Result (f61e719 -> this, same nodes; wall time, min / median of alternating
+runs on the shared machine, `bench` built with -march=cascadelake -flto as
+for production, and the native build):
+
+| | cascadelake | native |
+| --- | ---: | ---: |
+| `quick.txt` | 0.347 / 0.349 -> 0.339 / 0.344 s | 0.306 / 0.314 -> 0.301 / 0.306 s |
+| `full.txt` | 4.14 / 4.21 -> 3.95 / 4.05 s | 3.70 / 3.75 -> 3.67 / 3.71 s |
+| `prod.txt` | 16.19 / 16.36 -> 15.64 / 15.82 s | 14.98 / 15.09 -> 14.89 / 14.89 s |
+
+In CPU time (thread clock, 3 alternating runs), cascadelake: prod 16.45 /
+16.49 -> 15.70 / 15.73 s (-4.5%), `full.txt` 4.13 / 4.26 -> 4.00 / 4.05 s;
+n = 7 (P = 12 6 3 2 1, S = 352-370) 8.17 / 8.37 -> 8.13 / 8.18 s; 4 words
+of labels (`--min-words 4`, P = 14 7 5 3, S = 1460) 4.23 / 4.35 -> 4.09 /
+4.10 s.
