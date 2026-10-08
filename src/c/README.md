@@ -37,7 +37,7 @@ sums all have N < 1000 (see research/ideas.md, "msearch overhead").
 ### Diagonal-first search (`--diag-first`)
 
 ```
-bin/msearch --diag-first --sums 2200 13 7 4 3 1 1          # d-first where N >= 3000
+bin/msearch --diag-first --sums 2200 13 7 4 3 1 1          # d-first where N >= 5000
 bin/msearch --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2
 bin/msearch --diag-first --d-stride 250 --d-log d.log --sums 2400 13 7 4 3 1 1
 bin/msearch --diag-first --d-range 0:4096 --sums 2400 13 7 4 3 1 1   # one unit of a sum
@@ -54,9 +54,11 @@ msearch"). V_d comes from a number -> vector posting index (O(sum of the
 posting lengths) per d). Every square of V_d contains all of d, so d's
 numbers get the top labels and only the first rows through the rarest of
 them are roots (`--d-plain-root`: all of V_d, as `bin/dsearch`). Per sum
-it costs the same as the plain search at N ~ 3000 (x = ln(S/S_min) <= 0.4;
-the default `--diag-first-min-n`), 0.86x at N = 4.1k, 0.55-0.61x at
-5.9-7.6k and 0.27-0.37x at 11-23k (ideas.md has the measurements), but it
+it costs the same as the plain search at N ~ 5000 (the default
+`--diag-first-min-n`; 1.32x at N = 4.1k, 0.78x at 5.9k, 0.63x at 6.7k with
+the integrated search, whose per-r1 widths sped up the plain search there
+more than the V_d searches; 0.27-0.37x at 11-23k on fdb77fc, ideas.md has
+the measurements), but it
 does not enumerate the semi-magic squares: d-first sums write "dsquare" records (one per pair,
 with `set_count` = `sp_count`, `magic`, `partner`; dedupe magic squares by
 `hash`), "dchunk" checkpoint records every `--d-chunk` (256) indices of d

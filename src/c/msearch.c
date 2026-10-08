@@ -31,9 +31,10 @@
  *                     (square, SP traversal) pair once, so every magic
  *                     square (twice, once per diagonal); the other sums
  *                     get the plain search
- *   --diag-first-min-n N0   default 3000, where d-first and the plain
- *                     search cost the same per sum at x = ln(S/S_min) <=
- *                     0.4 (0.86x at N = 4.1k, 0.3x at N = 15-23k)
+ *   --diag-first-min-n N0   default 5000, where d-first and the plain
+ *                     search cost the same per sum with the integrated
+ *                     search (1.32x at N = 4.1k, 0.78x at 5.9k, 0.63x at
+ *                     6.7k; 0.3x at N = 15-23k on fdb77fc)
  *   --d-stride k, --d-offset o   search only d = lo + o, lo + o + k, ...
  *                     (an unbiased sample; o defaults to a random offset
  *                     from --sample-seed)
@@ -463,7 +464,7 @@ int main(int argc, char *argv[]) {
   search_opts_default(&opts);
   /* d-first */
   int diag_first = 0;
-  size_t dfirst_min_n = 3000, d_stride = 1, d_chunk = 256;
+  size_t dfirst_min_n = 5000, d_stride = 1, d_chunk = 256;
   int64_t d_offset = -1; /* -1: random from the seed */
   size_t d_range_lo = 0, d_range_hi = (size_t)-1;
   const char *d_log_file = NULL;
