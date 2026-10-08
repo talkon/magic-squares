@@ -790,6 +790,12 @@ left is the cost of creating those children, not missing pruning.
 
 ## Micro-optimizations and the build (October 2026, round 2)
 
+(Branch `opt2/micro-pgo`, commit 99d2aaf, from f61e719, where everything
+below was measured. Integrated with a fix of the masked minimum (it could
+drop subtrees when every unmatched cell had saturated counts), and with
+opt2/children's padding instead of the loop split in FILTER_CARRY and the
+lane mask kept in KEEP_CARRY: see "Integration of round 2" below.)
+
 Per-node overheads on the carried path, and the build (pins, PGO, clang),
 re-measured on f61e719 with `bench/prod.txt` as the main target.
 
@@ -1183,3 +1189,93 @@ In CPU time (thread clock, 3 alternating runs), cascadelake: prod 16.45 /
 n = 7 (P = 12 6 3 2 1, S = 352-370) 8.17 / 8.37 -> 8.13 / 8.18 s; 4 words
 of labels (`--min-words 4`, P = 14 7 5 3, S = 1460) 4.23 / 4.35 -> 4.09 /
 4.10 s.
+
+## Integration of round 2 (October 2026)
+
+Branch `opt2/integrated`, from 23a34f7 (whose search code is f61e719's):
+the three round-2 branches above combined piece by piece, where they
+overlap by measurement. Method as in "Micro-optimizations and the build":
+paired runs (both binaries started together, user CPU time from `wait4`,
+median of the ratios of 6-8 rounds, start order alternating) on
+`bench/prod.txt`, plus minima of alternating runs; the native build and
+-march=cascadelake (the cluster), both on the shared Sapphire Rapids
+(load 0-6 from other jobs; the machine restarted twice during the work, so
+some comparisons were repeated in quieter sessions). Every build visits
+the same nodes (quick 1,770,779; full 14,958,507; prod 50,375,738) and
+finds the same squares, also with every option set of the CMake tests.
+
+What went in:
+
+* opt2/micro-pgo: the branching cell by one masked minimum over the byte
+  counters, the exactly-once test on folded words, and the loop split
+  (full groups of 8 without a lane mask, then a masked last group) for the
+  label counts and the selection of the children. Its masked minimum had a
+  soundness bug, fixed here: the masked subtraction took the running
+  minimum as its source, so for words w >= 1 the cells that are not
+  unmatched carried earlier words' values, and where every unmatched cell
+  had >= 255 candidates (saturated counters) the scan for the largest
+  saturated label could pick such a cell, which has no children: the
+  subtree was dropped (squares lost). Not seen on the benchmarks or in
+  production (the top labels are rare there), but possible for 6x6 sums
+  with N ~ 11k and 4 words of labels, and for 7x7. `fuzz_arrange --mode 6`
+  builds such families (an r1 whose numbers are the rarest, each in >= 262
+  vectors meeting r1 only there, a planted square through r1): the buggy
+  code fails every seed tried (the default, w3 and w4 variants find no
+  square), the fix and f61e719 pass; ctest runs it with the carried lists
+  and with the matrices.
+* opt2/children: the exactly-once filter (FILTER_CARRY) on lists padded
+  with 8 full sets (a precondition now in its contract, checked with
+  -DARRANGE_DEBUG) instead of the split, the support passes (KEEP_CARRY)
+  with their lane mask per iteration as on that branch, the branch-free
+  cells of cross support, and the `-DCHILD_PROF` profile.
+* Not opt2/residual's label -> position masks (slower on top of the folded
+  test, below), nor PGO (see "Micro-optimizations and the build").
+
+By piece (`bench/prod.txt`, paired median ratio B/A of user CPU time, B
+the variant; native / cascadelake):
+
+| A -> B | native | cascadelake |
+| --- | ---: | ---: |
+| 23a34f7 -> opt2/micro-pgo with the fix | 0.929 | 0.910 |
+| that -> + branch-free cross cells | 0.981 | 0.985 |
+| that -> FILTER_CARRY on padded lists instead of the split | 0.982 | 0.997 |
+| split everywhere -> KEEP_CARRY with a lane mask | | 0.994 |
+| split everywhere -> the selection of the children with a lane mask | | 1.011 |
+| split everywhere -> the final code (padding, KEEP_CARRY masked) | 0.997, 1.000 | 0.979, 0.993 |
+| split everywhere -> the cell by scanning the classes | 1.039 | 1.034 |
+| the final code -> the cell by scanning the classes | 0.995 | 1.007 |
+| the final code -> + label masks from 8 / 16 / 32 children | (not used) | 1.022 / 1.002 / 0.995 |
+| opt2/children alone -> the final code | 1.000, 0.995 | 1.027, 1.000, 1.009 |
+| opt2/children + the masked minimum -> the final code | 1.015 | 1.006 |
+
+(two or three values: separate sessions; label masks on `full.txt`: 1.030
+from 8 children, 1.010 from 16). So the variants of the lane-mask handling
+and the cell choice are all within 1-3% of each other once the folded test
+is in, at the noise floor of these runs: the masked minimum gained 3.5%
+where the filters used the split, ~0 where FILTER_CARRY uses the padding;
+opt2/children alone is as fast as the final code natively and 0-3% faster
+with -march=cascadelake in different sessions (opt2/children plus the
+masked minimum: the same as the final code). The label masks lost their
+use: they replace the exactly-once filter, which the folded test made
+about twice as cheap without VPOPCNTDQ.
+
+Result (23a34f7 -> opt2/integrated; minimum of 3-4 alternating runs, bench
+search time, and the paired ratio):
+
+| | nodes | -march=native | paired | -march=cascadelake | paired |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `quick.txt` (`--repeat 10`) | 1.77M | 0.296 -> 0.269 s | 0.908 | 0.337 -> 0.293 s | 0.846 |
+| `full.txt` (`--repeat 3`) | 14.96M | 3.65 -> 3.29 s | 0.918 | 4.02 -> 3.47 s | 0.864 |
+| `prod.txt` | 50.38M | 14.65 -> 13.38 s | 0.920 | 16.02 -> 14.23 s | 0.882 |
+
+AddressSanitizer: GCC 13 with AVX-512 crashes in sanitizer builds with
+use-after-return detection on (its default at run time): a function using
+zmm registers realigns its frame to 64 bytes and GCC then accesses local
+arrays at 64-aligned offsets with aligned moves (vmovdqa64, also for
+`_mm512_loadu_si512`), while the fake stack of that detection keeps them
+only 32-aligned. A ten-line function with a local `uint64_t[8]` passed to
+`_mm512_loadu_si512` reproduces it, and no attribute on the array helps, so
+it is not the code's over-alignment: the Debug build (CMakeLists.txt)
+leaves that detection out of GCC's instrumentation
+(`--param=asan-use-after-return=0`, the same as
+`ASAN_OPTIONS=detect_stack_use_after_return=0`).

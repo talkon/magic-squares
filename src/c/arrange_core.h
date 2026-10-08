@@ -1232,8 +1232,10 @@ static void SEARCH_REC(sstate_t *s, int d) {
    * all the cells, then the cells with that minimum. One pass instead of
    * one per class up to the minimum (~7 classes on average at the searched
    * nodes of bench/full.txt, with 4 loads and compares each, and a loop
-   * exit that is hard to predict): 2-3% less time on bench/prod.txt, 5% on
-   * bench/full.txt. The cells that are not unmatched must read 255 in
+   * exit that is hard to predict): 3.5% less time on bench/prod.txt with
+   * the filter loops split as in COUNT_CARRY, within 1% with the padded
+   * lists of FILTER_CARRY (see research/ideas.md, "Integration of round
+   * 2"). The cells that are not unmatched must read 255 in
    * every word (the source of the masked subtraction is a constant, not
    * the running minimum: otherwise they would carry the counts of other
    * words' cells, and the scan for the largest saturated label below could

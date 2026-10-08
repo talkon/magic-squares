@@ -37,7 +37,7 @@ sums all have N < 1000 (see research/ideas.md, "msearch overhead").
 ```
 bin/bench bench/quick.txt              # ~1 s
 bin/bench --repeat 3 bench/full.txt    # ~5 s, closer to production sizes
-bin/bench bench/prod.txt               # ~20 s, sampled from scheduler runs
+bin/bench bench/prod.txt               # ~15 s, sampled from scheduler runs
 bin/bench --only "S=648" bench/full.txt
 bin/bench --no-fc --no-mrv bench/quick.txt   # compare search variants
 bin/bench --no-support bench/quick.txt
@@ -47,6 +47,11 @@ bin/bench_matrices bench/quick.txt     # the same with the N x N matrices (CARRY
 bin/bench --node-limit 3000000 big.txt # time the first 3M nodes of larger instances
 bin/bench --update bench/quick.txt     # print instances with observed values
 ```
+
+Built with `-DCHILD_PROF` (e.g. `gcc -O3 -march=native -DCHILD_PROF -o
+bench_prof bench.c arrange.c square.c enumerate.c -lm`), the search prints
+on exit where the creation of children spends its cycles, by layer (rows
+and cols placed) and phase, and which test kills them.
 
 Each instance line is `n | exponents | S | expected squares | expected hash`.
 The hash is an order-independent hash of the squares found (sum of hashes of
@@ -106,18 +111,22 @@ versa), plus:
   (on one child in 16) and switches. 41% fewer nodes and ~10% less time on
   `bench/full.txt`, 61% fewer nodes and 21-23% less time on the
   production-like sums of `bench/prod.txt` (built with -march=native or
-  -march=cascadelake; 24-27% on the three with N = 2161-2994). With the carried bitsets, a pass builds the unions
-  8 cells at a time (8 entries of the other list: a test per cell and a
-  masked or per word, then one transposing reduction) and tests 8
-  candidates at a time against all of them; with the matrices it runs
+  -march=cascadelake; 24-27% on the three with N = 2161-2994). With the
+  carried bitsets, a pass builds the unions 8 cells at a time (the word
+  and bit of each cell from a pdep per word, without a branch; 8 entries
+  of the other list: a test per cell and a masked or per word, then one
+  transposing reduction) and tests 8 candidates at a time against all of
+  them; with the matrices it runs
   only with AVX-512 and byte counters (39% fewer nodes, 22% less time on
   `bench/full.txt`), elsewhere it cost more than it saved;
 - branching on the unmatched cell with the fewest candidates, ties broken by
   the smallest label; the counts are exact (saturating byte counters) with
   AVX-512BW and up to 256 labels, where the cell is found with one masked
-  minimum over the counters (3-5% less time than scanning the counts class
-  by class), and bit-sliced otherwise (exact up to 7 with AVX-512, 3 in
-  plain C);
+  minimum over the counters instead of a scan of the counts class by
+  class (0-3.5% less time on `bench/prod.txt`, depending on the rest of
+  the code; `fuzz_arrange --mode 6` tests the saturated counts, >= 255
+  candidates through every unmatched cell), and
+  bit-sliced otherwise (exact up to 7 with AVX-512, 3 in plain C);
 - the axis whose cells usually lose all candidates is filtered first, so
   most dead children are discarded after one pass; the forward check and the
   support filter only need the union of each candidate list, so the full
@@ -144,12 +153,16 @@ versa), plus:
   without VPOPCNTDQ or VBMI/GFNI/BITALG (Skylake-X, Cascade Lake) use
   fallbacks, and are also much faster than with the matrices (built with
   -march=cascadelake, run on Sapphire Rapids: 8.8 s -> 5.2 s); build with
-  -DCARRY_MAX_W=0 to use the matrices instead. The filter loops run on the
-  full groups of 8 entries without a lane mask, then on the last group
-  (4-5% less time), and |u & v| = 1 is tested on one word: the words of
-  u & v rotated into one, with rotations that keep the words of v disjoint
-  (one vpopcntq, or without VPOPCNTDQ one exactly-one-bit test instead of
-  a test per word and across words: 5% less time with -march=cascadelake);
+  -DCARRY_MAX_W=0 to use the matrices instead. The filter that creates the
+  children's lists needs no lane masks: each node pads its lists with 8
+  full sets, which the filter drops, before creating its children; the
+  label counts and the selection of the children run on the full groups
+  of 8 entries without a lane mask, then on the last group (together ~5%
+  less time than a lane mask in every iteration). |u & v| = 1 is tested
+  on one word: the words of u & v rotated into one, with rotations that
+  keep the words of v disjoint (one vpopcntq, or without VPOPCNTDQ one
+  exactly-one-bit test instead of a test per word and across words: 5%
+  less time with -march=cascadelake);
 - otherwise (more than 256 labels, or no AVX-512BW), the candidate lists are
   indices filtered with N x N intersection bit matrices: with AVX-512, 16 at
   a time against a row of a matrix, looking the bits up with permutes from

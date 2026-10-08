@@ -100,15 +100,23 @@ Each line of `plan.txt` is one `msearch` run writing to
 
 ## Performance
 
-Arrangement benchmark (single core, Intel Xeon with AVX-512):
+Arrangement benchmark (`bin/bench`, single core, search time; Intel Sapphire
+Rapids, built with `-march=native` and with `-march=cascadelake` as for the
+production cluster, both run on the same machine; minimum of alternating
+runs, October 2026):
 
-| | legacy `arrangement_6` | new (AVX-512) | new (portable, AVX2) |
+| | nodes | -march=native | -march=cascadelake |
 | --- | ---: | ---: | ---: |
-| `bench/quick.txt` (7 instances, N = 450-1700) | 3.56 s | 1.11 s | 1.85 s |
-| `bench/full.txt` (9 instances, N = 330-2240) | 63.1 s | 18.0 s | |
+| `bench/quick.txt` (7 instances, N = 450-1700) | 1.77M | 0.27 s | 0.29 s |
+| `bench/full.txt` (9 instances, N = 330-2240) | 14.96M | 3.29 s | 3.47 s |
+| `bench/prod.txt` (9 production-like sums, N = 1491-2994) | 50.38M | 13.4 s | 14.2 s |
 
-The new search visits 4-5x fewer nodes than the legacy search (7.5M vs 31.7M on
-`quick.txt`, 126M vs 598M on `full.txt`), at a somewhat higher cost per node.
+The round-2 micro-optimizations took 8-9% off the native build and 12-15%
+off the cascadelake build (from 0.30 / 3.65 / 14.6 s and 0.34 / 4.02 /
+16.0 s; research/ideas.md, "Integration of round 2"). For comparison, the
+legacy `arrangement_6` took 3.56 s on `quick.txt` and 63.1 s on `full.txt`
+(earlier measurement, Intel Xeon with AVX-512), visiting 31.7M and 598M
+nodes.
 
 ## Status (October 2026)
 
