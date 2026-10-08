@@ -137,7 +137,7 @@ def test_dfirst_records():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "u.jsonl")
         with open(path, "w") as f:
-            for r in ({"type": "sum", "S": 171, "squares": 0},
+            for r in ({"type": "sum", "S": 171, "squares": 0, "time": 1.0, "setup_time": 0.0},
                       {"type": "dsum", "mode": "dfirst", "S": 172, "complete": 1,
                        "time": 2.0},
                       {"type": "dsquare", "S": 172, "hash": "ab", "magic": 1,
@@ -158,6 +158,14 @@ def test_dfirst_records():
         assert res.next_covered(P, 174) == 175
         res.mark_covered(P, 174, 174)
         assert res.frontier(P, FakePInfo()) == 176
+        # the v1 report lists the magic squares found d-first
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scheduler.report(res, FakePInfo(), None)
+        assert "1 magic squares" in buf.getvalue() and "MAGIC (d-first) P=10 4 3 2" in buf.getvalue(), \
+            buf.getvalue()
     assert scheduler.split_range(1, 9, [3, 4, 9, 12]) == [(1, 2), (5, 8)]
     # end to end: complete d-first sums are covered, a d-sampled one is not
     msearch = os.path.join(os.path.dirname(HERE), "bin", "msearch")

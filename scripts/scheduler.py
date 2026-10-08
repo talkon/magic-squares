@@ -1133,6 +1133,8 @@ def report(results, pinfo, model, top=20):
         dcpu = sum(r.get("cpu", r["time"]) for v in results.dsums.values() for r in v)
         print(f"d-first (not in the fits): {len(results.dsums)} sums, {dcpu / 3600:.2f} "
               f"CPU-hours, {len(results.dmagic)} magic squares")
+        for q in sorted(results.dmagic.values(), key=lambda q: (q["S"], q["hash"])):
+            print(f"  MAGIC (d-first) P={p_str(q['P']):18} S={q['S']:5}  {q.get('grid')}")
     types = {}
     for q in sq:
         types[q["best_score"]] = types.get(q["best_score"], 0) + 1
