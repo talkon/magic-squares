@@ -307,7 +307,7 @@ def profile(P, S, n=6, cap=None):
         finite &= np.isfinite(out[key])
     valid = finite & conv & (lN >= math.log(2 * n))
     # ill-conditioned points near S_min: lN falls along the grid there
-    lNf = np.where(finite, lN, np.inf)
+    lNf = np.where(finite, lN, 1e300)
     dec = np.nonzero(np.diff(lNf) < -1e-7)[0]
     if len(dec):
         valid[:dec[-1] + 2] = False
