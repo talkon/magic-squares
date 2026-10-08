@@ -299,8 +299,9 @@ class Results:
         except OSError:
             return
         # the sums of this file that its "done" records must not cover:
-        # d-first sums not searched in full, and the plain sums that a
-        # --d-range unit left to the unit of its range that starts at d 0
+        # d-first sums not searched in full, the plain sums that a
+        # --d-range unit left to the unit of its range that starts at d 0,
+        # and r1-sampled plain sums ("csum" records of mode "sampled")
         partial = {}
         with f:
             for line in f:
@@ -313,6 +314,12 @@ class Results:
                 if r.get("n") != self.n:
                     continue
                 P = norm_p(r["P"])
+                if r["type"] == "csum" and r.get("mode") == "sampled":
+                    partial.setdefault(P, set()).add(r["S"])
+                if any(k in r for k in SAMPLED_KEYS):
+                    # sampled records (and the done record of a run that
+                    # samples its plain sums) are not those of the sum
+                    continue
                 if r["type"] == "sum":
                     self.sums[(P, r["S"])] = r
                     self.covered.setdefault(P, []).append((r["S"], r["S"]))
@@ -1112,7 +1119,7 @@ def report(results, pinfo, model, top=20):
     print(f"\n{len(results.by_p())} values of P, {len(sums)} sums, {cpu / 3600:.2f} CPU-hours, "
           f"{len(sq)} semi-magic squares ({3600 * len(sq) / max(cpu, 1):.0f}/CPU-hour)")
     if results.dsums:
-        dcpu = sum(r["time"] for v in results.dsums.values() for r in v)
+        dcpu = sum(r.get("cpu", r["time"]) for v in results.dsums.values() for r in v)
         print(f"d-first (not in the fits): {len(results.dsums)} sums, {dcpu / 3600:.2f} "
               f"CPU-hours, {len(results.dmagic)} magic squares")
     types = {}
@@ -1851,8 +1858,13 @@ def unit_files(units_dir):
     return sorted(plain + gz)
 
 
-# keys that mark a sampled msearch record (r1-sampling research builds)
+# keys that mark a sampled msearch record (r1-sampling research builds,
+# msearch's "csum" records and the "done" record of an --r1-* run)
 SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
+# the format of the summary (bump it when update_file / _ingest read the
+# records differently, so that an old summary is rebuilt): 2 = d-first
+# sums (msearch --diag-first)
+SUMMARY_VERSION = 2
 
 
 def sum_cpu(r):
@@ -1881,7 +1893,8 @@ class Summary:
 
     def reset(self):
         am = _am()
-        self.tag = {"version": am.AMODEL_VERSION, "hash": am.model_hash(),
+        self.tag = {"version": am.AMODEL_VERSION, "summary": SUMMARY_VERSION,
+                    "hash": am.model_hash(),
                     "grid": [float(u) for u in am.GRID_U],
                     "cells": [list(NBAND_EDGES), list(XBAND_EDGES), NCELLS]}
         self.files = {}      # basename (without .gz) -> per-file stats
@@ -1894,7 +1907,13 @@ class Summary:
         self.notable = []
         self.types = {}
         self.totals = {"sums": 0, "squares": 0, "cpu": 0.0, "trav_S": 0, "trav_P": 0, "trav_SP": 0,
-                       "outside": 0, "truncated": 0, "other_n": 0}
+                       "outside": 0, "truncated": 0, "other_n": 0,
+                       # d-first sums (msearch --diag-first): searched in
+                       # full, parts of one (a --d-range unit, a --d-stride
+                       # sample, a truncated run), their CPU seconds, and
+                       # the distinct magic squares found
+                       "dfirst_sums": 0, "dfirst_partial": 0, "dfirst_cpu": 0.0,
+                       "dfirst_magic": 0}
         self.dirty = False
 
     @staticmethod
@@ -2012,6 +2031,16 @@ class Summary:
             if r.get("n") != self.n:
                 self.totals["other_n"] += 1
                 continue
+            # the sums of this file that its "done" record must not cover
+            # (fst["holes"], kept across the incremental reads): d-first
+            # sums not searched in full, the plain sums that a --d-range
+            # unit left to the unit from d 0 ("skip"), r1-sampled plain sums
+            t = r["type"]
+            if (t == "dsum" and not r.get("complete")) or t == "skip" or (
+                    t == "csum" and r.get("mode") == "sampled"):
+                h = st.setdefault("holes", {}).setdefault(p_str(norm_p(r["P"]), "_"), [])
+                if r["S"] not in h:
+                    h.append(r["S"])
             if any(k in r for k in SAMPLED_KEYS):
                 # a sampled search (every k-th first row, research builds):
                 # its counts and times are not those of the sum
@@ -2050,15 +2079,20 @@ class Summary:
         cov = []
         sums = [r for r in rs if r["type"] == "sum"]
         sqs = [r for r in rs if r["type"] == "square"]
+        holes = fst.get("holes", {}).get(key, ())
         for r in rs:
             if r["type"] == "sum":
+                cov.append((r["S"], r["S"]))
+            elif r["type"] == "dsum" and r.get("complete"):
+                # a d-first sum searched in full: every magic square of it
+                # found, but no semi-magic squares (see _ingest_dfirst)
                 cov.append((r["S"], r["S"]))
             elif r["type"] == "done":
                 fst["done"] = 1
                 fst["complete"] = int(r.get("complete", 0))
                 fst["last_sum"] = r["last_sum"]
                 if r["last_sum"] >= r["min_sum"]:
-                    cov.append((r["min_sum"], r["last_sum"]))
+                    cov.extend(split_range(r["min_sum"], r["last_sum"], holes))
         if cov:
             self.cover[key] = _merge([tuple(x) for x in self.cover.get(key, [])] + cov)
         ps = self.perP.setdefault(key, {"o": [0, 0, 0, 0], "cpu": 0.0, "nsums": 0, "cells": {}})
@@ -2083,6 +2117,7 @@ class Summary:
             self.types[q["best_score"]] = self.types.get(q["best_score"], 0) + 1
             if q["best_score"] >= self.NOTABLE:
                 self.notable.append(dict(q, P=list(P)))
+        self._ingest_dfirst(P, rs)
         if not sums and not sqs:
             return
         try:
@@ -2174,6 +2209,28 @@ class Summary:
                 acc(c, 6, T * math.exp(a["lpP"][i]))
                 acc(c, 7, q["sp_count"])
                 acc(c, 8, T * math.exp(a["lpSP"][i]))
+
+    def _ingest_dfirst(self, P, rs):
+        """d-first records (msearch --diag-first): a "dsum" per sum and a
+        "dsquare" per (square, SP diagonal) pair. They have no semi-magic
+        squares of the sum (only those with an SP traversal, each once per
+        such traversal), so they stay out of the cells (squares and
+        traversal fits) and of the time law, until the model is taught to
+        use them; their CPU time is counted apart, and their magic squares
+        (a "dsquare" with magic or partner, twice each) join the notable
+        squares once."""
+        for r in rs:
+            if r["type"] == "dsum":
+                self.totals["dfirst_sums" if r.get("complete") else "dfirst_partial"] += 1
+                self.totals["dfirst_cpu"] += r.get("cpu", r.get("time", 0.0))
+        dm = [q for q in rs if q["type"] == "dsquare" and (q.get("magic") or q.get("partner"))]
+        if dm:
+            known = {q.get("hash") for q in self.notable}
+            for q in dm:
+                if q["hash"] not in known:
+                    known.add(q["hash"])
+                    self.notable.append(dict(q, P=list(P), dfirst=1))
+                    self.totals["dfirst_magic"] += 1
 
     def time_stats(self):
         np = _np()
@@ -2887,6 +2944,10 @@ def report_v2(sch, top=20, out=None):
     pr = lambda *a: print(*a, file=out)  # noqa: E731
     pr(f"\n{len(s.perP)} values of P, {T['sums']} sums, {T['cpu'] / 3600:.2f} CPU-hours, "
        f"{T['squares']} semi-magic squares ({3600 * T['squares'] / max(T['cpu'], 1):.0f}/CPU-hour)")
+    if T.get("dfirst_sums") or T.get("dfirst_partial"):
+        pr(f"d-first (not in the fits): {T['dfirst_sums']} sums searched in full, "
+           f"{T['dfirst_partial']} parts, {T['dfirst_cpu'] / 3600:.2f} CPU-hours, "
+           f"{T['dfirst_magic']} magic squares")
     names = {0: "0", 2: "S", 3: "P", 4: "S+S", 5: "S+P", 6: "P+P", 7: "SP",
              9: "SP+S", 10: "SP+P", 14: "MAGIC (SP+SP)"}
     pr("best pair of diagonals: " + ", ".join(
@@ -2951,7 +3012,8 @@ def report_v2(sch, top=20, out=None):
         pr("\nbest squares:")
     for q in best:
         pr(f"  P={p_str(q['P']):18} S={q['S']:5} best={q['best_score']:2} "
-           f"#S={q['s_count']} #P={q['p_count']} #SP={q['sp_count']}  {q['grid']}")
+           f"#S={q['s_count']} #P={q['p_count']} #SP={q['sp_count']}  {q['grid']}"
+           + ("  (d-first)" if q.get("dfirst") else ""))
 
 
 def report_launched(sch, pr):

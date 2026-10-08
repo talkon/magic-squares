@@ -670,6 +670,155 @@ def test_summary():
     print("summary ok")
 
 
+def test_dfirst_summary():
+    """v2: msearch --diag-first output in the Summary. A d-first sum has no
+    "sum" record and no semi-magic squares, so it stays out of the cells
+    (squares and traversal fits) and of the time law; a sum searched in
+    full is covered, a part of one (a --d-range unit, a --d-stride sample),
+    a plain sum that a --d-range unit skipped and an r1-sampled plain sum
+    are cut out of the file's "done" range, also when the records arrive in
+    separate incremental reads; a magic square found d-first (twice, once
+    per diagonal) is notable once"""
+    P = (12, 6, 3, 2, 1, 1)
+    key = "12_6_3_2_1_1"
+    sums = [(S, S % 3) for S in range(880, 886)]
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        # the reference: the plain sums alone
+        ref_path = os.path.join(state, "ref.jsonl")
+        write_unit(ref_path, P, sums, done=(880, 885))
+        ref = scheduler.Summary(state, 6)
+        ref.update_file(ref_path, store)
+        # the same plain sums with d-first records and a done record over
+        # 880..895 (mode dfirst)
+        text = write_unit(os.path.join(state, "plain.jsonl"), P, sums)
+        grid = [[1] * 6] * 6
+        dsq = {"type": "dsquare", "n": 6, "P": list(P), "S": 886, "set_count": 2,
+               "s_count": 9, "p_count": 9, "sp_count": 2, "best_score": 14, "magic": 1,
+               "partner": 1, "hash": "00000000000000ab", "grid": grid}
+        extra = [
+            dict(dsq, d=3),
+            dict(dsq, d=7),  # the same square on its other diagonal
+            {"type": "dsum", "mode": "dfirst", "n": 6, "P": list(P), "S": 886, "nvecs": 6000,
+             "nvecs_raw": 6100, "labels": 160, "nodes": 10 ** 7, "pairs": 2, "time": 50.0,
+             "cpu": 51.0, "truncated": 0, "complete": 1, "engine": 2},
+            {"type": "dsum", "mode": "dfirst", "n": 6, "P": list(P), "S": 887, "nvecs": 6000,
+             "nvecs_raw": 6100, "labels": 160, "nodes": 10 ** 6, "pairs": 0, "time": 5.0,
+             "cpu": 5.5, "truncated": 0, "complete": 0, "d_stride": 3, "engine": 2},
+            {"type": "skip", "mode": "dfirst", "n": 6, "P": list(P), "S": 889, "nvecs": 900,
+             "nvecs_raw": 950, "d_lo": 200},
+            {"type": "csum", "mode": "sampled", "n": 6, "P": list(P), "S": 891, "r1_stride": 4,
+             "squares": 3, "time": 1.0, "cpu": 1.0, "truncated": 0, "engine": 2},
+            {"type": "done", "n": 6, "P": list(P), "min_sum": 880, "last_sum": 895,
+             "complete": 1, "time": 60.0, "mode": "dfirst", "diag_first_min_n": 5000},
+        ]
+        full = text + "".join(json.dumps(r) + "\n" for r in extra)
+        path = os.path.join(units, "u.jsonl")
+        # incremental: the d-first records of 887 / 889 / 891 in one read,
+        # the done record in the next
+        cut = full.index('"type": "done"')
+        cut = full.rindex("\n", 0, cut) + 1
+        with open(path, "w") as f:
+            f.write(full[:cut])
+        inc = scheduler.Summary(state, 6)
+        inc.update(units, store)
+        assert inc.cover[key] == [[880, 886]], inc.cover
+        with open(path, "w") as f:
+            f.write(full)
+        inc.update(units, store)
+        whole = scheduler.Summary(state, 6)
+        whole.update(units, store)
+        assert summary_state(whole) == summary_state(inc)
+        for s in (inc, whole):
+            assert s.cover[key] == [[880, 886], [888, 888], [890, 890], [892, 895]], s.cover
+            # the fits see the plain sums only
+            assert s.time == ref.time and s.tband == ref.tband and s.nbias == ref.nbias
+            assert s.perP[key]["cells"] == ref.perP[key]["cells"]
+            assert s.perP[key]["cpu"] == ref.perP[key]["cpu"]
+            assert s.totals["sums"] == len(sums) and s.totals["squares"] == 0
+            assert s.totals["cpu"] == ref.totals["cpu"]
+            T = s.totals
+            assert (T["dfirst_sums"], T["dfirst_partial"], T["dfirst_magic"]) == (1, 1, 1), T
+            assert abs(T["dfirst_cpu"] - 56.5) < 1e-9 and T["sampled"] == 1
+            assert [q["hash"] for q in s.notable] == ["00000000000000ab"]
+            assert s.notable[0]["dfirst"] == 1 and not s.types
+        # the holes survive a save and load between the reads
+        inc.save()
+        again = scheduler.Summary.load(state, 6)
+        assert again.files["u.jsonl"]["holes"] == {key: [887, 889, 891]}
+        assert summary_state(again) == summary_state(inc)
+        # an older summary (without the d-first fields) is rebuilt
+        with open(os.path.join(state, "summary_6.json")) as f:
+            d = json.load(f)
+        d["tag"].pop("summary")
+        with open(os.path.join(state, "summary_6.json"), "w") as f:
+            json.dump(d, f)
+        assert not scheduler.Summary.load(state, 6).files
+        # the report says what d-first found
+        sch = SimpleNamespace(summary=inc, calib=scheduler.Calibration(), dir=state, n=6,
+                              time_models={}, tm=scheduler._am().TimeModel(engine=2))
+        import io
+        buf = io.StringIO()
+        scheduler.report_v2(sch, out=buf)
+        assert "d-first (not in the fits): 1 sums searched in full, 1 parts" in buf.getvalue()
+        assert "(d-first)" in buf.getvalue()
+    # end to end with msearch: complete d-first sums covered, a d-sampled
+    # one and an r1-sampled plain run not; the time law never sees d-first
+    msearch = os.path.join(os.path.dirname(HERE), "bin", "msearch")
+    P = (10, 4, 3, 2)
+    key = "10_4_3_2"
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        base = [msearch, "--diag-first", "--diag-first-min-n", "455"]
+        # after reduction S = 327 has 451 vectors (plain), 328 460 and 329
+        # 480 (d-first), 330 438 (plain)
+        subprocess.run(base + ["--min-sum", "327", "--max-sum", "328", "--out",
+                               os.path.join(units, "a.jsonl"), "10", "4", "3", "2"],
+                       check=True, capture_output=True)
+        subprocess.run(base + ["--d-stride", "3", "--min-sum", "329", "--max-sum", "330",
+                               "--out", os.path.join(units, "b.jsonl"), "10", "4", "3", "2"],
+                       check=True, capture_output=True)
+        subprocess.run([msearch, "--r1-stride", "4", "--min-sum", "331", "--max-sum", "332",
+                        "--out", os.path.join(units, "c.jsonl"), "10", "4", "3", "2"],
+                       check=True, capture_output=True)
+        # --pretest-min alone stays a plain run (no "mode" in its done record)
+        subprocess.run([msearch, "--pretest-min", "5", "--min-sum", "333", "--max-sum", "333",
+                        "--out", os.path.join(units, "d.jsonl"), "10", "4", "3", "2"],
+                       check=True, capture_output=True)
+        recs = {}
+        for name in "abcd":
+            with open(os.path.join(units, name + ".jsonl")) as f:
+                recs[name] = [json.loads(line) for line in f]
+        ds = [r for r in recs["a"] + recs["b"] if r["type"] == "dsum"]
+        assert [(r["S"], r["complete"]) for r in ds] == [(328, 1), (329, 0)], ds
+        assert all(r["cpu"] >= r["time"] > 0 for r in ds), ds
+        assert [r["type"] for r in recs["c"] if r["type"] != "csquare"] == ["csum", "csum", "done"]
+        assert recs["c"][-1]["mode"] == "sampled" and recs["c"][-1]["r1_sample"] == 1
+        assert [r["type"] for r in recs["d"]] == ["sum", "done"] and "mode" not in recs["d"][-1]
+        s = scheduler.Summary(state, 6)
+        s.update(units, store)
+        assert s.cover[key] == [[327, 328], [330, 330], [333, 333]], s.cover
+        assert s.totals["sums"] == 3 and s.totals["dfirst_sums"] == 1
+        assert s.totals["dfirst_partial"] == 1
+        assert sum(st["n"] for st in s.time.values()) <= 3
+        # v1 agrees on the coverage
+        res = scheduler.Results(6)
+        for name in "abcd":
+            res.add_file(os.path.join(units, name + ".jsonl"))
+
+        class PI:
+            def smin(self, P):
+                return 327
+        assert res.frontier(P, PI()) == 329, res.covered
+        assert sorted(res.covered[P]) == [(327, 327), (327, 328), (328, 328), (330, 330),
+                                          (330, 330), (333, 333), (333, 333)], res.covered
+    print("d-first summary ok")
+
+
 def test_no_enumerate():
     """A9: the analytic paths never call bin/enumerate (or any subprocess
     other than msearch)"""
@@ -788,6 +937,7 @@ if __name__ == "__main__":
     test_per_p()
     test_time_model()
     test_summary()
+    test_dfirst_summary()
     test_no_enumerate()
     test_commands_v2()
     test_commands()
