@@ -4,7 +4,8 @@
  *
  * usage: bench [--repeat K] [--only SUBSTR] [--no-fc] [--no-mrv] [--no-support]
  *              [--no-cross] [--cross] [--update] [--min-words K] [--gather]
- *              [--no-r1-width] [--node-limit X] instances.txt
+ *              [--no-r1-width] [--node-limit X] [--pretest-min K]
+ *              instances.txt
  *
  * Each instance line is
  *     n | e1 e2 ... | S | expected_squares | expected_hash
@@ -19,9 +20,10 @@
  * where it does not pay off), --min-words, --gather and --no-r1-width (every
  * r1 at the width of all the labels) change the search
  * (to compare variants, or to test the code paths for wider label bitsets
- * or larger N on small instances). --node-limit X stops each search
- * after X nodes (to time instances too large to search completely; the
- * check is then meaningless, use "-" expectations).
+ * or larger N on small instances), and --pretest-min K the pretest of the
+ * deep children (0 = never; the same nodes and squares). --node-limit X
+ * stops each search after X nodes (to time instances too large to search
+ * completely; the check is then meaningless, use "-" expectations).
  *
  * Exit status is nonzero if any instance does not match.
  */
@@ -75,9 +77,10 @@ int main(int argc, char *argv[]) {
                                          {"no-cross", no_argument, 0, 'x'},
                                          {"cross", no_argument, 0, 'X'},
                                          {"no-r1-width", no_argument, 0, 'R'},
+                                         {"pretest-min", required_argument, 0, 'P'},
                                          {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "r:o:fmuw:gsL:xXR", long_options, NULL)) !=
+  while ((opt = getopt_long(argc, argv, "r:o:fmuw:gsL:xXRP:", long_options, NULL)) !=
          -1) {
     switch (opt) {
     case 'r':
@@ -116,6 +119,9 @@ int main(int argc, char *argv[]) {
     case 'L':
       opts.node_limit = strtoull(optarg, NULL, 10);
       break;
+    case 'P':
+      opts.pretest_min = atoi(optarg);
+      break;
     default:
       return 2;
     }
@@ -124,7 +130,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "usage: bench [--repeat K] [--only SUBSTR] [--no-fc] "
                     "[--no-mrv] [--no-support] [--no-cross] [--cross] "
                     "[--update] [--min-words K] [--gather] [--no-r1-width] "
-                    "[--node-limit X] "
+                    "[--node-limit X] [--pretest-min K] "
                     "instances.txt\n");
     return 2;
   }

@@ -19,6 +19,8 @@
  *   --no-fc/--no-mrv  disable forward checking / most-constrained branching
  *   --no-support      disable the support filter (see arrange_core.h)
  *   --no-cross        disable the cross support filter (see arrange_core.h)
+ *   --pretest-min K   pretest the children with K or more vectors placed
+ *                     (default 5; 0 = never; see search_opts_t)
  *
  * Output (JSON lines, one record per searched sum, flushed immediately so a
  * killed run keeps all completed sums):
@@ -179,9 +181,10 @@ int main(int argc, char *argv[]) {
       {"no-mrv", no_argument, 0, 'm'},
       {"no-support", no_argument, 0, 'S'},
       {"no-cross", no_argument, 0, 'X'},
+      {"pretest-min", required_argument, 0, 'P'},
       {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "n:a:b:s:l:t:T:o:F:r:fmSX",
+  while ((opt = getopt_long(argc, argv, "n:a:b:s:l:t:T:o:F:r:fmSXP:",
                             long_options, NULL)) != -1) {
     switch (opt) {
     case 'n':
@@ -231,6 +234,9 @@ int main(int argc, char *argv[]) {
       break;
     case 'X':
       opts.cross = 0;
+      break;
+    case 'P':
+      opts.pretest_min = atoi(optarg);
       break;
     default:
       return 2;

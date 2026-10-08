@@ -31,6 +31,7 @@
  */
 #include "arrange.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +55,7 @@ void search_opts_default(search_opts_t *o) {
   o->support = 1;
   o->cross = 1;
   o->r1_width = 1;
+  o->pretest_min = 5;
 }
 
 /*
@@ -211,6 +213,12 @@ typedef struct {
    * it, and a counter to sample one child in 16 */
   int cross_after;
   uint32_t xs_tick, xs_n, xs_k;
+  /* the children with at least this many vectors placed run the pretest
+   * (opts.pretest_min; INT_MAX when off), which keeps the masks of the
+   * entries its two filters keep in ptmask[0] (the other axis) and
+   * ptmask[1] (the axis of the new vector), one byte per 8 entries */
+  int pretest_min;
+  uint8_t *ptmask[2];
   int stop;
 #ifdef R1_SAMPLE
   /* r1 sampling (see r1_next) and the per-r1 log */
@@ -507,17 +515,18 @@ void prof_print(void) {
  * (see research/ideas.md, "The cost of creating children").
  */
 #include <x86intrin.h>
-enum { CP_FO, CP_FB, CP_CROSS, CP_SUP, CP_AFTER, CP_COUNT, CP_SEL, CP_NPH };
+enum { CP_FO, CP_FB, CP_CROSS, CP_SUP, CP_AFTER, CP_COUNT, CP_SEL, CP_PT,
+       CP_NPH };
 enum { CD_CNT_O, CD_FC_O, CD_CNT_B, CD_FC_B, CD_CROSS, CD_SUP, CD_AFTER,
        CD_LIVE, CD_N };
 #define CP_LAYERS (9 * 9)
 uint64_t cp_cyc[CP_LAYERS][CP_NPH], cp_calls[CP_LAYERS][CP_NPH],
     cp_die[CP_LAYERS][CD_N], cp_in[CP_LAYERS][2], cp_out[CP_LAYERS][2],
-    cp_total;
+    cp_pt_kill[CP_LAYERS], cp_total;
 static void __attribute__((destructor)) cp_print(void) {
   static const char *ph[CP_NPH] = {"filter o", "filter b", "cross",
                                    "support",  "after",    "count",
-                                   "kids"};
+                                   "kids",     "pretest"};
   static const char *dn[CD_N] = {"count o", "fc o",  "count b", "fc b",
                                  "cross",   "support", "after", "live"};
   fprintf(stderr, "search: %.3fG cycles\n", cp_total * 1e-9);
@@ -532,7 +541,7 @@ static void __attribute__((destructor)) cp_print(void) {
             "filters %.1f / %.1f (o / b)\n",
             l / 9, l % 9, (unsigned long long)made,
             (double)cp_in[l][0] / made, (double)cp_in[l][1] / made,
-            (double)cp_out[l][0] / cp_calls[l][CP_FO],
+            cp_calls[l][CP_FO] ? (double)cp_out[l][0] / cp_calls[l][CP_FO] : 0,
             cp_calls[l][CP_FB] ? (double)cp_out[l][1] / cp_calls[l][CP_FB] : 0);
     for (int p = 0; p < CP_NPH; p++)
       if (cp_calls[l][p])
@@ -543,6 +552,8 @@ static void __attribute__((destructor)) cp_print(void) {
     fprintf(stderr, "  died:");
     for (int k = 0; k < CD_N; k++)
       fprintf(stderr, " %s %.1f%%", dn[k], 100.0 * cp_die[l][k] / made);
+    if (cp_pt_kill[l])
+      fprintf(stderr, " (pretest %.1f%%)", 100.0 * cp_pt_kill[l] / made);
     fprintf(stderr, "\n");
   }
 }
@@ -834,6 +845,10 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   s.opts = *opts;
   s.cb = cb;
   s.ctx = ctx;
+  /* (the pretest repeats the forward check, so it needs it to be exact) */
+  s.pretest_min = opts->pretest_min > 0 && opts->forward_check
+                      ? opts->pretest_min
+                      : INT_MAX;
 
   /* distinct values (dense ids, see dense_ids: hashing rather than sorting
    * all count * n elements, which was half of the setup), and the rank of
@@ -1065,6 +1080,9 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
               s.smp_nlist);
   }
 #endif
+  if (carry)
+    for (int a = 0; a < 2; a++)
+      s.ptmask[a] = malloc(s.cap / 8 + 1);
   double t1 = wall_time();
 
   search_root(&s, W_, carry);
@@ -1092,6 +1110,8 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     free(s.kids[d]);
     free(s.kidw[d]);
   }
+  for (int a = 0; a < 2; a++)
+    free(s.ptmask[a]);
   free(s.inters0);
   free(s.inters1);
   free(s.has_label);

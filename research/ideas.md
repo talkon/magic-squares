@@ -1419,3 +1419,116 @@ the ASan debug build on 120 seeds; `ctest -R fast_` passes (new tests:
 `fast_fuzz_arrange_wide`, `fast_fuzz_arrange_matrices_wide`; the gather and
 plain-C cross tests at 8 words now run on `bench_matrices`, since the
 native build carries 8 words).
+## The pretest of the deep children (October 2026, branch cx/pretest)
+
+At N >= 11k the (2,2) children that survive cross support and the support
+filter are 30-40% of them, each creates ~15-18 (2,3)/(3,2) children, and
+nearly all of those die at the count or forward check right after their
+two filters (85% of all nodes at N = 15-23k, 26-32% of the cycles, the
+fastest-growing term of the plain search; see the cx/profile study). The
+pretest (`opts.pretest_min`, `--pretest-min K` in bench and msearch, 0 =
+off; default 5, i.e. the (2,3)/(3,2) children on; carried lists only) runs
+those two filters first as FILTER_COUNT: the same tests, but per 8 entries
+a masked or into the union and a byte of keep mask instead of a compress,
+a store and an or per word. The count and forward checks follow on those
+counts and unions, so exactly the same children die; only the ones that
+pass get their lists, compressed from the keep masks (PT_APPLY, not
+inlined), and go on with cross support / the support filter as before.
+Nodes and squares are unchanged.
+
+The cx/prune version (3dc9b05, `-DPRETEST`) let the survivors run the two
+filters again; compressing from the keep masks instead was 3.7% faster at
+a2400 (27.5 vs 28.5 s, same session) and makes the pretest nearly free
+where it kills little.
+
+Measurements (fdb77fc vs this branch, `-O3 -march=native -flto`, both
+with the R1_SAMPLE patch of cx/wide: the same r1 sample, two runs of each
+alternating, per-r1 minimum of thread CPU time, summed; the machine was
+shared, load 2-7 on 4 cores):
+
+| P / S | N | r1 sampled | base CPU-s | pretest CPU-s | speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 13 7 4 3 1 1 / 1850 | 2,523 | all | 2.91 | 2.88 | 1.009 |
+| 13 7 4 3 1 1 / 2000 | 7,593 | 190 (stride 40) | 13.29 | 12.50 | 1.063 |
+| 12 6 3 2 1 1 / 1080 | 8,891 | 111 (stride 80) | 9.10 | 8.60 | 1.058 |
+| 13 7 4 3 1 1 / 2200 | 15,199 | 19 (stride 800) | 14.37 | 12.98 | 1.107 |
+| 11 6 4 3 2 1 / 2174 | 16,424 | 19 (stride 900) | 14.49 | 12.93 | 1.120 |
+| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 12 (stride 1800) | 9.19 | 8.96 | 1.026 |
+| 13 7 4 3 1 1 / 2400 | 22,992 | 15 (stride 1600) | 32.14 | 27.46 | 1.170 |
+
+* Geometric mean over the four sums with N >= 15k: 1.105. The gain
+  follows the (2,2) survival: 34-37% at S = 2200-2400, 28% at 2174, 11%
+  at 3648 (where the dead (2,3)/(3,2) layer is 64% of the nodes, not 85%).
+  The cx/prune port measured 1.05-1.19 on the same samples (one loaded
+  session gave 1.10 at a2400, another 1.19: ~5% session noise).
+* Every pair had the same squares and the same nodes at every sampled r1.
+  So the cost per square falls by the same factors: with the cx/profile
+  estimates, 4.0 -> 3.6 CPU-s per square at S = 2200, 10.8 -> 9.6 at 2174,
+  15.5 -> 13.2 at 2400. It is a constant factor that grows slowly with N,
+  not a change of the exponent.
+* `bench/prod.txt` (min of 4 alternating runs) 13.85 -> 13.49 s (-2.6%),
+  `full.txt` (`--repeat 3`) 3.359 -> 3.333 s (-0.8%), `quick.txt`
+  (`--repeat 10`, 5 rounds) 0.2719 -> 0.2753 s (+1.3%: its two smallest
+  instances, 12-50 ms, by 3-6%; the same binary with `--pretest-min 0`
+  0.2733 s).
+* `--pretest-min 4` (also the (2,2) children) in the plain search: 0.97x
+  base at S = 2200. Few (2,2) children die at those checks there.
+
+The diagonal-first search (V_d, cx/dfirst `--diag-first`). Its (2,2)
+children die at those checks 88% of the time, so a lower threshold could
+pay there. Death stages (S = 2200, 60 d, `-DCHILD_PROF`, pretest off):
+
+| children | made | lists in (o / b) | count o | fc o | count b | fc b | cross | support | live |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| (1,2) | 2.77M | 429 / 302 | 0% | 6.4% | 0% | 0.4% | | 69.1% | 24.2% |
+| (2,1) | 6.02M | 304 / 471 | 0% | 11.9% | 0% | 1.3% | | 49.1% | 37.6% |
+| (2,2) | 8.41M | 146 / 81 | 0% | 29.6% | 22.7% | 35.6% | 1.9% | 10.1% | 0.0% |
+| (1,3), (3,1) | 0.42M | 70-75 / 100-130 | 0.7-0.8% | 72-74% | 25-27% | 0.5-1% | | 0.1% | 0% |
+
+Creating the (1,2)/(2,1) children is 61% of the rdtsc cycles (the support
+filter 24%), and they mostly die in the support filter, which the pretest
+does not replicate: a threshold of 3 only adds work there. Timing
+(cx/dfirst + this patch, d-sampled with `--sample-seed 11`, per-d minimum
+of two alternating runs, against cx/dfirst's own binary):
+
+| threshold | off | 1 | 3 | 4 | 5 (default) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| S = 2200 (N 15.2k, 60 d) | 1.020 | 0.952 | 0.987 | 1.053 | 1.015 |
+| S = 2400 (N 23k, 30 d) | 0.980 | | 0.941 | 1.062 | 1.020 |
+
+So 4 is the best value for V_d, but at 1.05-1.06x (1.03-1.08x against
+the same binary with the pretest off) it is below the 1.08x on both sums
+that would justify a separate setting. V_d keeps the default, which costs
+nothing there (1.015, 1.020). The d-sampled runs also had the same nodes
+at every d.
+
+Not kept: one more round of cross support and the support filter at the
+surviving (2,2) children (cx/prune's SURV_FIX), gated by their survival
+(on when more than a fifth of the last ~256 survived, in the style of
+the cross_after switch), on top of the pretest, same binary:
+
+| P / S | nodes | speedup |
+| --- | --- | ---: |
+| 13 7 4 3 1 1 / 2200 | 28.0M -> 15.9M | 1.008 |
+| 11 6 4 3 2 1 / 2174 | 24.2M -> 13.9M | 1.021 |
+| 14 7 4 4 1 0 0 1 / 3648 | 7.96M -> 6.09M | 1.019 |
+| 13 7 4 3 1 1 / 2400 | 52.5M -> 28.6M | 1.039 (always on: 1.050) |
+
+It halves the nodes, but with the pretest the dead children it spares
+are cheap, so it saves 1-4%, less than the 3% on two of these sums that
+was the bar for keeping it. (On `full.txt` the gate is nearly always off:
+14,958,507 -> 14,957,941 nodes.)
+
+Correctness: `ctest -R fast_` passes; `fuzz_arrange` has variants with
+the pretest from 1, 3, 4 vectors placed (also with 4 words, without the
+support filter, without MRV, with cross support everywhere). For each of
+them it also checks that the search with the pretest off visits the same
+nodes. It passes on 1000 fresh seeds (7300000-7300999), and the
+d-first fuzz (`fuzz_arrange --dfirst` on cx/dfirst, with the pretest from
+1-5 vectors placed per seed) on 997 more. Three mutants fail on 300
+seeds: the count b check of the pretest off by one (38 failures, all by
+the node check alone: the children it lets through die later), one word
+missing from the union (359 failures, squares lost), and one lane
+dropped from the applied lists (from the first seed on).
+
+CPU used: ~1.3 CPU-hours (~10 minutes of it a runaway mutant).

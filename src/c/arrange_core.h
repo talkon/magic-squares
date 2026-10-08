@@ -28,6 +28,9 @@
 #define KEEP_COUNT CAT(keep_count, W)
 #define SUPPORT CAT(support, W)
 #define FILTER_CARRY CAT(filter_carry, W)
+#define FILTER_COUNT CAT(filter_count, W)
+#define FILTER_APPLY CAT(filter_apply, W)
+#define PT_APPLY CAT(pt_apply, W)
 #define PAD_LIST CAT(pad_list, W)
 #define KEEP_CARRY CAT(keep_carry, W)
 #define COUNT_CARRY CAT(count_carry, W)
@@ -220,6 +223,101 @@ static inline uint32_t FILTER_CARRY(const sstate_t *s, const uint64_t *in,
   for (int w = 0; w < W; w++)
     un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
   return k;
+}
+
+/*
+ * FILTER_COUNT: FILTER_CARRY without the output list, for the pretest of
+ * the deep children (see TRY_CHILD): the number of entries it would keep
+ * and their union, with the same tests, and no compress or store (a masked
+ * or per word instead of a compress, a store and an or); km[g] = the mask
+ * of the entries kept in group g (entries 8 g .. 8 g + 7), for
+ * FILTER_APPLY. Same precondition (the padding).
+ */
+static inline uint32_t FILTER_COUNT(const sstate_t *s, const uint64_t *in,
+                                    uint32_t cnt, const uint64_t *vb,
+                                    const int once, const uint64_t *excl,
+                                    uint8_t *km, uint64_t *un /* [W] */) {
+  const size_t cap = s->cap;
+  __m512i V[W], R[W], acc[W];
+  bool tw[W];
+  uint64_t used = 0;
+  for (int w = 0; w < W; w++) {
+    uint64_t t = vb[w] | (!once && excl ? excl[w] : 0);
+    int r = 0;
+    if (once && w > 0)
+      while (rotl64(t, r) & used)
+        r++;
+    t = rotl64(t, r);
+    used |= t;
+    V[w] = _mm512_set1_epi64((long long)t);
+    R[w] = _mm512_set1_epi64(r);
+    acc[w] = _mm512_setzero_si512();
+    tw[w] = W <= 2 || t;
+  }
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < cnt; i += 8) {
+    __m512i x[W];
+    for (int w = 0; w < W; w++)
+      x[w] = _mm512_loadu_si512(in + w * cap + i);
+    __mmask8 keep;
+    if (once) {
+      __m512i c = _mm512_and_si512(x[0], V[0]);
+      for (int w = 1; w < W; w++)
+        if (tw[w])
+          c = _mm512_ternarylogic_epi64(c, _mm512_rolv_epi64(x[w], R[w]),
+                                        V[w], 0xF8);
+#ifdef __AVX512VPOPCNTDQ__
+      keep = _mm512_cmpeq_epi64_mask(_mm512_popcnt_epi64(c),
+                                     _mm512_set1_epi64(1));
+#else
+      keep = _mm512_mask_testn_epi64_mask(
+          _mm512_test_epi64_mask(c, c), c,
+          _mm512_sub_epi64(c, _mm512_set1_epi64(1)));
+#endif
+    } else {
+      keep = 0xff;
+      for (int w = 0; w < W; w++)
+        if (tw[w])
+          keep = _mm512_mask_testn_epi64_mask(keep, x[w], V[w]);
+    }
+    for (int w = 0; w < W; w++)
+      acc[w] = _mm512_mask_or_epi64(acc[w], keep, acc[w], x[w]);
+    km[i >> 3] = (uint8_t)keep;
+    k += (uint32_t)__builtin_popcount(keep);
+  }
+  for (int w = 0; w < W; w++)
+    un[w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
+  return k;
+}
+
+/* the output of FILTER_CARRY from the keep masks km of FILTER_COUNT on the
+ * same list: the kept entries compressed into out (no test, no union) */
+static inline void FILTER_APPLY(const sstate_t *s, const uint64_t *in,
+                                uint32_t cnt, const uint8_t *km,
+                                uint64_t *out) {
+  const size_t cap = s->cap;
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < cnt; i += 8) {
+    const __mmask8 keep = km[i >> 3];
+    for (int w = 0; w < W; w++)
+      _mm512_storeu_si512(out + w * cap + k,
+                          _mm512_maskz_compress_epi64(
+                              keep, _mm512_loadu_si512(in + w * cap + i)));
+    k += (uint32_t)__builtin_popcount(keep);
+  }
+}
+
+/* the lists of the child of depth d + 1 from the pretest's keep masks (see
+ * TRY_CHILD): the other axis o, then the axis b of the new vector (not
+ * inlined into SEARCH_REC: only the few children that pass the pretest
+ * need it) */
+static __attribute__((noinline)) void PT_APPLY(sstate_t *s, int d, int b,
+                                               uint32_t min_v) {
+  const int o = 1 - b;
+  FILTER_APPLY(s, s->vw[d][o] + min_v, s->nvalid[d][o] - min_v, s->ptmask[0],
+               s->vw[d + 1][o]);
+  FILTER_APPLY(s, s->vw[d][b] + min_v, s->nvalid[d][b] - min_v, s->ptmask[1],
+               s->vw[d + 1][b]);
 }
 
 /* pads list[0..cnt) with 8 full sets, for FILTER_CARRY: a node pads its
@@ -1048,6 +1146,63 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
 #define CP_WHY(k)
 #endif
   CP_START();
+  /* the pretest (opts.pretest_min): from that many vectors placed, nearly
+   * all children die at the count and forward checks right after the two
+   * filters below (the (2,3)/(3,2) children: 85-99% of them, and ~85% of
+   * all nodes at N >= 11k), so the two filters first only count the
+   * entries they keep and take their union (FILTER_COUNT: the same tests,
+   * but no compress or store), and the lists are written only for the
+   * children that pass those checks, from the keep masks (PT_APPLY), which
+   * then go on after the filters below. The checks are the same, on the
+   * same counts and unions, so the same children die, and the nodes and
+   * squares are unchanged (see research/ideas.md, "The pretest of the deep
+   * children"). */
+  if (d + 1 >= s->pretest_min) {
+    uint32_t pkb = 0;
+    const uint32_t pko =
+        FILTER_COUNT(s, s->vw[d][o] + min_v, s->nvalid[d][o] - min_v, m, 1,
+                     NULL, s->ptmask[0], uo);
+    uint64_t pdead = s->np[o] + (int)pko < n;
+    for (int w = 0; w < W; w++)
+      pdead |= ncell_b[w] & ~ncell_o[w] & ~uo[w];
+    if (!pdead) {
+      uint64_t pex[W];
+      for (int w = 0; w < W; w++)
+        pex[w] = ~(ncell_o[w] | uo[w]);
+      pkb = FILTER_COUNT(s, s->vw[d][b] + min_v, s->nvalid[d][b] - min_v, m,
+                         0, sup ? pex : NULL, s->ptmask[1], ub);
+      pdead = s->np[b] + (int)pkb < n;
+      for (int w = 0; w < W; w++)
+        pdead |= ncell_o[w] & ~ncell_b[w] & ~ub[w];
+    }
+    CP_PHASE(pl, CP_PT);
+    if (pdead) {
+#ifdef CHILD_PROF
+      /* (the check that kills it, as below) */
+      why = s->np[o] + (int)pko < n ? CD_CNT_O : CD_FC_O;
+      if (s->np[o] + (int)pko >= n) {
+        uint64_t f = 0;
+        for (int w = 0; w < W; w++)
+          f |= ncell_b[w] & ~ncell_o[w] & ~uo[w];
+        if (!f)
+          why = s->np[b] + (int)pkb < n ? CD_CNT_B : CD_FC_B;
+      }
+      cp_die[pl][why]++;
+      cp_pt_kill[pl]++;
+#endif
+      s->np[b]--;
+      return;
+    }
+    /* the lists from the keep masks, then on with the rest below */
+    PT_APPLY(s, d, b, min_v);
+    s->nvalid[d + 1][o] = pko;
+    s->nvalid[d + 1][b] = pkb;
+#ifdef CHILD_PROF
+    cp_out[pl][0] += pko;
+    cp_out[pl][1] += pkb;
+#endif
+    goto filtered;
+  }
   uint32_t ko = FILTER_CARRY(s, s->vw[d][o] + min_v, s->nvalid[d][o] - min_v,
                              m, 1, NULL, s->vw[d + 1][o], uo);
   CP_PHASE(pl, CP_FO);
@@ -1082,6 +1237,7 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
       for (int w = 0; w < W; w++)
         dead |= ncell_o[w] & ~ncell_b[w] & ~ub[w];
     CP_WHY(CD_FC_B);
+  filtered:
     /* with two rows and two cols placed, most children are dead, and cross
      * support (with the support filter's test folded in) finds it faster
      * than the support filter's cascade: on the o candidates first, which
@@ -1442,6 +1598,9 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
 #undef KEEP_COUNT
 #undef SUPPORT
 #undef FILTER_CARRY
+#undef FILTER_COUNT
+#undef FILTER_APPLY
+#undef PT_APPLY
 #undef PAD_LIST
 #undef KEEP_CARRY
 #undef COUNT_CARRY

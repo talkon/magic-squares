@@ -15,8 +15,10 @@ bin/msearch --format legacy --sums 327 10 4 3 2 > out.txt   # for postprocess.py
 Options: `--vec-size N` (5, 6, 7), `--min-sum`, `--max-sum`, `--sums`,
 `--node-limit X` (per sum; the record is marked `truncated`), `--total-nodes X`
 and `--time-limit T` (stop after the sum during which the limit is reached),
-`--out FILE` (append), `--format legacy`, `--reduce strong`, and `--no-fc` /
-`--no-mrv` / `--no-support` / `--no-cross` to disable the search heuristics.
+`--out FILE` (append), `--format legacy`, `--reduce strong`, `--no-fc` /
+`--no-mrv` / `--no-support` / `--no-cross` to disable the search heuristics,
+and `--pretest-min K` (the depth of the pretest below, 0 = off; the same
+squares and nodes).
 
 Output is JSON lines, flushed as it goes: one `square` record per semi-magic
 square (with its traversal counts, the best pair of diagonals, and the square
@@ -44,6 +46,7 @@ bin/bench --no-support bench/quick.txt
 bin/bench --no-cross bench/quick.txt
 bin/bench --min-words 6 bench/quick.txt   # test the paths for more labels (carried up to 8 words)
 bin/bench --no-r1-width bench/full.txt # every r1 at the width of all labels (same nodes, slower)
+bin/bench --pretest-min 0 bench/quick.txt    # without the pretest (same nodes)
 bin/bench_matrices bench/quick.txt     # the same with the N x N matrices (CARRY_MAX_W=0)
 bin/bench_matrices --min-words 8 --gather bench/quick.txt   # matrices as for > 512 labels, N > 3072
 bin/bench --node-limit 3000000 big.txt # time the first 3M nodes of larger instances
@@ -136,6 +139,16 @@ versa), plus:
   counts are computed only for the children that survive them (with the
   N x N matrices below, from depth 4 on: above it, counting while filtering
   is cheaper);
+- the pretest (carried lists, from 5 vectors placed, `opts.pretest_min`):
+  the (2,3)/(3,2) children nearly all die at the count and forward checks
+  right after their two filters, and at N >= 11k they are ~85% of all
+  nodes, so their filters first only count the entries they would keep and
+  or them into the unions (no compress or store), and write the lists, from
+  the keep masks, only for the children that pass those checks. The same
+  children die, so the nodes and squares are unchanged: 10-17% less time on
+  r1-sampled sums with N = 15-23k (3% at N = 20k with few (2,2) survivors),
+  6% at N = 7.6-8.9k, 0-3% on `bench/prod.txt` and `full.txt` (see
+  research/ideas.md, "The pretest of the deep children");
 - the children of a node (the candidates through the branching cell) are
   selected with a vectorized filter (from the bitsets the lists carry, or
   from a label -> vectors bit matrix, see below), rather than tested one by

@@ -890,7 +890,8 @@ static int cb(const square_t *sq, void *ctx) {
 typedef struct {
   const char *name;
   int fc, mrv, support, min_words, gather, cross;
-  int fixw; /* 1: opts.r1_width = 0 (every r1 at the width of all labels) */
+  int fixw;    /* 1: opts.r1_width = 0 (every r1 at the width of all labels) */
+  int pretest; /* opts.pretest_min: 0 = the default, -1 = never */
 } variant_t;
 static const variant_t variants[] = {
     {"default", 1, 1, 1, 0, 0, 1},  {"nofc", 0, 1, 1, 0, 0, 1},
@@ -909,6 +910,12 @@ static const variant_t variants[] = {
     {"w7", 1, 1, 1, 7, 0, 1},       {"fixw", 1, 1, 1, 0, 0, 1, 1},
     {"w5_fixw", 1, 1, 1, 5, 0, 1, 1}, {"w6_nomrv", 1, 0, 1, 6, 0, 1},
     {"xcross_w5", 1, 1, 1, 5, 0, 2},
+    /* the pretest of the deep children from other depths (it must not
+     * change the squares) */
+    {"pt_off", 1, 1, 1, 0, 0, 1, 0, -1}, {"pt_1", 1, 1, 1, 0, 0, 1, 0, 1},
+    {"pt_3", 1, 1, 1, 0, 0, 1, 0, 3},    {"pt_4", 1, 1, 1, 0, 0, 1, 0, 4},
+    {"pt_1_w4", 1, 1, 1, 4, 0, 1, 0, 1}, {"pt_2_nosup", 1, 1, 0, 0, 0, 1, 0, 2},
+    {"pt_2_nomrv", 1, 0, 1, 0, 0, 1, 0, 2}, {"pt_2_xcross", 1, 1, 1, 0, 0, 2, 0, 2},
 };
 #define NVAR (int)(sizeof(variants) / sizeof(variants[0]))
 
@@ -1025,6 +1032,8 @@ int main(int argc, char **argv) {
       o.gather = V->gather;
       o.cross = V->cross;
       o.r1_width = !V->fixw;
+      if (V->pretest)
+        o.pretest_min = V->pretest > 0 ? V->pretest : 0;
       found.k = 0;
       invalid = 0;
       double t1 = now();
@@ -1051,6 +1060,21 @@ int main(int argc, char **argv) {
       const bool lost =
           mode == 6 && (!found.k || !bsearch(&planted, found.a, found.k,
                                              sizeof(canon_t), cmp_canon));
+      /* the pretest must not change the nodes either: the same search with
+       * it off (no callback: only the counts are compared) */
+      if (V->pretest > 0 && !st.truncated) {
+        search_opts_t o0 = o;
+        o0.pretest_min = 0;
+        const search_stats_t st0 =
+            search_vectors(&l, 0, l.count, &o0, NULL, NULL);
+        if (st0.nodes != st.nodes || st0.squares != st.squares) {
+          fails++;
+          printf("NODES MISMATCH seed %lu variant %s: %lu nodes, %lu "
+                 "without the pretest\n",
+                 (unsigned long)seed, V->name, (unsigned long)st.nodes,
+                 (unsigned long)st0.nodes);
+        }
+      }
       if (!same || lost) {
         fails++;
         printf("MISMATCH seed %lu mode %d n %d nv %d labels %d variant %s: "

@@ -56,6 +56,13 @@ typedef struct {
                           (default 1; 0: every r1 at the width of all the
                           labels, for testing). The same nodes and squares
                           either way. */
+  int pretest_min;     /* the children with at least this many vectors
+                          placed first run the count and forward checks of
+                          their two filters on counts and unions only, and
+                          are only filtered for real if they pass (the same
+                          nodes and squares; candidate lists that carry their
+                          bitsets only; 0 = never; default 5, i.e. from the
+                          (2,3)/(3,2) children on) */
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);
