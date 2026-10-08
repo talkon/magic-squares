@@ -125,6 +125,60 @@ def test_coverage():
     print("coverage ok")
 
 
+def test_dfirst_records():
+    """msearch --diag-first output: the d-first sums have no "sum" record but
+    are not empty sums, so they stay out of the fits (sums, squares), and
+    only a sum searched in full counts as covered, also inside a "done"
+    range (a --d-stride sample or a --d-range part does not)"""
+    class FakePInfo:
+        def smin(self, P):
+            return 171
+    P = (10, 4, 3, 2)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "u.jsonl")
+        with open(path, "w") as f:
+            for r in ({"type": "sum", "S": 171, "squares": 0},
+                      {"type": "dsum", "mode": "dfirst", "S": 172, "complete": 1,
+                       "time": 2.0},
+                      {"type": "dsquare", "S": 172, "hash": "ab", "magic": 1,
+                       "partner": 1},
+                      {"type": "dsum", "mode": "dfirst", "S": 174, "complete": 0,
+                       "time": 1.0},
+                      # an older d-first record without "complete": partial
+                      {"type": "dsum", "S": 176, "time": 1.0},
+                      {"type": "done", "min_sum": 171, "last_sum": 180, "complete": 1,
+                       "mode": "dfirst", "diag_first_min_n": 0}):
+                f.write(json.dumps({"n": 6, "P": list(P), **r}) + "\n")
+        res = scheduler.Results(6)
+        res.add_file(path)
+        assert list(res.sums) == [(P, 171)], res.sums
+        assert not res.squares and list(res.dmagic) == ["ab"]
+        assert sorted(res.dsums) == [(P, 172), (P, 174), (P, 176)]
+        assert res.frontier(P, FakePInfo()) == 174, res.covered
+        assert res.next_covered(P, 174) == 175
+        res.mark_covered(P, 174, 174)
+        assert res.frontier(P, FakePInfo()) == 176
+    assert scheduler.split_range(1, 9, [3, 4, 9, 12]) == [(1, 2), (5, 8)]
+    # end to end: complete d-first sums are covered, a d-sampled one is not
+    msearch = os.path.join(os.path.dirname(HERE), "bin", "msearch")
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "u.jsonl")
+        base = [msearch, "--diag-first", "--diag-first-min-n", "0", "--out", path]
+        subprocess.run(base + ["--min-sum", "327", "--max-sum", "328", "10", "4", "3", "2"],
+                       check=True, capture_output=True)
+        subprocess.run(base + ["--d-stride", "3", "--min-sum", "329", "--max-sum", "330",
+                               "10", "4", "3", "2"], check=True, capture_output=True)
+        res = scheduler.Results(6)
+        res.add_file(path)
+        assert not res.sums and sorted(S for _, S in res.dsums) == [327, 328, 329, 330]
+        assert [r[0]["complete"] for _, r in sorted(res.dsums.items())] == [1, 1, 0, 0]
+
+        class PI:
+            def smin(self, P):
+                return 327
+        assert res.frontier(P, PI()) == 329, res.covered
+        assert res.next_covered(P, 329) is None, res.covered
+    print("d-first records ok")
 
 
 def test_commands():
@@ -696,6 +750,7 @@ if __name__ == "__main__":
     test_fit_poisson()
     test_fit_model()
     test_coverage()
+    test_dfirst_records()
     test_amodel()
     test_pool()
     test_profile_store()

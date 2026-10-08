@@ -254,6 +254,18 @@ class PInfo:
 # results
 
 
+def split_range(lo, hi, holes):
+    """[lo, hi] without the sums in holes, as a list of ranges"""
+    out = []
+    for h in sorted(x for x in set(holes) if lo <= x <= hi):
+        if h > lo:
+            out.append((lo, h - 1))
+        lo = h + 1
+    if lo <= hi:
+        out.append((lo, hi))
+    return out
+
+
 class Results:
     """everything learned from msearch output files"""
 
@@ -267,6 +279,15 @@ class Results:
         # early, so the searched sums need not be a prefix.
         self.covered = {}
         self.legacy = {}     # P -> legacy aggregate (searched up to maxS)
+        # d-first sums (msearch --diag-first): (P, S) -> their "dsum"
+        # records. They have no "sum" record, and their squares come as
+        # (square, diagonal) pairs ("dsquare"), not as the sum's semi-magic
+        # squares, so the fits (squares, traversals, time) do not use them
+        # until the model is taught to; a sum searched in full ("complete")
+        # counts as covered, a part of one (a --d-range unit, a --d-stride
+        # sample, a truncated run) does not, even inside a "done" range.
+        self.dsums = {}
+        self.dmagic = {}     # hash -> "dsquare" record of a magic square
 
     def add_file(self, path):
         try:
@@ -277,6 +298,9 @@ class Results:
                 f = open(path)
         except OSError:
             return
+        # the sums of this file that its "done" records must not cover:
+        # d-first sums not searched in full
+        partial = {}
         with f:
             for line in f:
                 if not line.endswith("\n"):
@@ -294,8 +318,20 @@ class Results:
                 elif r["type"] == "square":
                     r["P"] = P
                     self.squares[r["hash"]] = r
+                elif r["type"] == "dsum":
+                    self.dsums.setdefault((P, r["S"]), []).append(r)
+                    if r.get("complete"):
+                        self.covered.setdefault(P, []).append((r["S"], r["S"]))
+                    else:
+                        partial.setdefault(P, set()).add(r["S"])
+                elif r["type"] == "dsquare":
+                    if r.get("magic") or r.get("partner"):
+                        r["P"] = P
+                        self.dmagic[r["hash"]] = r
                 elif r["type"] == "done" and r["last_sum"] >= r["min_sum"]:
-                    self.covered.setdefault(P, []).append((r["min_sum"], r["last_sum"]))
+                    for lo, hi in split_range(r["min_sum"], r["last_sum"],
+                                              partial.get(P, ())):
+                        self.covered.setdefault(P, []).append((lo, hi))
 
     def frontier(self, P, pinfo):
         """next sum to search for P: the first one not covered, from S_min
@@ -1072,6 +1108,10 @@ def report(results, pinfo, model, top=20):
     sq = list(results.squares.values())
     print(f"\n{len(results.by_p())} values of P, {len(sums)} sums, {cpu / 3600:.2f} CPU-hours, "
           f"{len(sq)} semi-magic squares ({3600 * len(sq) / max(cpu, 1):.0f}/CPU-hour)")
+    if results.dsums:
+        dcpu = sum(r["time"] for v in results.dsums.values() for r in v)
+        print(f"d-first (not in the fits): {len(results.dsums)} sums, {dcpu / 3600:.2f} "
+              f"CPU-hours, {len(results.dmagic)} magic squares")
     types = {}
     for q in sq:
         types[q["best_score"]] = types.get(q["best_score"], 0) + 1

@@ -85,11 +85,15 @@
  * partner: another of them fits on the other diagonal with d, i.e. magic),
  *   {"type":"dchunk","S":..,"d_lo":..,"d_hi":..,"nd":..,"pairs":..,...}
  * per completed chunk of d, and a final
- *   {"type":"dsum",...,"nd":..,"d_stride":..,"pairs":..,"est_pairs":..,
- *    "time":..,"est_time":..,...}
+ *   {"type":"dsum","mode":"dfirst",...,"nd":..,"d_stride":..,"pairs":..,
+ *    "est_pairs":..,"time":..,"est_time":..,...,"complete":0|1}
  * where pairs is the number of (square, SP traversal) pairs (what a magic
- * square needs twice). Sampled plain searches (--calib-r1-stride, --r1-*)
- * write "csquare" records (the squares of the sampled r1) and a "csum"
+ * square needs twice) and complete says that every d of the sum was
+ * searched (not a --d-range part, a --d-stride sample, or a truncated
+ * run). With --diag-first the "done" record has "mode":"dfirst" (and
+ * diag_first_min_n): its range then also holds the d-first sums, which
+ * have no "sum" record but are not empty. Sampled plain searches
+ * (--calib-r1-stride, --r1-*) write "csquare" records (the squares of the sampled r1) and a "csum"
  * record with est_squares, se_squares, est_time, se_time (se_strata_missing:
  * the strata with fewer than 2 sampled r1, left out of the se_*).
  */
@@ -347,6 +351,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
   dfirst_stats_t tot;
   memset(&tot, 0, sizeof(tot));
   const size_t base = lo + off;
+  int stopped = 0;
   for (size_t c = lo; c < hi; c += d_chunk) {
     const size_t c2 = c + d_chunk < hi ? c + d_chunk : hi;
     /* the first sampled index >= c */
@@ -379,9 +384,16 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
             (unsigned long)st.pairs, (unsigned long)st.partners,
             cpu_time() - cc);
     fflush(out);
-    if (st.stopped)
+    if (st.stopped) {
+      stopped = 1;
       break;
+    }
   }
+  /* every d of the sum searched: the sum's (square, SP traversal) pairs,
+   * hence its magic squares, are all found (a d-range unit, a d sample,
+   * a truncated or stopped run is not complete) */
+  const int complete = lo == 0 && hi == raw && d_stride == 1 &&
+                       !tot.truncated && !stopped;
   const uint32_t labels = dfirst_num_labels(df);
   dfirst_free(df);
   const double cpu = cpu_time() - c0;
@@ -400,7 +412,8 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
     se_pairs = vp > 0 ? sqrt(vp) : 0;
   }
   fprintf(out,
-          "{\"type\":\"dsum\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,\"S\":%lu,"
+          "{\"type\":\"dsum\",\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
+          "\"Pval\":%lu,\"S\":%lu,"
           "\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%u,\"d_lo\":%zu,"
           "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
           "\"avg_vd\":%.1f,\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,"
@@ -408,7 +421,8 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           "\"est_nodes\":%.6g,\"time\":%.6f,\"index_time\":%.6f,"
           "\"vd_time\":%.6f,\"setup_time\":%.6f,\"search_time\":%.6f,"
           "\"est_time\":%.6g,\"se_time\":%.6g,\"enum_time\":%.6f,"
-          "\"reduce_time\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
+          "\"reduce_time\":%.6f,\"truncated\":%d,\"complete\":%d,"
+          "\"engine\":%d}\n",
           n, pstr, (unsigned long)pexp_value(p), (unsigned long)S, red->count,
           raw, labels, lo, hi, d_stride, off, (unsigned long)tot.nd,
           tot.nd ? (double)tot.vd_total / (double)tot.nd : 0.0,
@@ -417,7 +431,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           k * (double)tot.pairs, se_pairs, k * (double)tot.nodes, cpu, t_index,
           tot.vd_seconds, tot.setup_seconds, tot.search_seconds,
           t_index + k * (cpu - t_index), se_time, enum_share, reduce_time,
-          tot.truncated, ENGINE_VERSION);
+          tot.truncated, complete, ENGINE_VERSION);
   fflush(out);
   uint64_t nodes = tot.nodes;
   if (calib_stride > 0) {
@@ -784,9 +798,17 @@ int main(int argc, char *argv[]) {
     pexp_to_str(&p, pstr, ",");
     fprintf(out,
             "{\"type\":\"done\",\"n\":%d,\"P\":[%s],\"min_sum\":%lu,"
-            "\"last_sum\":%lu,\"complete\":%d,\"time\":%.3f}\n",
+            "\"last_sum\":%lu,\"complete\":%d,\"time\":%.3f",
             n, pstr, (unsigned long)min_sum, (unsigned long)last_sum,
             !stop || last_sum >= max_sum, wall_time() - t_start);
+    /* with --diag-first the range is not all plain sums: the sums with a
+     * "dsum" record were searched d-first (all of their d only if its
+     * "complete" is 1), so a reader must not take them for searched plain
+     * sums without squares */
+    if (diag_first)
+      fprintf(out, ",\"mode\":\"dfirst\",\"diag_first_min_n\":%zu",
+              dfirst_min_n);
+    fprintf(out, "}\n");
   }
   if (legacy) {
     if (stop_nodes)
