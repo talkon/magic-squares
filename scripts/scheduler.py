@@ -1676,6 +1676,8 @@ class ProfileStore:
             self.done.flush()
             for j, g in enumerate(am.GUARDS):
                 self.guards[g] = self.guards.get(g, 0) + int(gc[:, j].sum())
+            self.meta["guards"] = self.guards
+            self._write_meta(self.meta)
 
         if workers <= 1 or len(chunks) == 1:
             am.worker_init() if workers <= 1 and len(rows) > 50 else None
@@ -2663,11 +2665,12 @@ def am_s0(P):
 
 
 def describe_calib(calib, tm):
-    lg, lS, lP, lm = calib.rates()
+    """one line: the data behind the class factors, and the current time law"""
     d = calib.data
     parts = [f"{k} obs/exp {d[k][0]:.0f}/{d[k][1]:.1f}" for k in ("sq", "S", "P") if k in d]
-    return (", ".join(parts) + f"; time engine {tm.engine} th=" +
-            "[" + ", ".join(f"{v:.3f}" for v in tm.th) + f"] sd {tm.sd:.3f} ({tm.n} sums)")
+    return ("class-factor data: " + (", ".join(parts) or "none")
+            + f"; time law (engine {tm.engine}): th=["
+            + ", ".join(f"{v:.3f}" for v in tm.th) + f"] sd {tm.sd:.3f} ({tm.n} sums)")
 
 
 def _poisson_interval(o, e, z=1.645):
@@ -2721,7 +2724,7 @@ def report_v2(sch, top=20, out=None):
         b, C = sch.calib.beta[key], sch.calib.cov[key]
         pr(f"  {name:13} " + ", ".join(f"{e} {v:+.2f}({math.sqrt(C[i, i]):.2f})"
                                        for i, (e, v) in enumerate(zip(EFFECTS, b))))
-    pr(f"  time: {describe_calib(sch.calib, sch.tm)}")
+    pr(f"  {describe_calib(sch.calib, sch.tm)}")
     for k, tm in sorted(sch.time_models.items()):
         pr(f"    engine:mode {k}: th=[{', '.join(f'{v:.3f}' for v in tm.th)}] sd {tm.sd:.3f} "
            f"({tm.n} sums)")

@@ -177,6 +177,13 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
   N = 5-8k, and 0.08 where 60 were found at N = 15-32k), and its pool omits
   exponent orders that are not non-increasing, which hold more than half of
   the yield.
+* The analytic scheduler ([research/scheduler-v2.md](research/scheduler-v2.md),
+  now the default) uses that model per (P, S) over a pool of 377,908 P
+  that includes exponent orders that are not non-increasing. It forecasts
+  **~0.1 magic squares in 1 CPU-year and ~0.2 in 10** (after a x0.8
+  discount for the shortfall of its top-ranked units on held-out runs);
+  scored by the same model, the old scheduler's choices collect about half
+  as much at 1 CPU-year (x2.0) and 0.4x at 10 (x2.6).
 * Speedups are best compared by the ratio of E at a fixed budget: 10x faster
   gives x2.2 at 1 CPU-year and x1.5 at 1,000; time ~ N^2 instead of ~N^4
   beyond N = 4,000 gives x1.1 and x1.7.

@@ -551,6 +551,13 @@ def test_no_enumerate():
                 scheduler.v2_fit(args)
                 scheduler.v2_profile(args)
             out = buf.getvalue()
+            # run: only msearch is started
+            run_args = SimpleNamespace(**vars(args))
+            run_args.hours, run_args.unit_time, run_args.refit_every = 0.0003, 1.0, 50
+            run_args.announce_score = 7
+            with contextlib.redirect_stdout(io.StringIO()):
+                scheduler.SchedulerV2(run_args).run()
+            assert os.path.exists(os.path.join(state, "launched_6.jsonl"))
             assert "10 4 3 2" in out and "--node-limit" in out, out
             plan_line = [l for l in out.split("\n") if l.startswith("10 4 3 2 ")][0]
             assert int(plan_line.split()[4].split("-")[0]) == 200, plan_line
