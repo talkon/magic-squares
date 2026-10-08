@@ -38,7 +38,10 @@
  *                     (an unbiased sample; o defaults to a random offset
  *                     from --sample-seed)
  *   --d-range lo:hi   only the d with index in [lo, hi) of the sum's
- *                     unreduced list (for splitting a sum into units)
+ *                     unreduced list (for splitting a sum into units); the
+ *                     plain sums (below --diag-first-min-n) are searched
+ *                     only by the unit with lo = 0, the others write a
+ *                     "skip" record for them
  *   --d-chunk C       a "dchunk" checkpoint record every C indices of d
  *                     (default 256)
  *   --d-log FILE      one line per d (see dfirst_search)
@@ -92,7 +95,9 @@
  * searched (not a --d-range part, a --d-stride sample, or a truncated
  * run). With --diag-first the "done" record has "mode":"dfirst" (and
  * diag_first_min_n): its range then also holds the d-first sums, which
- * have no "sum" record but are not empty. Sampled plain searches
+ * have no "sum" record but are not empty, and with --d-range lo:hi, lo > 0,
+ * the plain sums of the range get a "skip" record instead of a search
+ * (the unit whose range starts at 0 searches them). Sampled plain searches
  * (--calib-r1-stride, --r1-*) write "csquare" records (the squares of the sampled r1) and a "csum"
  * record with est_squares, se_squares, est_time, se_time (se_strata_missing:
  * the strata with fewer than 2 sampled r1, left out of the se_*).
@@ -717,6 +722,18 @@ int main(int argc, char *argv[]) {
         fprintf(out, "sum %lu nvecs %zu\n", (unsigned long)S, red.count);
       char pstr[64];
       pexp_to_str(&p, pstr, ",");
+      if (diag_first && red.count < dfirst_min_n && d_range_lo > 0) {
+        /* a plain sum in a --d-range unit: the units of a range split the
+         * d of its d-first sums between them, but a plain sum is searched
+         * whole, so only by the unit whose d-range starts at 0, not once
+         * per unit */
+        fprintf(out,
+                "{\"type\":\"skip\",\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
+                "\"S\":%lu,\"nvecs\":%zu,\"nvecs_raw\":%zu,\"d_lo\":%zu}\n",
+                n, pstr, (unsigned long)S, red.count, raw, d_range_lo);
+        fflush(out);
+        continue;
+      }
       if (diag_first && red.count >= dfirst_min_n) {
         total_nodes += run_dfirst(out, &ctx, pstr, n, &p, S, &all, start_i,
                                   raw, &red, &opts, d_stride, d_offset, seed,

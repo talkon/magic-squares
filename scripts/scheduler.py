@@ -299,7 +299,8 @@ class Results:
         except OSError:
             return
         # the sums of this file that its "done" records must not cover:
-        # d-first sums not searched in full
+        # d-first sums not searched in full, and the plain sums that a
+        # --d-range unit left to the unit of its range that starts at d 0
         partial = {}
         with f:
             for line in f:
@@ -324,6 +325,8 @@ class Results:
                         self.covered.setdefault(P, []).append((r["S"], r["S"]))
                     else:
                         partial.setdefault(P, set()).add(r["S"])
+                elif r["type"] == "skip":
+                    partial.setdefault(P, set()).add(r["S"])
                 elif r["type"] == "dsquare":
                     if r.get("magic") or r.get("partner"):
                         r["P"] = P

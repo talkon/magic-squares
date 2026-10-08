@@ -178,6 +178,35 @@ def test_dfirst_records():
                 return 327
         assert res.frontier(P, PI()) == 329, res.covered
         assert res.next_covered(P, 329) is None, res.covered
+    # --d-range units: a plain sum (below --diag-first-min-n) is searched
+    # by the unit whose range starts at 0 only, the others skip it
+    with tempfile.TemporaryDirectory() as d:
+        a, b = os.path.join(d, "a.jsonl"), os.path.join(d, "b.jsonl")
+        base = [msearch, "--diag-first", "--diag-first-min-n", "455", "--min-sum", "327",
+                "--max-sum", "328"]
+        subprocess.run(base + ["--d-range", "0:200", "--out", a, "10", "4", "3", "2"],
+                       check=True, capture_output=True)
+        subprocess.run(base + ["--d-range", "200:", "--out", b, "10", "4", "3", "2"],
+                       check=True, capture_output=True)
+        types = []
+        for path in (a, b):
+            with open(path) as f:
+                types.append([(json.loads(l)["type"], json.loads(l)["S"])
+                              for l in f if json.loads(l)["type"] in ("sum", "skip", "dsum")])
+        # S = 327 has 451 vectors after reduction (plain), 328 has 460
+        assert types[0] == [("sum", 327), ("dsum", 328)], types
+        assert types[1] == [("skip", 327), ("dsum", 328)], types
+        res = scheduler.Results(6)
+        res.add_file(b)
+
+        class PI:
+            def smin(self, P):
+                return 327
+        assert res.frontier(P, PI()) == 327, res.covered  # skipped, partial
+        res.add_file(a)
+        # 327 searched by unit a; 328's two d-range parts are not merged
+        # (yet), so it is not covered
+        assert res.frontier(P, PI()) == 328, res.covered
     print("d-first records ok")
 
 
