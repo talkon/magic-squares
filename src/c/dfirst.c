@@ -22,6 +22,18 @@ static double thread_cpu(void) {
   return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
 }
 
+/* the involutions of gen_inv: for even n the perfect matchings, (n - 1)!!,
+ * for odd n those with one fixed point, n (n - 2)!! (105 for n = 7 and 8) */
+#define DF_DFACT(k)                                                            \
+  ((k) <= 1 ? 1 : (k) == 3 ? 3 : (k) == 5 ? 15 : (k) == 7 ? 105 : (k) == 9 ? 945 \
+                                                                 : 10395)
+#define DF_NINV(n) ((n) % 2 ? (n) * DF_DFACT((n) - 2) : DF_DFACT((n) - 1))
+#define DF_MAX_INV 128
+_Static_assert(SQ_MAX_N <= 12, "DF_DFACT covers n <= 12");
+_Static_assert(DF_NINV(SQ_MAX_N) <= DF_MAX_INV &&
+                   DF_NINV(SQ_MAX_N - 1) <= DF_MAX_INV,
+               "dfirst_t inv[] too small for the involutions of n = SQ_MAX_N");
+
 struct dfirst_s {
   int n;
   const vec_list_t *vecs;
@@ -50,7 +62,7 @@ struct dfirst_s {
   /* the involutions that relate the two diagonals (no fixed point for even
    * n, one for odd n), as in square.c */
   int ninv;
-  int inv[128][SQ_MAX_N];
+  int inv[DF_MAX_INV][SQ_MAX_N];
   int top_root; /* see dfirst_set_top_root */
 };
 
@@ -95,7 +107,8 @@ static void gen_inv(dfirst_t *df, int *cur, int fixed_left) {
   while (a < n && cur[a] >= 0)
     a++;
   if (a == n) {
-    memcpy(df->inv[df->ninv++], cur, SQ_MAX_N * sizeof(int));
+    if (df->ninv < DF_MAX_INV) /* (always, see the static assert) */
+      memcpy(df->inv[df->ninv++], cur, SQ_MAX_N * sizeof(int));
     return;
   }
   if (fixed_left) {
