@@ -1190,6 +1190,12 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
       cp_die[pl][why]++;
       cp_pt_kill[pl]++;
 #endif
+#ifdef PROFILE
+      /* (as at the end of TRY_CHILD: a child created and pruned) */
+      prof_created[d + 1]++;
+      prof_kids[d]++;
+      prof_pruned[d + 1]++;
+#endif
       s->np[b]--;
       return;
     }
