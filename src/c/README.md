@@ -64,9 +64,12 @@ d-first sums write "dsquare" records (one per pair, with `set_count` =
 checkpoint records every `--d-chunk` (256) indices of d and a "dsum"
 record (`pairs`, `est_pairs`, `est_time` with `--d-stride`; `complete` when
 every d was searched), not "square" / "sum" records. The "done" record of a
-`--diag-first` run has `"mode":"dfirst"`; `scripts/scheduler.py` keeps the
-d-first sums out of its fits, counts a complete one as searched and a
-part of one (a `--d-range` unit, a `--d-stride` sample) as not. With
+`--diag-first` run has `"mode":"dfirst"`; `scripts/scheduler.py` (both
+models: v1's Results, v2's Summary) keeps the d-first sums out of its fits
+(squares, traversals, time law), counts a complete one as searched and a
+part of one (a `--d-range` unit, a `--d-stride` sample) as not, and lists
+the magic squares found d-first. The dsum record has a "cpu" field as the
+sum record does. With
 `--d-range lo:hi`, only the unit with lo = 0 searches the plain sums of the
 range (the others write a "skip" record).
 `--calib-r1-stride k` adds a plain search of every k-th first row (a

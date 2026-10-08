@@ -204,8 +204,11 @@ middle of that range.
 * **Not done.** Sharded `units/` and a compact summary store. The summary
   is JSON and is rewritten at every refit, which will be slow beyond ~10^5
   P (about 620k units per CPU-year). There is also no d-first mode in the
-  scheduler, and the per-P prior strengths have not been re-estimated beyond
-  A_SQ.
+  scheduler (it launches plain msearch units; the Summary reads the records
+  of `msearch --diag-first` runs, covering their complete sums and keeping
+  them out of the fits, see ideas.md, "Integration of cx/wide, cx/pretest
+  and cx/dfirst"), and the per-P prior strengths have not been re-estimated
+  beyond A_SQ.
 
 ## Fixes after verification (this revision)
 

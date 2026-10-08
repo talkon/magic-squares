@@ -1694,7 +1694,8 @@ the plain path ~1.5).
 ## Integration of cx/wide, cx/pretest and cx/dfirst (October 2026, branch cx/integrated)
 
 The three prototypes, each one commit on fdb77fc, cherry-picked in that
-order onto a3812f0, then the verifiers' required fixes in separate commits.
+order onto a3812f0, then the verifiers' required fixes in separate commits,
+then rebased onto scheduler v2 (df6b62b).
 
 **The root loop.** All three changed it: per-r1 width runs (wide), the
 stratified r1 sampling (dfirst, in search_opts_t), the top-label root
@@ -1763,10 +1764,50 @@ the heavy r1 need fewer words (2.8x above 256 labels), and the V_d
 searches by 2.2x above 256 labels; the pretest speeds up the plain search
 by 1.1-1.17x and V_d by ~1.0x.
 
-Gates: `ctest -R fast_` (40 tests) passes; `fuzz_arrange` on fresh seeds
-(52000000-52700199): 500 default, 500 mode 7, 500 `--dfirst` (every
-variant, pt_* included), 200 `--dfirst --mode 7`, 200
+Gates (before the rebase): `ctest -R fast_` (40 tests) passes;
+`fuzz_arrange` on fresh seeds (52000000-52700199): 500 default, 500 mode 7,
+500 `--dfirst` (every variant, pt_* included), 200 `--dfirst --mode 7`, 200
 `fuzz_arrange_matrices --dfirst`, 100 matrices mode 7, 200 portable, 20
 mode 6 with the wide and pretest variants: 0 fails; `scripts/
 test_scheduler.py` has a d-first test (synthetic records, and msearch
 output with complete, sampled and d-range units).
+
+**Rebased onto scheduler v2.** Scheduler v2 (`scripts/amodel.py`, the
+Summary of scheduler.py) reads msearch output through its own incremental
+Summary, not v1's Results, and fits its time law to a new "cpu" field of the
+sum records. The rebase kept both:
+
+* msearch: the dsum records get "cpu" too (the d loop, the reduction and
+  the sum's share of the enumeration; process CPU, as in "sum"), and so do
+  the csum records of `--r1-*` runs; with `--calib-r1-stride` the csum's
+  cpu is the sampled search only (the dsum holds the rest), so the cpu
+  fields of a file add up without double counting. cx/dfirst's own
+  `cpu_time` (thread CPU) gave way to v2's (process CPU; msearch is
+  single-threaded).
+* A run that r1-samples its plain sums wrote an ordinary "done" record
+  over sums with only "csum" records, the same trap as the d-first sums:
+  its done record now has `"r1_sample":1` (and `"mode":"sampled"` without
+  `--diag-first`), one of v2's SAMPLED_KEYS, so both schedulers skip it.
+* v2's Summary: an incomplete dsum, a "skip" and a sampled csum are holes
+  in the file's done range, kept in the file's state so they hold across
+  incremental reads and a reload; a complete dsum covers its sum. d-first
+  records stay out of the cells (squares and traversal fits) and the time
+  law; their sums, parts and CPU are counted apart (`totals["dfirst_*"]`),
+  and a magic square found d-first joins the notable squares once (flagged
+  `dfirst`), so `run` announces it and `report` lists it. SUMMARY_VERSION
+  in the summary's tag rebuilds older summaries. v1's Results also skips
+  sampled records now. `test_dfirst_summary` checks all of it against the
+  plain sums alone, and on msearch output with both schedulers.
+* A conflict resolution of the dfirst cherry-pick had dropped the `break`
+  after msearch's `--pretest-min`, which then also switched on
+  `--diag-first` (fixed in that commit; the new test runs `--pretest-min`
+  and checks for a plain done record).
+
+Gates after the rebase (build-integ, Release): `ctest -R fast_` passes (40
+tests, fast_scheduler and fast_calibrate included); `fuzz_arrange` on
+fresh seeds 61000000-61600099: 600 default (1 skipped by the oracle
+budget), 500 mode 7, 500 `--dfirst` (every variant, pt_* included), 200
+`--dfirst --mode 7`, 200 `fuzz_arrange_matrices --dfirst`, 100 matrices
+mode 7, 200 portable: 0 fails; bench quick / full / prod: 1,770,779 /
+14,958,507 / 50,375,738 nodes, every instance's nodes, squares and hash
+equal to fdb77fc's bench.
