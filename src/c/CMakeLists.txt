@@ -34,12 +34,14 @@ add_executable(enumeration enumeration.cpp)
 # Tests of the new pipeline (fast; run with `ctest -R fast_`).
 set(BENCH_DIR ${PROJECT_SOURCE_DIR}/bench)
 add_test(NAME fast_bench_quick COMMAND bench ${BENCH_DIR}/quick.txt)
-# the same instances, with wider label bitsets than needed
+# the same instances, with wider label bitsets than needed (carried up to
+# 8 words with AVX-512BW, each r1 at the width it needs unless
+# --no-r1-width)
 add_test(NAME fast_bench_quick_wide3 COMMAND bench --min-words 3 ${BENCH_DIR}/quick.txt)
+add_test(NAME fast_bench_quick_wide5 COMMAND bench --min-words 5 ${BENCH_DIR}/quick.txt)
+add_test(NAME fast_bench_quick_wide7 COMMAND bench --min-words 7 ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_wide8 COMMAND bench --min-words 8 ${BENCH_DIR}/quick.txt)
-# the same instances, filtering with the intersection matrices and gathers
-# as for more than 256 labels and N > 3072
-add_test(NAME fast_bench_quick_gather COMMAND bench --min-words 8 --gather ${BENCH_DIR}/quick.txt)
+add_test(NAME fast_bench_quick_wide6_fixed COMMAND bench --no-r1-width --min-words 6 ${BENCH_DIR}/quick.txt)
 # the benchmark built with the N x N intersection matrices for all widths
 # (the filter used without AVX-512BW, here still with byte counters), and
 # with the fallbacks for AVX-512 CPUs without GFNI / VPOPCNTDQ (Skylake-X,
@@ -49,6 +51,10 @@ target_compile_definitions(bench_matrices PRIVATE CARRY_MAX_W=0)
 target_link_libraries(bench_matrices m)
 add_test(NAME fast_bench_quick_matrices COMMAND bench_matrices ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_matrices_no_support COMMAND bench_matrices --no-support ${BENCH_DIR}/quick.txt)
+# the matrices with 8 words (as for 257-512 labels without AVX-512BW), and
+# with gathers as for N > 3072
+add_test(NAME fast_bench_quick_matrices_wide8 COMMAND bench_matrices --min-words 8 ${BENCH_DIR}/quick.txt)
+add_test(NAME fast_bench_quick_gather COMMAND bench_matrices --min-words 8 --gather ${BENCH_DIR}/quick.txt)
 include(CheckCCompilerFlag)
 check_c_compiler_flag("-mno-gfni -mno-avx512vpopcntdq" HAVE_NO_GFNI_FLAGS)
 if (HAVE_NO_GFNI_FLAGS)
@@ -82,8 +88,9 @@ add_test(NAME fast_bench_quick_wide16 COMMAND bench --min-words 16 --only "S=3" 
 add_test(NAME fast_bench_quick_no_fc COMMAND bench --no-fc --no-mrv ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_no_support COMMAND bench --no-support ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_no_cross COMMAND bench --no-cross ${BENCH_DIR}/quick.txt)
-# cross support in the portable code (not used by default with 8 words)
-add_test(NAME fast_bench_quick_cross_wide8 COMMAND bench --cross --min-words 8 ${BENCH_DIR}/quick.txt)
+# cross support in the portable code (not used by default on the matrix
+# path with 8 words)
+add_test(NAME fast_bench_quick_cross_wide8 COMMAND bench_matrices --cross --min-words 8 ${BENCH_DIR}/quick.txt)
 add_test(NAME fast_bench_quick_matrices_no_cross COMMAND bench_matrices --no-cross ${BENCH_DIR}/quick.txt)
 # msearch finds Morgenstern's square (P = 2^10 3^4 5^3 7^2, S = 327)
 add_test(NAME fast_msearch_327 COMMAND sh -c
@@ -94,6 +101,9 @@ add_test(NAME fast_msearch_327 COMMAND sh -c
 add_executable(fuzz_arrange fuzz_arrange.c enumerate.c arrange.c square.c)
 target_link_libraries(fuzz_arrange m)
 add_test(NAME fast_fuzz_arrange COMMAND fuzz_arrange 1 150
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+# 257-500 labels: the carried path with 5-8 words, its r1 at 2-8 words
+add_test(NAME fast_fuzz_arrange_wide COMMAND fuzz_arrange --mode 7 1 150
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 if (HAVE_FLAG_portable)
   add_executable(fuzz_arrange_portable fuzz_arrange.c enumerate.c arrange.c square.c)
@@ -106,6 +116,8 @@ add_executable(fuzz_arrange_matrices fuzz_arrange.c enumerate.c arrange.c square
 target_compile_definitions(fuzz_arrange_matrices PRIVATE CARRY_MAX_W=0)
 target_link_libraries(fuzz_arrange_matrices m)
 add_test(NAME fast_fuzz_arrange_matrices COMMAND fuzz_arrange_matrices 2000 60
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME fast_fuzz_arrange_matrices_wide COMMAND fuzz_arrange_matrices --mode 7 2000 40
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 # saturated byte counters at the node below r1 (every unmatched cell in
 # >= 255 candidates, so the cell is chosen among the saturated counts; the

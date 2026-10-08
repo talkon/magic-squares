@@ -322,7 +322,8 @@ static void gen_saturated(void) {
 /* modes: 0 = one dense grid + transversals, 1 = many planted grids (wide),
  * 2 = random dense, 3 = a few grids overlapping in a small universe; only
  * with --mode: 4 = large sparse, 5 = hubs, 6 = saturated counts (see
- * gen_saturated) */
+ * gen_saturated), 7 = many planted grids over 257-500 labels (the carried
+ * path with 5-8 words, its r1 searched at 2 to 8 words) */
 static int gen(uint64_t seed, int force_mode, int force_n) {
   rs = seed * 0x2545F4914F6CDD1Dull + 12345;
   nv = 0;
@@ -330,7 +331,7 @@ static int gen(uint64_t seed, int force_mode, int force_n) {
   if (!force_n && rnd() % 10 == 0)
     n = rnd() % 2 ? 3 : 8;
   int mode = force_mode >= 0 ? force_mode : rint_(0, 3);
-  plant_nt_max = mode == 1 || mode == 4 ? n : 3 * n;
+  plant_nt_max = mode == 1 || mode == 4 || mode == 7 ? n : 3 * n;
   style = rint_(0, 3);
   int G[MAXN][MAXN];
   static int perm[8192];
@@ -350,12 +351,12 @@ static int gen(uint64_t seed, int force_mode, int force_n) {
       random_subset(v, n, 0, U);
       add_vec(v);
     }
-  } else if (mode == 1) {
-    /* target label ranges: W=2, 3, 4, 8, 16 */
+  } else if (mode == 1 || mode == 7) {
+    /* target label ranges: W=2, 3, 4, 8, 16 (mode 7: 257-500) */
     static const int lo_[] = {40, 129, 193, 257, 513};
     static const int hi_[] = {128, 192, 256, 512, 1100};
     int r = rint_(0, 4);
-    U = rint_(lo_[r], hi_[r]);
+    U = mode == 7 ? rint_(257, 500) : rint_(lo_[r], hi_[r]);
     if (U < n * n)
       U = n * n;
     /* grids over random subsets; enough grids to cover most ids */
@@ -889,6 +890,7 @@ static int cb(const square_t *sq, void *ctx) {
 typedef struct {
   const char *name;
   int fc, mrv, support, min_words, gather, cross;
+  int fixw; /* 1: opts.r1_width = 0 (every r1 at the width of all labels) */
 } variant_t;
 static const variant_t variants[] = {
     {"default", 1, 1, 1, 0, 0, 1},  {"nofc", 0, 1, 1, 0, 0, 1},
@@ -903,6 +905,10 @@ static const variant_t variants[] = {
     {"xcross_nomrv", 1, 0, 1, 0, 0, 2}, {"xcross_w3", 1, 1, 1, 3, 0, 2},
     {"xcross_w4", 1, 1, 1, 4, 0, 2}, {"xcross_w8", 1, 1, 1, 8, 0, 2},
     {"xcross_w16", 1, 1, 1, 16, 0, 2},
+    {"w5", 1, 1, 1, 5, 0, 1},       {"w6", 1, 1, 1, 6, 0, 1},
+    {"w7", 1, 1, 1, 7, 0, 1},       {"fixw", 1, 1, 1, 0, 0, 1, 1},
+    {"w5_fixw", 1, 1, 1, 5, 0, 1, 1}, {"w6_nomrv", 1, 0, 1, 6, 0, 1},
+    {"xcross_w5", 1, 1, 1, 5, 0, 2},
 };
 #define NVAR (int)(sizeof(variants) / sizeof(variants[0]))
 
@@ -1018,6 +1024,7 @@ int main(int argc, char **argv) {
       o.min_words = V->min_words;
       o.gather = V->gather;
       o.cross = V->cross;
+      o.r1_width = !V->fixw;
       found.k = 0;
       invalid = 0;
       double t1 = now();

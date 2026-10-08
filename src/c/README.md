@@ -42,8 +42,10 @@ bin/bench --only "S=648" bench/full.txt
 bin/bench --no-fc --no-mrv bench/quick.txt   # compare search variants
 bin/bench --no-support bench/quick.txt
 bin/bench --no-cross bench/quick.txt
-bin/bench --min-words 8 --gather bench/quick.txt   # test the paths for more labels / larger N
+bin/bench --min-words 6 bench/quick.txt   # test the paths for more labels (carried up to 8 words)
+bin/bench --no-r1-width bench/full.txt # every r1 at the width of all labels (same nodes, slower)
 bin/bench_matrices bench/quick.txt     # the same with the N x N matrices (CARRY_MAX_W=0)
+bin/bench_matrices --min-words 8 --gather bench/quick.txt   # matrices as for > 512 labels, N > 3072
 bin/bench --node-limit 3000000 big.txt # time the first 3M nodes of larger instances
 bin/bench --update bench/quick.txt     # print instances with observed values
 ```
@@ -121,7 +123,8 @@ versa), plus:
   `bench/full.txt`), elsewhere it cost more than it saved;
 - branching on the unmatched cell with the fewest candidates, ties broken by
   the smallest label; the counts are exact (saturating byte counters) with
-  AVX-512BW and up to 256 labels, where the cell is found with one masked
+  AVX-512BW and up to 512 labels (256 on the matrix path), where the cell is
+  found with one masked
   minimum over the counters instead of a scan of the counts class by
   class (0-3.5% less time on `bench/prod.txt`, depending on the rest of
   the code; `fuzz_arrange --mode 6` tests the saturated counts, >= 255
@@ -137,7 +140,7 @@ versa), plus:
   selected with a vectorized filter (from the bitsets the lists carry, or
   from a label -> vectors bit matrix, see below), rather than tested one by
   one;
-- with AVX-512BW and up to 256 labels, the candidate lists carry the label
+- with AVX-512BW and up to 512 labels, the candidate lists carry the label
   bitsets of their entries (one array per 64-bit word), so filtering a list
   by the vector v just placed computes |u & v| for 8 entries at a time from
   contiguous loads (vpopcntq), and compresses the kept entries with their
@@ -163,7 +166,20 @@ versa), plus:
   keep the words of v disjoint (one vpopcntq, or without VPOPCNTDQ one
   exactly-one-bit test instead of a test per word and across words: 5%
   less time with -march=cascadelake);
-- otherwise (more than 256 labels, or no AVX-512BW), the candidate lists are
+- each first row r1 is searched with only the 64-bit words it needs: its
+  subproblem has the vectors after it, whose labels are all at most its
+  largest label x, so the r1 are searched in runs of equal width
+  ceil((x + 1) / 64) (at least 2), each run filling the depth-0 lists with
+  that many words (the same nodes as at a single width; `--no-r1-width`
+  turns it off). Each word costs ~x1.3 time at the same nodes, so this is
+  1.2-1.3x less time where the r1 with the most work need one word less
+  than all the labels (13 7 4 3 1 1, S = 2200, N = 15k: 1.23x; 12 6 3 2 1 1,
+  S = 1200: 1.31x), and nothing where they need them all. Above 256 labels
+  it replaces the matrices, which also lacked cross support and exact MRV:
+  2.8-3.1x less time at N = 21-32k with 259-279 labels (5 words only for
+  the first r1), 2.2x inside the d-first V_d searches (research/ideas.md,
+  "Carried bitsets up to 512 labels");
+- otherwise (more than 512 labels, or no AVX-512BW), the candidate lists are
   indices filtered with N x N intersection bit matrices: with AVX-512, 16 at
   a time against a row of a matrix, looking the bits up with permutes from
   the row held in registers when N <= 3072 (gathers otherwise), and

@@ -53,23 +53,27 @@ void search_opts_default(search_opts_t *o) {
   o->gather = 0;
   o->support = 1;
   o->cross = 1;
+  o->r1_width = 1;
 }
 
 /*
  * How candidates are counted per label (read with COVERED / IN_CLASS in
  * arrange_core.h):
  *
- * - with AVX-512BW and W <= COUNT_BYTES_MAX_W, one saturating byte counter
- *   per label: adding a vector is one masked add per 64 labels, with the
+ * - with AVX-512BW and W <= COUNT_BYTES_MAX_W, and always when the lists
+ *   carry their bitsets (W <= CARRY_MAX_W, up to 8 words), one saturating
+ *   byte counter per label: adding a vector is one masked add per 64
+ *   labels, with the
  *   bitset word loaded straight into a mask register, and the W
  *   accumulators are independent chains of 1-cycle adds (when the lists
  *   carry their bitsets, 8 vectors are added at a time, with a bit
  *   transpose: see COUNT_CARRY). The counts are exact up to 255, so the
  *   most constrained cell is chosen exactly (8% fewer nodes than with 8
  *   slices on bench/quick.txt).
- * - otherwise, NSLICE bit-sliced thermometer counters (labels in >= 1, 2,
- *   ..., NSLICE candidates), vectorized for W = 8 with AVX-512 (one register
- *   per slice; byte counters were 35% slower there), plain C otherwise.
+ * - otherwise (the matrix path), NSLICE bit-sliced thermometer counters
+ *   (labels in >= 1, 2, ..., NSLICE candidates), vectorized for W = 8 with
+ *   AVX-512 (one register per slice; byte counters were 35% slower there),
+ *   plain C otherwise.
  *   More slices give a more exact choice (fewer nodes) at a higher cost per
  *   node, which pays off when the counting is vectorized.
  *
@@ -108,7 +112,7 @@ void search_opts_default(search_opts_t *o) {
  * How candidate lists are filtered by the vector v just placed (keeping the
  * vectors u with |u & v| = 0 on v's axis, 1 on the other):
  *
- * - with AVX-512BW and up to CARRY_MAX_W words of labels (<= 256 labels,
+ * - with AVX-512BW and up to CARRY_MAX_W words of labels (<= 512 labels,
  *   nearly all searches), the lists carry the label bitsets of their
  *   entries (vw below) and |u & v| is computed from them, 8 entries at a
  *   time (FILTER_CARRY in arrange_core.h); the support filter tests the
@@ -126,18 +130,27 @@ void search_opts_default(search_opts_t *o) {
  * -march=cascadelake: 40% less time on bench/full.txt; without the support
  * filter they were 5% slower, see research/ideas.md).
  * Compile with -DCARRY_MAX_W=0 to always use the matrices.
+ *
+ * The carried path uses exactly the words it needs: W = ceil(L / 64) (at
+ * least 2), and each first row r1 is searched with only the words of the
+ * labels <= its largest label x, the only ones in its subproblem (see
+ * search_root and opts.r1_width). Above 256 labels this replaces the
+ * matrices, which cost x2.7 time and x2.8 nodes on the same r1 at N = 23k
+ * (8-slice MRV, no cross support); below, each extra word cost x1.38 time.
  */
 #ifdef __AVX512BW__
 #ifndef CARRY_MAX_W
-#define CARRY_MAX_W 4
+#define CARRY_MAX_W 8
 #endif
 #else
 #undef CARRY_MAX_W
 #define CARRY_MAX_W 0
 #endif
-#if CARRY_MAX_W > 4
-#error "CARRY_MAX_W is at most 4 (see placedw)"
+#if CARRY_MAX_W > 8
+#error "CARRY_MAX_W is at most 8 (see CARRY_WORDS)"
 #endif
+/* words of the per-depth unions and placed bitsets of the carried path */
+#define CARRY_WORDS 8
 
 #define ROW 0
 #define COL 1
@@ -157,8 +170,13 @@ typedef struct {
   uint64_t *inters0;    /* bit u of row v: u, v disjoint */
   uint64_t *inters1;    /* bit u of row v: |u & v| == 1 */
   uint64_t *has_label;  /* bit v of row x: vector v contains label x */
-  uint64_t *bits;       /* bits[v * W ...]: label bitset of vector v, for
+  uint64_t *bits;       /* bits[v * bw ...]: label bitset of vector v, for
                            v < N, and an empty set for v = N */
+  int bw;               /* words per vector in bits: the width W of the
+                           search, or on the carried path the widest W of
+                           the r1 (the searches at a narrower width read
+                           the first W words, which hold all the labels of
+                           their vectors) */
 
   /* candidate lists, as vector indices ... */
   uint32_t *valid[MAXD][2];
@@ -173,8 +191,8 @@ typedef struct {
   uint32_t cap;
   uint64_t *vw[MAXD][2];
   uint64_t *kidw[MAXD];
-  uint64_t uni[MAXD][2][4];
-  uint64_t placedw[2][SQ_MAX_N][4];
+  uint64_t uni[MAXD][2][CARRY_WORDS];
+  uint64_t placedw[2][SQ_MAX_N][CARRY_WORDS];
   uint64_t *cells[MAXD][2]; /* W words each: union of placed rows / cols */
   uint64_t *cnt[MAXD][2];   /* CNT_WORDS * W words each: number of
                                candidates valid[d][a] through each label
@@ -194,6 +212,12 @@ typedef struct {
   int cross_after;
   uint32_t xs_tick, xs_n, xs_k;
   int stop;
+#ifdef R1_SAMPLE
+  /* r1 sampling (see r1_next) and the per-r1 log */
+  uint32_t smp_stride, smp_off, smp_nlist;
+  uint32_t *smp_list; /* ascending, or NULL */
+  FILE *smp_log;
+#endif
 } sstate_t;
 
 static inline bool bit_get(const uint64_t *row, uint32_t u) {
@@ -537,7 +561,56 @@ static void __attribute__((destructor)) cp_print(void) {
 #define CP_PHASE(l, p)
 #endif
 
-/* instantiate the recursive search for each bitset width */
+/*
+ * r1 sampling (build with -DR1_SAMPLE), for timing sums too large to search
+ * whole: the root loop runs only r1 = off, off + k, off + 2k, ... (env
+ * SAMPLE_STRIDE = k, SAMPLE_OFFSET = off), or only the r1 listed in
+ * SAMPLE_LIST (comma-separated), by their index among all the vectors,
+ * whatever width each r1 is searched at; k times the sampled totals is
+ * unbiased for the sum. SAMPLE_LOG appends one line per r1: r1, its
+ * largest label, the width, squares, nodes, thread CPU seconds.
+ */
+#ifdef R1_SAMPLE
+#include <time.h>
+static double r1_cpu(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+/* the first sampled r1 >= r (UINT32_MAX if none) */
+static uint32_t r1_next(const sstate_t *s, uint32_t r) {
+  if (s->smp_list) {
+    uint32_t lo = 0, hi = s->smp_nlist;
+    while (lo < hi) {
+      const uint32_t mid = (lo + hi) / 2;
+      if (s->smp_list[mid] < r)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+    return lo < s->smp_nlist ? s->smp_list[lo] : UINT32_MAX;
+  }
+  if (r <= s->smp_off)
+    return s->smp_off;
+  return s->smp_off + (r - s->smp_off + s->smp_stride - 1) / s->smp_stride *
+                          s->smp_stride;
+}
+static void r1_log(const sstate_t *s, uint32_t r1, int w, uint64_t nd0,
+                   uint64_t sq0, double c0) {
+  const double c1 = r1_cpu();
+  if (s->smp_log)
+    fprintf(s->smp_log, "%u %u %d %llu %llu %.6f\n", r1,
+            (unsigned)s->lab[r1][0], w,
+            (unsigned long long)(s->squares - sq0),
+            (unsigned long long)(s->nodes - nd0), c1 - c0);
+}
+#define R1_NEXT(s, r) r1_next(s, r)
+#else
+#define R1_NEXT(s, r) (r)
+#endif
+
+/* instantiate the recursive search for each bitset width (the carried path
+ * also for 5-7 words) */
 #define W 2
 #include "arrange_core.h"
 #undef W
@@ -547,6 +620,21 @@ static void __attribute__((destructor)) cp_print(void) {
 #define W 4
 #include "arrange_core.h"
 #undef W
+#if CARRY_MAX_W >= 5
+#define W 5
+#include "arrange_core.h"
+#undef W
+#endif
+#if CARRY_MAX_W >= 6
+#define W 6
+#include "arrange_core.h"
+#undef W
+#endif
+#if CARRY_MAX_W >= 7
+#define W 7
+#include "arrange_core.h"
+#undef W
+#endif
 #define W 8
 #include "arrange_core.h"
 #undef W
@@ -556,6 +644,83 @@ static void __attribute__((destructor)) cp_print(void) {
 #define W 64
 #include "arrange_core.h"
 #undef W
+
+/* the root loop over r1 in [i0, i1) at width w (see SEARCH_ROOT) */
+static void search_root_w(sstate_t *s, int w, uint32_t i0, uint32_t i1) {
+  switch (w) {
+  case 2:
+    search_root_2(s, i0, i1);
+    break;
+  case 3:
+    search_root_3(s, i0, i1);
+    break;
+  case 4:
+    search_root_4(s, i0, i1);
+    break;
+#if CARRY_MAX_W >= 5
+  case 5:
+    search_root_5(s, i0, i1);
+    break;
+#endif
+#if CARRY_MAX_W >= 6
+  case 6:
+    search_root_6(s, i0, i1);
+    break;
+#endif
+#if CARRY_MAX_W >= 7
+  case 7:
+    search_root_7(s, i0, i1);
+    break;
+#endif
+  case 8:
+    search_root_8(s, i0, i1);
+    break;
+  case 16:
+    search_root_16(s, i0, i1);
+    break;
+  default:
+    search_root_64(s, i0, i1);
+    break;
+  }
+}
+
+/* the width of the subproblem of r1 = v: the words up to its largest label
+ * (at least 2, and at least opts.min_words) */
+static inline int r1_words(const sstate_t *s, uint32_t v) {
+  const int w = s->lab[v][0] / 64 + 1, wmin = s->opts.min_words;
+  return w >= wmin && w >= 2 ? w : wmin > 2 ? wmin : 2;
+}
+
+/*
+ * The search, r1 by r1, at width W_ (the width of all the labels). On the
+ * carried path with opts.r1_width, the r1 are searched in runs of equal
+ * width instead: the subproblem of r1 has only the vectors of index > r1
+ * (see SEARCH_ROOT), whose labels are all <= x, the largest label of r1
+ * (the vectors are sorted by their labels, descending), so it needs only
+ * the words up to x, and x falls with r1. Each run fills the lists of depth
+ * 0 (the vectors from its first r1 on) with that many words of their
+ * bitsets. The adaptive cross support's state (cross_after, xs_*) carries
+ * over from one run to the next, so the search makes the same choices,
+ * and visits the same nodes, as at a single width.
+ */
+static void search_root(sstate_t *s, int W_, int carry) {
+  s->nodes = 1;
+  const uint32_t N = s->N;
+  if (!carry || !s->opts.r1_width) {
+    search_root_w(s, W_, 0, N);
+    return;
+  }
+  for (uint32_t i0 = 0, i1; i0 < N && !s->stop; i0 = i1) {
+    const int w = r1_words(s, i0);
+    for (i1 = i0 + 1; i1 < N && r1_words(s, i1) == w; i1++)
+      ;
+#ifdef R1_SAMPLE
+    if (s->smp_log)
+      fprintf(s->smp_log, "# run W %d r1 %u .. %u\n", w, i0, i1);
+#endif
+    search_root_w(s, w, i0, i1);
+  }
+}
 
 /* ---------------------------------------------------------------------- */
 /* setup                                                                   */
@@ -769,7 +934,8 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     qsort(s.lab, count, sizeof(*s.lab), lab_cmp);
   }
 
-  /* bitset width */
+  /* bitset width: on the carried path the words needed, otherwise the next
+   * of the instantiated widths of the matrix path */
   size_t Lw = L > 64 * (size_t)opts->min_words ? L : 64 * (size_t)opts->min_words;
   int W_ = Lw <= 128    ? 2
            : Lw <= 192  ? 3
@@ -777,6 +943,9 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
            : Lw <= 512  ? 8
            : Lw <= 1024 ? 16
                         : 64;
+  if ((Lw + 63) / 64 <= CARRY_MAX_W && W_ > 4)
+    W_ = (int)((Lw + 63) / 64);
+  s.bw = W_;
   s.bits = calloc((count + 1) * W_ + 8, sizeof(uint64_t));
   for (size_t v = 0; v < count; v++)
     for (int p = 0; p < n; p++)
@@ -864,29 +1033,47 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     else
       s.kids[d] = malloc((count + 64) * sizeof(uint32_t));
   }
+#ifdef R1_SAMPLE
+  {
+    const char *es = getenv("SAMPLE_STRIDE"), *eo = getenv("SAMPLE_OFFSET");
+    const char *el = getenv("SAMPLE_LIST"), *lf = getenv("SAMPLE_LOG");
+    s.smp_stride = es ? (uint32_t)strtoul(es, NULL, 10) : 1;
+    if (s.smp_stride < 1)
+      s.smp_stride = 1;
+    s.smp_off = eo ? (uint32_t)strtoul(eo, NULL, 10) % s.smp_stride : 0;
+    if (el && *el) {
+      s.smp_list = malloc((strlen(el) / 2 + 2) * sizeof(uint32_t));
+      for (const char *p = el; *p;) {
+        char *e;
+        const unsigned long r = strtoul(p, &e, 10);
+        if (e == p)
+          break;
+        s.smp_list[s.smp_nlist++] = (uint32_t)r;
+        p = *e == ',' ? e + 1 : e;
+      }
+      for (uint32_t i = 1; i < s.smp_nlist; i++) /* insertion sort */
+        for (uint32_t j = i; j > 0 && s.smp_list[j - 1] > s.smp_list[j]; j--) {
+          const uint32_t t = s.smp_list[j];
+          s.smp_list[j] = s.smp_list[j - 1];
+          s.smp_list[j - 1] = t;
+        }
+    }
+    s.smp_log = lf ? fopen(lf, "a") : NULL;
+    if (s.smp_log)
+      fprintf(s.smp_log, "# N %u L %u W %d carry %d r1_width %d stride %u off %u list %u\n",
+              s.N, s.L, W_, carry, s.opts.r1_width, s.smp_stride, s.smp_off,
+              s.smp_nlist);
+  }
+#endif
   double t1 = wall_time();
 
-  switch (W_) {
-  case 2:
-    search_root_2(&s);
-    break;
-  case 3:
-    search_root_3(&s);
-    break;
-  case 4:
-    search_root_4(&s);
-    break;
-  case 8:
-    search_root_8(&s);
-    break;
-  case 16:
-    search_root_16(&s);
-    break;
-  default:
-    search_root_64(&s);
-    break;
-  }
+  search_root(&s, W_, carry);
 
+#ifdef R1_SAMPLE
+  if (s.smp_log)
+    fclose(s.smp_log);
+  free(s.smp_list);
+#endif
   st.nodes = s.nodes;
   st.squares = s.squares;
   st.truncated = s.stop == 2;

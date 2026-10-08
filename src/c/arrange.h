@@ -51,6 +51,11 @@ typedef struct {
                           other axis through some unmatched cell (default 1:
                           where it pays off, see arrange_core.h; 2: always;
                           needs support) */
+  int r1_width;        /* with carried bitsets, search each first row r1
+                          with only the words of labels <= its largest label
+                          (default 1; 0: every r1 at the width of all the
+                          labels, for testing). The same nodes and squares
+                          either way. */
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);

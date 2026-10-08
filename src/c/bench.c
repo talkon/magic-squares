@@ -4,7 +4,7 @@
  *
  * usage: bench [--repeat K] [--only SUBSTR] [--no-fc] [--no-mrv] [--no-support]
  *              [--no-cross] [--cross] [--update] [--min-words K] [--gather]
- *              [--node-limit X] instances.txt
+ *              [--no-r1-width] [--node-limit X] instances.txt
  *
  * Each instance line is
  *     n | e1 e2 ... | S | expected_squares | expected_hash
@@ -16,7 +16,8 @@
  * observed values filled in.
  *
  * --no-fc, --no-mrv, --no-support, --no-cross, --cross (cross support even
- * where it does not pay off), --min-words and --gather change the search
+ * where it does not pay off), --min-words, --gather and --no-r1-width (every
+ * r1 at the width of all the labels) change the search
  * (to compare variants, or to test the code paths for wider label bitsets
  * or larger N on small instances). --node-limit X stops each search
  * after X nodes (to time instances too large to search completely; the
@@ -73,9 +74,10 @@ int main(int argc, char *argv[]) {
                                          {"node-limit", required_argument, 0, 'L'},
                                          {"no-cross", no_argument, 0, 'x'},
                                          {"cross", no_argument, 0, 'X'},
+                                         {"no-r1-width", no_argument, 0, 'R'},
                                          {0, 0, 0, 0}};
   int opt;
-  while ((opt = getopt_long(argc, argv, "r:o:fmuw:gsL:xX", long_options, NULL)) !=
+  while ((opt = getopt_long(argc, argv, "r:o:fmuw:gsL:xXR", long_options, NULL)) !=
          -1) {
     switch (opt) {
     case 'r':
@@ -108,6 +110,9 @@ int main(int argc, char *argv[]) {
     case 'X':
       opts.cross = 2;
       break;
+    case 'R':
+      opts.r1_width = 0;
+      break;
     case 'L':
       opts.node_limit = strtoull(optarg, NULL, 10);
       break;
@@ -118,7 +123,8 @@ int main(int argc, char *argv[]) {
   if (optind >= argc) {
     fprintf(stderr, "usage: bench [--repeat K] [--only SUBSTR] [--no-fc] "
                     "[--no-mrv] [--no-support] [--no-cross] [--cross] "
-                    "[--update] [--min-words K] [--gather] [--node-limit X] "
+                    "[--update] [--min-words K] [--gather] [--no-r1-width] "
+                    "[--node-limit X] "
                     "instances.txt\n");
     return 2;
   }

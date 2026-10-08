@@ -1279,3 +1279,143 @@ it is not the code's over-alignment: the Debug build (CMakeLists.txt)
 leaves that detection out of GCC's instrumentation
 (`--param=asan-use-after-return=0`, the same as
 `ASAN_OPTIONS=detect_stack_use_after_return=0`).
+
+## Carried bitsets up to 512 labels, each r1 at its own width (October 2026, branch cx/wide)
+
+Part of the "cost per square at large N" study. The profile of that study
+(cx/profile) found two implementation steps on top of the algorithm: above
+256 labels the search fell back to the N x N matrices (8-slice MRV, no
+cross support: x2.7 time and x2.8 nodes on the same r1 at N = 23k), and
+below, each extra 64-bit word of label bitset cost x1.38 time at the same
+nodes. 13 7 4 3 1 1 passes 256 labels at N ~ 25k, and the existence study's
+"local slope 5.2 above N = 2x10^4" was that switch.
+
+What changed (src/c/arrange.c, arrange_core.h):
+
+* The carried path runs up to CARRY_MAX_W = 8 words (512 labels), with W =
+  ceil(L / 64) exactly (instantiations for 5, 6 and 7 words; the matrix
+  path keeps 2, 3, 4, 8, 16, 64 and its own counters, so `-DCARRY_MAX_W=0`
+  builds visit the same nodes as before). The carried code was already
+  generic in W (the rotations of the folded exactly-once test exist for any
+  W since v has <= 8 labels; the bit transpose of COUNT_CARRY, KEEP_CARRY,
+  PAD_LIST and the label reconstruction from placedw work per word); the
+  unions and placed bitsets now hold 8 words. The one W-specific cost was
+  cross support's 8 W accumulators (40 zmm at W = 5): it now builds the U_y
+  4 words at a time, two passes over the other list for 5-8 words (1.6%
+  less time on the min, 7% on the median, on two 5-word r1; the same code
+  for W <= 4).
+* Each r1 is searched with only the words it needs (`opts.r1_width`, on by
+  default; `bench --no-r1-width` turns it off). The vectors are sorted by
+  their labels, descending, and the subproblem of r1 has only the vectors
+  after it, whose labels are all <= x(r1), so the root loop runs in runs of
+  equal width ceil((x + 1) / 64) (at least 2, at least --min-words); each
+  run fills the depth-0 lists from its first r1 on with the first W words
+  of the bitsets (no repacking: `bits` keeps the widest stride). The state
+  of the adaptive cross support carries over from run to run, so the nodes
+  are exactly those of a single width (no node difference anywhere, not
+  only up to the cross adaptivity). The runs of the large sums: S = 2650
+  (279 labels) has r1 0-2233 at 5 words, then 4 words up to 20113, 3 up to
+  29591, 2 to the end; S = 2700 (259 labels) has only 34 r1 at 5 words;
+  S = 2200 (211 labels) only r1 < 1273 at 4 words.
+* `-DR1_SAMPLE`: the root loop runs only the r1 of env SAMPLE_STRIDE /
+  SAMPLE_OFFSET, or SAMPLE_LIST, by global index (whatever their width), and
+  SAMPLE_LOG gets one line per r1 (r1, x, W, squares, nodes, thread CPU
+  seconds) and the runs. The same patch on fdb77fc gave the base binary.
+
+**Cost per word** (`full.txt`, `--min-words`, same 14,958,507 nodes,
+thread CPU, min of 2 alternating runs): 2-8 words cost 3.29, 4.78, 6.51,
+8.01, 9.65, 11.29, 13.09 s, i.e. 1.00, 1.45, 1.98, 2.43, 2.93, 3.43, 3.98:
+the time is within 3% of proportional to the words (+0.5 of the 2-word
+time per word). Nearly all of the per-node work is moving and testing
+carried words, which is why the profile's per-word factor was x1.38.
+
+**Paired measurements** (base fdb77fc and new built alike, -O3
+-march=native -flto; the same r1 in both, thread CPU per r1 from the logs,
+min of 2 alternating runs per r1; shared 4-core Xeon at load 3-10, run to
+run spread up to 5-12%). Squares (and their hashes, rechecked on the r1
+with squares) identical everywhere; nodes identical wherever both binaries
+are on the carried path.
+
+| sum | N | labels | base path | sample | base CPU-s | new CPU-s | base / new | nodes base / new |
+| --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 13 7 4 3 1 1, S = 2650 | 31,743 | 279 | matrices (8 words) | 11 r1: 364, 1564, 2199, 3364 (heavy, < 5,164) + 7 at stride 4096 | 64.66 | 22.80 | **2.84** | 3.33 |
+| (its 3 r1 at 5 words / 5 at 4 words) | | | | | 26.51 / 36.85 | 11.78 / 10.56 | 2.25 / 3.49 | |
+| 13 7 4 3 1 1, S = 2500 | 26,585 | 260 | matrices | stride 5000 (6 r1) | 37.08 | 11.84 | **3.13** | 2.87 |
+| 9 6 4 3 1 1 1 1, S = 2700 | 20,896 | 259 | matrices | stride 800 (26 r1) | 53.28 | 18.58 | **2.87** | 5.14 |
+| d-first V_d at 13 7 4 3 1 1, S = 2650 (`dsample`, \|V_d\| ~ 4.5k) | 4,410-4,557 | 274-279 | matrices | 16 d at stride 2000 | 54.78 | 25.18 | **2.18** (1.93-2.44 per d) | 1.21 |
+| 13 7 4 3 1 1, S = 2400 | 22,992 | 245 | carried, 4 | stride 1600 (15) | 23.06 | 23.04 | 1.00 | = |
+| 12 9 6 2 1 1, S = 3500 | 17,142 | 256 | 4 | stride 1000 (17) | 6.36 | 6.20 | 1.02 | = |
+| 13 7 4 3 1 1, S = 2200 | 15,199 | 211 | 4 | stride 400 (38) | 27.46 | 22.41 | **1.23** | = |
+| 12 6 3 2 1 1, S = 1200 | 11,697 | 199 | 4 | stride 100 (117) | 22.03 | 16.79 | **1.31** | = |
+| 12 6 3 2 1 1, S = 1080 | 8,891 | 179 | 3 | stride 40 (223) | 15.28 | 15.20 | 1.005 | = |
+| 14 7 4 4 1 0 0 1, S = 3231 | 7,901 | 183 | 3 | stride 100 (79) | 3.95 | 3.73 | 1.06 | = |
+| 12 6 3 2 1 1, S = 988 | 6,671 | 159 | 3 | stride 100 (67) | 3.04 | 2.79 | 1.09 | = |
+| `bench/prod.txt` | 1,491-2,994 | 95-121 | 2 | all, 3 alternations | 13.64 | 13.59 | 1.004 | = |
+
+* Above 256 labels the gain is 2.8-3.1x on the plain search (the r1 at 5
+  words 2.2-2.3x, the r1 at 4 words or less 2.8-4.2x) and 2.2x inside the
+  V_d searches, where more of the work is in 5-word r1. Most of it is the
+  algorithm, not the width: 2.9-5.1x fewer nodes in the plain search
+  (1.2x in V_d) with cross support and exact MRV.
+* Below 256 labels the gain is the width ratio of the r1 that hold the
+  work: 4/3 where the heavy r1 need one word less than all the labels
+  (S = 2200: the r1 at 3 words 1.31x; b1200 1.32x), 3/2 for the r1 that
+  drop to 2 words (1.4-1.8x, but they hold little time), and nothing where
+  the heavy r1 need all the words (S = 2400: x(r1) >= 192 for r1 < 8,898).
+* Nothing got slower: at the same width the binaries are within noise
+  (the 4-word r1 of S = 2400 one r1 per process, 5 interleaved rounds:
+  base / new 0.996 in total, -2.4% to +4% per r1 with no consistent sign;
+  prod.txt base / new 1.004 in total, within +-3% per instance).
+
+**Time per sum and cost per square** (stride x sampled CPU; squares from
+the cx/profile study and the existence study, model.md):
+
+| sum | N | base CPU-s | new CPU-s | squares | base s / square | new s / square |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 12 6 3 2 1 1, S = 988 | 6,671 | 304 | 279 | 245 | 1.24 | 1.14 |
+| 14 7 4 4 1 0 0 1, S = 3231 | 7,901 | 395 | 373 | 128 | 3.1 | 2.9 |
+| 12 6 3 2 1 1, S = 1080 | 8,891 | 611 | 608 | 275 | 2.2 | 2.2 |
+| 12 6 3 2 1 1, S = 1200 | 11,697 | 2,200 | 1,680 | 384 | 5.7 | 4.4 |
+| 13 7 4 3 1 1, S = 2200 | 15,199 | 11,000 | 9,000 | 2,533 | 4.3 | 3.5 |
+| 9 6 4 3 1 1 1 1, S = 2700 | 20,896 | 42,600 | 14,900 | 1,600 +- 780 | 27 | 9.3 |
+| 13 7 4 3 1 1, S = 2400 | 22,992 | 36,900 | 36,900 | 2,745 | 13.4 | 13.4 |
+| 13 7 4 3 1 1, S = 2500 | 26,585 | 185,000 (6 r1) | 59,000 | | | |
+| 13 7 4 3 1 1, S = 2650 | 31,743 | ~310,000-340,000 | ~110,000-120,000 | 4,600 +- 3,400 | ~70 | ~25 |
+
+(S = 2650: the existence study's stratified estimate, 342-375k CPU-s on
+its older copy of the code, times 0.9, the fdb77fc / older ratio on the
+three r1 both timed; new = that / 2.84.) Along 13 7 4 3 1 1 the time per
+sum now grows roughly like N^3-3.4 from S = 2400 to 2500 and 2650 (rough:
+those samples have 6-15 r1, and the profile's 29-r1 estimate of S = 2400 is
+42k CPU-s against 37k here), where it was N^5.2 above 2x10^4 with the
+switch to the matrices; so the cost per square at N = 25-32k is ~2.8x below
+the existence study's figures. The
+cost per square still grows with N: this removes an implementation step,
+not the N^1.5-per-(1,2)-node growth of the algorithm (see cx/profile).
+
+What was not done, and why:
+
+* Narrowing within an r1 (a subtree whose lists and unmatched cells no
+  longer touch the top word could run at one word less; the word-major
+  layout makes the narrower lists free): in the heavy r1 of S = 2400 ~20%
+  of the root's candidates have a label in the top word, so it would only
+  apply near the leaves. Relabeling the labels of a node's lists into fewer
+  words would apply at the (2,2) nodes (lists of ~100-150 entries over
+  ~150-200 labels: still 3-4 words), not enough for the relabeling cost.
+* The matrix path stays for more than 512 labels (N well above 30k for the
+  P studied) and for CPUs without AVX-512BW.
+
+Correctness: quick/full/prod identical nodes and hashes with per-r1 width
+on and off and with `--min-words` 4-8 (the carried search is width-
+agnostic); the matrices build (`bench_matrices`) node-identical to fdb77fc's
+on quick/full, also with `--min-words 8` and `--no-cross`; `fuzz_arrange`
+has a mode 7 (planted grids over 257-500 labels; squares land in r1 runs of
+every width 2-8) and variants w5, w6, w7, fixw, w5_fixw, w6_nomrv,
+xcross_w5: 0 fails on 1,000 fresh default seeds and 1,000 fresh mode-7
+seeds (all variants), 300 mode-7 seeds each with the matrices and without
+GFNI / VPOPCNTDQ, `--mode 6` (saturated counters) with w3-w8 and fixw, and
+the ASan debug build on 120 seeds; `ctest -R fast_` passes (new tests:
+`fast_bench_quick_wide5/7`, `wide6_fixed`, `matrices_wide8`,
+`fast_fuzz_arrange_wide`, `fast_fuzz_arrange_matrices_wide`; the gather and
+plain-C cross tests at 8 words now run on `bench_matrices`, since the
+native build carries 8 words).

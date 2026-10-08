@@ -38,23 +38,27 @@
 #define CROSS_TEST CAT(cross_test, W)
 #define CROSS CAT(cross, W)
 #define SUPPORT_AGAIN CAT(support_again, W)
+#define CROSS_CHUNK CAT(cross_chunk, W)
 
-/* the kind of label counters for this width (see arrange.c), and the number
- * of classes of counts used to pick the most constrained cell: exactly 1, 2,
- * ..., NCLASS - 1 candidates, or >= NCLASS */
-#if W <= COUNT_BYTES_MAX_W
+/* whether the candidate lists carry their bitsets (see vw in arrange.c) */
+#if W <= CARRY_MAX_W
+#define CARRY 1
+#endif
+/* the kind of label counters for this width (see arrange.c; COUNT_CARRY
+ * writes byte counters, so the carried path always has them), and the
+ * number of classes of counts used to pick the most constrained cell:
+ * exactly 1, 2, ..., NCLASS - 1 candidates, or >= NCLASS */
+#if W <= COUNT_BYTES_MAX_W || defined(CARRY)
 #define COUNT_BYTES 1
 #define NCLASS 255
 #else
 #define NCLASS NSLICE
 #endif
-/* whether the candidate lists carry their bitsets (see vw in arrange.c) */
-#if W <= CARRY_MAX_W
-#define CARRY 1
-#endif
 
 /* on the matrix path, the cross support filter (CROSS) pays off with the
- * AVX-512 code below and byte counters (up to 256 labels), for n <= 6; in
+ * AVX-512 code below and byte counters (up to 256 labels; with AVX-512BW
+ * the matrix path only has them in builds with -DCARRY_MAX_W=0, since by
+ * default it runs only above 512 labels), for n <= 6; in
  * plain C, or with wider bitsets and bit-sliced counters, it cost ~10% more
  * time than it saved, and for n = 7 (where the search dies further down)
  * 10-25% more, so there it only runs when forced (opts.cross = 2, to test
@@ -673,6 +677,47 @@ CROSS_TEST(const sstate_t *s, uint64_t *fl, uint32_t kf, const uint64_t *Ub,
 }
 
 /*
+ * The U_y of 8 cells (lane j of a word: cell j), words w0 .. w0 + nwc - 1,
+ * from the kh entries of the list hl of axis h: the entries through cell j
+ * are those whose word of base[j] meets B[j]; Ubg + 8 w gets word w of the
+ * U_y, all ones in the lanes of pad. nwc <= CROSS_WC words at a time, so
+ * that the 8 nwc accumulators stay in registers (with 5-8 words of labels,
+ * two passes over hl: 8 W accumulators would not fit).
+ */
+#ifndef CROSS_WC
+#define CROSS_WC 4
+#endif
+static inline __attribute__((always_inline)) void
+CROSS_CHUNK(const uint64_t *hl, size_t cap, uint32_t kh,
+            const uint64_t *const base[8], const __m512i B[8], const int w0,
+            const int nwc, __mmask8 pad, uint64_t *Ubg) {
+  __m512i acc[8][CROSS_WC];
+#pragma GCC unroll 8
+  for (int j = 0; j < 8; j++)
+#pragma GCC unroll 8
+    for (int v = 0; v < nwc; v++)
+      acc[j][v] = _mm512_setzero_si512();
+  for (uint32_t i = 0; i < kh; i += 8) {
+    __m512i x[CROSS_WC];
+    for (int w = 0; w < nwc; w++)
+      x[w] = _mm512_loadu_si512(hl + (w0 + w) * cap + i);
+    for (int j = 0; j < 8; j++) {
+      const __mmask8 m =
+          _mm512_test_epi64_mask(_mm512_loadu_si512(base[j] + i), B[j]);
+      for (int w = 0; w < nwc; w++)
+        acc[j][w] = _mm512_mask_or_epi64(acc[j][w], m, acc[j][w], x[w]);
+    }
+  }
+  for (int w = 0; w < nwc; w++) {
+    __m512i a[8];
+    for (int j = 0; j < 8; j++)
+      a[j] = acc[j][w];
+    _mm512_store_si512(Ubg + 8 * (w0 + w),
+                       _mm512_mask_set1_epi64(or_lanes8(a), pad, -1));
+  }
+}
+
+/*
  * One cross pass on carried lists: drops the candidates of axis f that
  * miss U_y for some unmatched cell y of the placed vectors of axis f, and
  * those meeting bad (the support filter's test, for free), in place; sets
@@ -709,7 +754,7 @@ static inline uint32_t CROSS_AXIS(sstate_t *s, int d, int f,
     _mm512_storeu_si512(hl + w * cap + kh, _mm512_setzero_si512());
   for (int g = 0; g < ng; g++) {
     const uint64_t *base[8];
-    __m512i B[8], acc[8][W];
+    __m512i B[8];
 #pragma GCC unroll 8
     for (int j = 0; j < 8; j++) {
       /* cell 8 g + j: its word w and bit */
@@ -735,29 +780,16 @@ static inline uint32_t CROSS_AXIS(sstate_t *s, int d, int f,
 #endif
       base[j] = hl + w * cap;
       B[j] = _mm512_set1_epi64((long long)bit);
-#pragma GCC unroll 8
-      for (int v = 0; v < W; v++)
-        acc[j][v] = _mm512_setzero_si512();
-    }
-    for (uint32_t i = 0; i < kh; i += 8) {
-      __m512i x[W];
-      for (int w = 0; w < W; w++)
-        x[w] = _mm512_loadu_si512(hl + w * cap + i);
-      for (int j = 0; j < 8; j++) {
-        const __mmask8 m =
-            _mm512_test_epi64_mask(_mm512_loadu_si512(base[j] + i), B[j]);
-        for (int w = 0; w < W; w++)
-          acc[j][w] = _mm512_mask_or_epi64(acc[j][w], m, acc[j][w], x[w]);
-      }
     }
     const __mmask8 pad =
         ny - 8 * g >= 8 ? 0 : (__mmask8)(0xff << (ny - 8 * g));
-    for (int w = 0; w < W; w++) {
-      __m512i a[8];
-      for (int j = 0; j < 8; j++)
-        a[j] = acc[j][w];
-      _mm512_store_si512(Ub + 8 * W * g + 8 * w,
-                         _mm512_mask_set1_epi64(or_lanes8(a), pad, -1));
+    _Static_assert(W <= 2 * CROSS_WC, "CROSS_AXIS: at most two chunks");
+    if (W <= CROSS_WC) {
+      CROSS_CHUNK(hl, cap, kh, base, B, 0, W, pad, Ub + 8 * W * g);
+    } else {
+      CROSS_CHUNK(hl, cap, kh, base, B, 0, CROSS_WC, pad, Ub + 8 * W * g);
+      CROSS_CHUNK(hl, cap, kh, base, B, CROSS_WC, W - CROSS_WC, pad,
+                  Ub + 8 * W * g);
     }
   }
   uint64_t *fl = s->vw[d][f];
@@ -1357,15 +1389,24 @@ static void SEARCH_REC(sstate_t *s, int d) {
  * MRV branches on x at depth 1 for ~95% of the r1 that survive; always
  * branching on x there (choosing c1 right after r1) is no better (+0.1%
  * nodes; +2% with labels by plain frequency, where MRV picks x ~75% of the
- * time). */
-static void SEARCH_ROOT(sstate_t *s) {
-  s->nodes = 1;
-  uint32_t count = s->N;
+ * time).
+ *
+ * This runs the r1 in [i0, i1) (those sampled, with R1_SAMPLE): their lists
+ * at depth 0 are the vectors from i0 on, which on the carried path have
+ * all their labels in the first W words of their bitsets (bits has s->bw
+ * >= W words per vector, see search_root in arrange.c); the matrix path
+ * always runs [0, N) at W = s->bw. */
+static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
+  const uint32_t count = s->N;
+  const uint64_t bw = (uint64_t)s->bw;
+  const uint32_t first = R1_NEXT(s, i0);
+  if (first >= i1)
+    return;
   for (int a = 0; a < 2; a++) {
 #ifdef CARRY
-    for (uint32_t i = 0; i < count; i++)
+    for (uint32_t i = i0; i < count; i++)
       for (int w = 0; w < W; w++)
-        s->vw[0][a][w * s->cap + i] = s->bits[(uint64_t)i * W + w];
+        s->vw[0][a][w * s->cap + i] = s->bits[i * bw + w];
     PAD_LIST(s, s->vw[0][a], count);
 #else
     for (uint32_t i = 0; i < count; i++)
@@ -1378,8 +1419,16 @@ static void SEARCH_ROOT(sstate_t *s) {
 #if defined(CHILD_PROF) && defined(CARRY)
   const uint64_t cp_t0 = __rdtsc();
 #endif
-  for (uint32_t r1 = 0; r1 < count && !s->stop; r1++)
-    TRY_CHILD(s, 0, ROW, s->bits + (uint64_t)r1 * W, r1, r1 + 1);
+  for (uint32_t r1 = first; r1 < i1 && !s->stop; r1 = R1_NEXT(s, r1 + 1)) {
+#ifdef R1_SAMPLE
+    const uint64_t nd0 = s->nodes, sq0 = s->squares;
+    const double c0 = r1_cpu();
+#endif
+    TRY_CHILD(s, 0, ROW, s->bits + r1 * bw, r1, r1 + 1);
+#ifdef R1_SAMPLE
+    r1_log(s, r1, W, nd0, sq0, c0);
+#endif
+  }
 #if defined(CHILD_PROF) && defined(CARRY)
   cp_total += __rdtsc() - cp_t0;
 #endif
@@ -1403,6 +1452,7 @@ static void SEARCH_ROOT(sstate_t *s) {
 #undef CROSS_TEST
 #undef CROSS
 #undef SUPPORT_AGAIN
+#undef CROSS_CHUNK
 #undef TRY_CHILD_INLINE
 #undef CROSS_SIMD
 #undef COUNT_BYTES
