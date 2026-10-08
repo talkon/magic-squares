@@ -1366,6 +1366,9 @@ int main(int argc, char **argv) {
       o.min_words = V->min_words;
       o.gather = V->gather;
       o.cross = V->cross;
+      o.r1_width = !V->fixw;
+      if (V->pretest)
+        o.pretest_min = V->pretest > 0 ? V->pretest : 0;
       fails += dfirst_check(seed, &l, &o, V->name, (int)(seed / NVAR % 2));
       total_sq += oracle_out.k;
       inst_with_sq += oracle_out.k > 0;
