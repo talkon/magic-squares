@@ -15,3 +15,10 @@ is reclaimed. Each directory under patches/ applies with `git am`:
 Notes: complexity-profile.md (where the N^4 comes from), complexity-study.md
 (ideas, picks, prototype measurements, verifier reports),
 scheduler-v2-design.md (designs and the merged plan).
+
+data/all_records.tsv.xz: every distinct msearch output record of this
+session's runs (172,701 sum records, 11,547 square records, done/dchunk/dsum
+records), one per line as `source-file<TAB>json`, deduplicated by line. The
+source path tells which run a record came from (e.g. collect/ = the 36 seed
+P, forecast/state/units/ = the scheduler's 40 units, existence/ = large-N
+and sampled runs; sampled runs only searched every k-th first row).
