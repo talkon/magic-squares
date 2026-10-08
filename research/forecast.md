@@ -1,5 +1,14 @@
 # How much CPU time to find a 6x6 magic square? (October 2026)
 
+> **Superseded in part by [existence.md](existence.md) (8 October).** This
+> forecast is what the scheduler, with its fitted model and candidate pool,
+> would collect. The existence study's analytic model (tested to N = 45k)
+> shows that model rates large-N sums 5x (N = 5-8k) to ~1000x (N = 15-32k)
+> too low in squares per sum, and that the pool omits
+> exponent orders that are not non-increasing. With an ideal choice of
+> (P, S), the current build is expected to find 0.16 magic squares in 1
+> CPU-year, 0.34 in 10 and 0.64 in 100 (x/÷2), about 10x more than below.
+
 Expected number E(C) of magic (SP+SP) squares found after C CPU-hours of the
 current search (5.7x faster than at the start of October; single core),
 scheduled greedily by predicted magic squares per CPU-second. Made with the

@@ -146,20 +146,33 @@ from the faster search and from staying close to S_min.
 That pace cannot be kept up: every P has only a short stretch of good sums,
 so the rate falls as the best ones are used up. The figure quoted here
 earlier ("40-65 CPU-years per magic square") was the starting rate, not the
-time to a first magic square. [research/forecast.md](research/forecast.md)
-has a long-horizon forecast with the current, ~6x faster search, checked
-independently. Central estimates of the expected number of magic squares E:
+time to a first magic square.
 
-| CPU time | 1000 h | 1 CPU-yr | 10 CPU-yr | 100 CPU-yr |
-|---|---:|---:|---:|---:|
-| E | ~0.009 | 0.015-0.018 | 0.03-0.045 | 0.05-0.12 |
+[research/existence.md](research/existence.md) estimates how many 6x6
+magic squares there should be at all. It uses an analytic heuristic (exact
+exponent-matrix counts and a local limit theorem), calibrated on the search
+data and tested on data it was not fitted to, up to N = 45k vectors per sum.
 
-That is a few percent chance at 10 CPU-years. Two cheap measurements would
-narrow these estimates:
-- the rate of SP traversals near S_min, which enters squared and is known
-  from only 14 events;
-- how squares and time scale for sums with N > 5,000, where the scheduler's
-  model has no data and undervalues them 10-60x.
+* A 6x6 magic square very probably exists (~0.95, if nothing structural
+  forbids it, as for n = 3 and 4). The smallest magic sum is ~2,800
+  (10-90%: ~1,500 to 6,000-10,000), at P with 5-15k divisors and sums with
+  N ~ 3k-32k vectors. The expected total is finite, ~4.6 (68%: 2.2-13).
+* Expected magic squares found with the current build and an ideal choice of
+  (P, S): **0.16 in 1 CPU-year, 0.34 in 10, 0.64 in 100, 1.1 in 1,000**
+  (68% band x/÷2). Everything searched so far holds ~0.005.
+* The scheduler as fitted would collect about 10x less
+  ([research/forecast.md](research/forecast.md): 0.015-0.018 in 1 CPU-year).
+  Its model of squares per sum stops growing at N ~ 5,500 (it predicts 88
+  squares where 484 were found at N = 5-8k, and 0.08 where 60 were found at
+  N = 15-32k), and its pool omits exponent orders that are not
+  non-increasing, which hold more than half of the yield.
+* Speedups are best compared by the ratio of E at a fixed budget: 10x faster
+  gives x2.2 at 1 CPU-year and x1.5 at 1,000; time ~ N^2 instead of ~N^4
+  beyond N = 4,000 gives x1.1 and x1.7.
+
+[research/calibration.md](research/calibration.md) checks the per-square
+part of the heuristic rung by rung (S, P, S+S, S+P, P+P, SP) on the 7,021
+squares found so far: it lines up within errors.
 
 ## Directory structure
 
