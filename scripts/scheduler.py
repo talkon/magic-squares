@@ -73,7 +73,9 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23)
+# the primes msearch / enumerate accept (ENUM_PRIMES in src/c/enumerate.h;
+# len(PRIMES) == ENUM_MAX_PRIMES, checked by test_scheduler.py)
+PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29)
 NUM_DIAG_PAIRS = {5: 15 * 120 // 2, 6: 5400, 7: 105 * 5040 // 2}
 NUM_TRAVERSALS = {5: 120, 6: 720, 7: 5040}
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
