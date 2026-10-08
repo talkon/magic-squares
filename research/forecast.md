@@ -74,6 +74,13 @@ numbers below are what they found.
   data.
 * The central rows above use: fresh-P ~0.6, rho 2.6, pair 1.1, clamped tau, and
   measured large-N growth to N ~ 10,000.
+* **Per-square check (`research/calibration.md`).** A heuristic computed
+  from each found square's 36 entries predicts its S, P, S+P, P+P and SP
+  counts within errors over 7,021 squares, and the sub-events (some
+  coordinates of a diagonal or pair pinned) test the pair factor below the
+  magic rung. On the sched40 squares it puts P(magic | square) at about
+  0.75x (0.6-0.9x) the central assumption above, so the 10 CPU-year value
+  becomes about 0.02-0.035.
 
 ## What would change the answer, and how to measure it cheaply
 

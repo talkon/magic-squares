@@ -27,7 +27,8 @@ python3 scripts/scheduler.py report
 ```
 
 `./build.sh t` runs the tests (`ctest -R fast_` for just the fast ones, and
-`python3 scripts/test_scheduler.py` for the scheduler).
+`python3 scripts/test_scheduler.py` for the scheduler, `python3
+scripts/test_calibrate.py` for the calibration ladder).
 
 ## Programs
 

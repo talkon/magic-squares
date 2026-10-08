@@ -130,4 +130,7 @@ find_package(Python3 COMPONENTS Interpreter)
 if (Python3_FOUND)
   add_test(NAME fast_scheduler COMMAND ${Python3_EXECUTABLE}
     ${PROJECT_SOURCE_DIR}/scripts/test_scheduler.py)
+  # the calibration ladder (scripts/calibrate.py, research/calibration.md)
+  add_test(NAME fast_calibrate COMMAND ${Python3_EXECUTABLE}
+    ${PROJECT_SOURCE_DIR}/scripts/test_calibrate.py)
 endif()
