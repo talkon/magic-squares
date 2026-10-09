@@ -24,7 +24,10 @@ P, forecast/state/units/ = the scheduler's 40 units, existence/ = large-N
 and sampled runs; sampled runs only searched every k-th first row).
 
 Round 2 (complexity of the d-first search; patches against be625d8):
-c2-classsup (class-matching support in V_d, verified: 0.66x CPU at N >= 20k),
-c2-star (star cover of the d loop, verified: 1.045-1.065x), c2-classhall
-(pair rules: no-go, docs only), c2-profile and c2-vdclass (instrumentation),
-c2-partner (partner pruning: negative). Profile: complexity-dfirst-profile.md.
+c2-classhall (the instrumentation of the pair-rules no-go), c2-profile and
+c2-vdclass (instrumentation), c2-partner (partner pruning: negative).
+Profile: complexity-dfirst-profile.md. c2/classsup (class-matching support
+in V_d, verified: 0.66x CPU at N >= 20k), c2/star (star cover of the d loop,
+verified: 1.045-1.065x) and c2/classhall's write-up (pair rules: no-go) have
+since been integrated (branch integ/round2: research/ideas.md, "Integration
+of the round-2 d-first changes"), so their patches are gone from here.
