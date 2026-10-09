@@ -267,11 +267,35 @@ def test_cli_weighted(tmp):
                                 "squares": 1}) + "\n")
             f.write(json.dumps(r) + "\n")
     r0 = SQUARES[0]
+
+    def sp_dvec(r):
+        """the numbers of the square's (only) SP traversal"""
+        G = np.array(r["grid"]).reshape(-1)
+        Pint = 1
+        for p_, e in zip(C.PRIMES, r["P"]):
+            Pint *= int(p_) ** int(e)
+        for cells in C.CELLIDX:
+            v = [int(x) for x in G[cells]]
+            if sum(v) == r["S"] and np.prod(np.array(v, dtype=object)) == Pint:
+                return v
+        raise AssertionError("no SP traversal")
+
+    r1 = SQUARES[1]
+    non_sp = [int(x) for x in np.array(r1["grid"]).reshape(-1)[C.CELLIDX[0]]]
     with open(os.path.join(units, "dfirst.jsonl"), "w") as f:
-        d = dict(SQUARES[1], type="dsquare", d=7, dvec=[1, 2, 3, 4, 5, 6], set_count=1, magic=0, partner=0)
-        f.write(json.dumps(d) + "\n")
-        f.write(json.dumps({"type": "dsum", "mode": "dfirst", "n": 6, "P": SQUARES[1]["P"], "S": SQUARES[1]["S"],
-                            "nvecs_raw": 1500, "d_stride": 4, "pairs": 1}) + "\n")
+        # (a) the SP+S square, at its SP diagonal: own level SP+S
+        f.write(json.dumps(dict(r1, type="dsquare", d=7, dvec=sp_dvec(r1), set_count=1, magic=0, partner=0)) + "\n")
+        # (b) the same square at a d that is not an SP diagonal of it: judged on its own d
+        f.write(json.dumps(dict(r1, type="dsquare", d=9, dvec=non_sp, set_count=1, magic=0, partner=0)) + "\n")
+        f.write(json.dumps({"type": "dsum", "mode": "dfirst", "n": 6, "P": r1["P"], "S": r1["S"],
+                            "nvecs_raw": 1500, "d_stride": 4, "pairs": 2}) + "\n")
+        # (c, d) one "magic" square (flagged) found at both of its SP diagonals: one square, not two;
+        # its run was killed before the dsum, so the d stride (2) comes from the dchunk record
+        for d_ in (3, 11):
+            f.write(json.dumps(dict(r0, type="dsquare", d=d_, dvec=sp_dvec(r0), set_count=1, magic=1, partner=1,
+                                    hash="ffffffffffffffff")) + "\n")
+        f.write(json.dumps({"type": "dchunk", "n": 6, "P": r0["P"], "S": r0["S"], "d_lo": 0, "d_hi": 256,
+                            "d_stride": 2, "d_offset": 1, "nvecs_raw": 1600}) + "\n")
         f.write(json.dumps(dict(r0, type="csquare", weight=5)) + "\n")
         f.write(json.dumps({"type": "csum", "mode": "calib", "n": 6, "P": r0["P"], "S": r0["S"],
                             "nvecs_raw": 1600, "r1_stride": 5, "squares": 1, "est_squares": 5}) + "\n")
@@ -294,8 +318,13 @@ def test_cli_weighted(tmp):
         assert abs(E - ov["S"]["obs"]) < 1e-9        # the null reproduces the (weighted) S rung
         assert ("event_scale" in ov["S"]["pred"]["regression"]) == (w0 != 1)
         ds = d["dsquares"]
-        assert ds["pairs"] == 1 and ds["est_pairs"] == 4 and ds["by_best_score"] == {"SP+S": 1}, ds
-        assert ds["est"]["SP+S"] == 4 and ds["recomputed"]["SP"] == 1
+        assert ds["pairs"] == 4 and ds["est_pairs"] == 4 + 4 + 2 + 2 and ds["squares"] == 2, ds
+        assert ds["by_best_score"] == {"SP+S": 2, "SP+P": 2}, ds          # whole-square best pair
+        assert ds["d_not_sp"] == 1 and ds["by_own_d"] == {"SP": 0, "SP+S": 1, "SP+P": 2, "SP+SP": 0}, ds
+        nS, nP = ds["partner_pairs"]["SP+S"], ds["partner_pairs"]["SP+P"]
+        assert nS >= 1 and nP >= 2 and nP % 2 == 0, ds
+        assert ds["est_partner_pairs"]["SP+S"] == 4 * nS and ds["est_partner_pairs"]["SP+P"] == 2 * nP, ds
+        assert ds["magic_squares"] == 1 and ds["est_magic_squares"] == 2, ds  # deduped by hash; (2 + 2) / 2
         with open(os.path.join(out, "per_square.jsonl")) as f:
             ws = {json.loads(line)["hash"]: json.loads(line)["weight"] for line in f}
         assert ws[r0["hash"]] == w0 and all(ws[r["hash"]] == 1 for r in SQUARES[1:])
