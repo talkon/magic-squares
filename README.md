@@ -264,13 +264,18 @@ sums (N = 451-31,743):
 | a72cef3 (+ support filter) | 1/6.5 | 0.11 | 0.48 |
 | 2d2bc6d (+ carried bitsets) | 1/11-1/13 | 0.14 | 0.58 |
 | fdb77fc | 1/17-1/18 | 0.16 | 0.64 |
+| current (engine 3), plain and d-first | 1/21 (E = 0.1) to 1/43 (E = 1) | 0.17 | 0.76 |
 
-The current code (cx/integrated, msearch engine 3: the "Large sums" table
-above) has not been put through this model yet; it is 1.1-3.8x faster than
-fdb77fc at N >= 4k with the plain search and 1.5-12x with the better of
-the plain and d-first modes, so its row would be higher, mostly at large N. The
-forecasts above also predate it (and scheduler v2's time law has to learn
-engine 3's level first): re-run `forecast` after the engine bump. The
+The current code (msearch engine 3: the "Large sums" table above) is
+1.1-3.8x faster than fdb77fc at N >= 4k with the plain search and 1.5-12x
+with the better of the plain and d-first modes. Its row assumes plain below
+N = 5,000, d-first above, and a calibration stream costing 10% of each
+d-first sum (retrospective.md section 7). It lowers the exponent of N
+(t ~ N^3.5 against N^4.5), so the gain grows with the budget: E x1.11 at 1
+CPU-year, x1.24 at 1,000, and 2.3x less CPU to reach E = 1. Scheduler v2
+does not launch d-first units yet, so for now only the plain part applies
+(x1.07). Its time law also has to learn engine 3's level first: re-run
+`forecast` after some engine-3 units. The
 17-18x is measured speed; E at a fixed budget grows only ~3x because
 E(C) rises slowly with C. Search strategy multiplies with it: the first
 search's expected yield (1.1 CPU-years with the legacy code) is reached in

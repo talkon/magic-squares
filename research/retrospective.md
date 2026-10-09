@@ -335,6 +335,192 @@ A skeptical review checked the builds, the timings, the fits and the arithmetic.
 
   No table value changed.
 
+## 7. The integrated build: re-forecast (2026-10-09)
+
+The integrated build (cx/integrated, e49934c) combines three prototypes:
+
+* cx/wide: carried bitsets up to 512 labels, and per-r1 widths.
+* cx/pretest: the count-only pretest.
+* cx/dfirst: `msearch --diag-first`.
+
+The later fixes (86ea201-ccb9328) leave the native search times unchanged. The top-label rule
+changes only matrix builds, and the bench files run at 0.96-1.03x fdb77fc's time.
+
+The build is added here as one more version: t_new(N) = R_new(N) x the existence time model, as
+in §3. Everything else is unchanged: `frontier_rev.py`'s segments, its factors, m = 2.7 and the
+ideal order. fdb77fc still reproduces T1 exactly (0.156 / 0.338 / 0.641 / 1.09, and 39 / 650 /
+58,700 CPU-years).
+
+### 7.1 Bottom line
+
+* **At a fixed budget, E grows x1.11 / 1.14 / 1.19 / 1.24 at 1 / 10 / 100 / 1,000 CPU-years**
+  (T10). These ratios do not depend on F.
+  * The gain grows with the budget, because the build lowers the exponent of N rather than the
+    level. Measured, the best mode goes like N^3.5 and fdb77fc like N^4.5.
+  * From 100 to 1,000 CPU-years it is worth as much as existence.md §6's "t ~ N^3 beyond
+    N = 4,000" (x1.21 / x1.25). At 100 CPU-years it equals a uniform 2x (x1.19).
+* **The CPU needed to reach a given E shrinks 1.0x at E = 0.03, 1.2x at 0.1, 1.5x at 0.3, 2.3x
+  at 1 and 5.6x at 2** (T10).
+  * At E <= 0.03 the frontier sits at N ~ 2-3k. Nothing changed there: those sums have <= 128
+    labels and run the plain search.
+  * At E = 1 the factor is 1.9-4.7x across the analytic model's corners and m = 2.0 (T11). It
+    depends on the density model only through the N where the frontier sits.
+* **Absolute numbers** (central; F is x/÷2 at 68%):
+  * E = 0.17 / 0.39 / 0.76 / 1.35 at 1 / 10 / 100 / 1,000 CPU-years.
+  * E = 1 needs 23 / 280 / 10,000 CPU-years at F = 2 / 1 / 0.5, against 39 / 650 / 59,000 for
+    fdb77fc. At 90% (F = 3.2 to 1/3.2) the range is 5 to 9x10^6, against 8 to 8x10^7.
+  * E(C) now rises 0.21 / 0.38 / 0.59 / 0.64 per decade of CPU from 1 to 10^4 CPU-years
+    (fdb77fc: 0.18 / 0.30 / 0.45 / 0.52).
+* **From E ~ 0.3 upwards, most of the gain is the d-first mode.**
+  * The plain search alone (cx/wide + cx/pretest) gives x1.05-1.10 in E and 1.2-1.3x in CPU
+    at E = 0.1-1. Per sum it runs at 0.73-0.89x fdb77fc's time at N = 6.7-23k with <= 256
+    labels, and at 0.26x above 256 labels.
+  * d-first on top of that saves 1.0 / 1.2 / 1.8 / 2.3x CPU at E = 0.1 / 0.3 / 1 / 2.
+* **Since the first search's code**, the CPU to reach E = 0.03 / 0.1 / 0.3 / 1 shrank
+  17 / 21 / 27 / 43x (fdb77fc: 16-18x, T2). E at 1 CPU-year grew x3.4 (fdb77fc: x3.1).
+* **The cost per expected magic square now grows ~N^2.8-3.2**, i.e. x7-9 per octave of N from
+  2k to 32k. For fdb77fc it was N^3.1-4.6, i.e. x9-24 per octave (T12).
+* **Where the frontier is.** The E-weighted N of the sums taken is 3.2k / 4.4k / 6.3k / 9.0k at
+  1 / 10 / 100 / 1,000 CPU-years (fdb77fc: 3.0 / 4.1 / 5.6 / 7.5k).
+  * At E = 1, sums with more than 256 labels hold 5% of the frontier's E and 13% of its CPU.
+  * At E = 2 they hold 28% of the E and 62% of the CPU.
+
+### 7.2 R_new(N)
+
+* **Input.** The perf verifier's 13 sums (research/ideas.md, "Measurements on the integrated
+  binary"):
+  * process CPU per sum;
+  * the plain search paired with fdb77fc on identical r1, the per-r1 minimum of 2 alternating
+    runs;
+  * d-first d-sampled;
+  * relSE <= 8%.
+* **Mode.** msearch's default policy: plain below N = 5,000 (`--diag-first-min-n`), d-first at
+  N >= 5,000.
+  * The crossover is at 3.8-4.9k.
+  * At 4.1k the plain search is at 0.663x fdb77fc and d-first at 0.83x.
+* **Calibration stream.** d-first writes no semi-magic squares, but the scheduler's models need
+  them.
+  * Assumed: every d-first sum also runs `--calib-r1-stride k`, which costs **10% of the sum's
+    CPU**.
+  * That is a stride k ~ 9 / (d-first / plain), i.e. k ~ 15-30. It yields ~1/20 of the sum's
+    semi-magic squares, ~50 at the frontier's ~10^3 per sum.
+  * The stream finds no extra magic squares, because d-first finds them all. It is pure
+    overhead: t = t_dfirst / 0.9 at N >= 5,000.
+  * Streams costing 0 / 5 / 20% are in T11.
+* **Construction**, as in part 1:
+  * At <= 256 labels: per-bin geometric-mean knots (1-2k, 2-3.1k, 3.1-5.5k, 5.5-10k, 10-25k),
+    linear in ln N. The knot at N = 758 is the bench ratio, 0.99.
+  * Beyond the last knot (16.9k): the ratio's power-fit slope over N >= 3k (-0.51 ± 0.08,
+    residual sd 0.13), flat beyond 10^5.
+  * Above 256 labels: the geometric mean of the three measured sums, 0.093 (0.084 / 0.114 /
+    0.085 at N = 20.9k / 26.6k / 31.7k), held flat.
+  * The two are blended by the share of sums with more than 256 labels at each N (§3).
+
+| N | 2k | 3k | 4k | 5k | 7k | 10k | 15k | 20k | 25k | >= 32k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| R_new, <= 256 labels (best mode + stream) | 1.01 | 0.98 | 0.69 | 0.68 | 0.59 | 0.49 | 0.40 | 0.34 | 0.31 | 0.27 |
+| R_new, > 256 labels | 0.104 | | | | | | | | | 0.104 |
+| share of sums with > 256 labels | 0 | 0 | 0 | 0 | 0 | 0.01 | 0.11 | 0.51 | 0.91 | 1 |
+| **R_new used** (blend) | 1.01 | 0.98 | 0.69 | 0.68 | 0.59 | 0.49 | 0.37 | 0.22 | 0.12 | 0.104 |
+| plain only, used (> 256 labels: 0.26) | 1.01 | 0.98 | 0.69 | 0.73 | 0.87 | 0.84 | 0.75 | 0.53 | 0.31 | 0.26 |
+
+### 7.3 Tables
+
+**T9. Key table** (analytic model, ideal frontier, all assignments, as T1)
+
+| version | speed-up vs legacy at N = 2k / 10k / 30k extrapolated (> 256 labels) | E(1 CPU-yr) | E(10) | E(100) | E(1,000) | CPU-yr for E = 1 at F = 2 / **1** / 0.5 | marginal CPU-yr per magic square at 1 / 100 CPU-yr; at E = 1 |
+|---|---|---|---|---|---|---|---|
+| legacy | 1 / 1 / 1 (1) | 0.051 | 0.126 | 0.282 | 0.546 | 710 / **12,000** / 760,000 | 49 / 1,100; 53,000 |
+| fdb77fc | 17.0 / 19.0 / 20.6 (10.4) | 0.156 | 0.338 | 0.641 | 1.095 | 39 / **650** / 59,000 | 17 / 620; 2,900 |
+| integrated, plain only | 16.9 / 22.5 / 25.1 (40) | 0.169 | 0.360 | 0.676 | 1.169 | 32 / **500** / 24,000 | 16 / 580; 2,100 |
+| **integrated, best mode** | 16.9 / 38.6 / 74 (100) | **0.173** | **0.387** | **0.763** | **1.353** | 23 / **280** / 10,000 | 15 / 470; 1,100 |
+
+* The best mode's speed-ups include the 10% stream. The value in parentheses is the > 256-label
+  ratio (for the integrated build, the geometric mean of its three such sums). The 30k column is
+  extrapolated, as in T1.
+* The CPU for E = 1 at F is the central curve's C(E = 1/F). At F = 2 it is therefore the
+  E = 0.5 column of T10, and at F = 0.5 the E = 2 column.
+
+**T10. Ratios that do not depend on F**
+
+| | E_v / E_fdb77fc at C = 1 | 10 | 100 | 1,000 | 10^4 CPU-yr | C_fdb77fc / C_v at E = 0.03 | 0.1 | 0.3 | 0.5 | 1 | 2 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **integrated, best mode** | **1.11** | **1.14** | **1.19** | **1.24** | 1.23 | 1.02 | **1.21** | **1.49** | 1.69 | **2.34** | 5.6 |
+| integrated, plain only | 1.08 | 1.07 | 1.05 | 1.07 | 1.10 | 1.02 | 1.19 | 1.24 | 1.22 | 1.31 | 2.5 |
+| d-first on top (best / plain only) | 1.03 | 1.07 | 1.13 | 1.16 | 1.12 | 1.00 | 1.01 | 1.20 | 1.38 | 1.79 | 2.3 |
+| legacy -> integrated (x legacy) | 3.40 | 3.07 | 2.71 | 2.48 | 2.07 | 16.6 | 21.0 | 26.8 | 31.0 | 42.7 | 73 |
+| legacy -> fdb77fc (T2) | 3.06 | 2.68 | 2.28 | 2.01 | 1.67 | 16.4 | 17.4 | 18.0 | 18.4 | 18.2 | 13.0 |
+| for scale: 2x faster at all N (existence.md §6) | 1.28 | 1.22 | 1.19 | 1.14 | 1.10 | 2 | 2 | 2 | 2 | 2 | 2 |
+| for scale: t ~ N^3 beyond N = 4,000 (§6) | 1.04 | 1.11 | 1.21 | 1.25 | 1.27 | | | | | | |
+
+**T11. Sensitivity** (one setting changed at a time)
+
+| variant | E_new / E_fdb77fc at 1 / 100 / 1,000 CPU-yr | C_fdb77fc / C_new at E = 0.1 / 0.3 / 1 / 2 | CPU-yr for E = 1 (F = 1): fdb77fc -> new |
+|---|---|---|---|
+| central (stream 10%, > 256-label ratio flat) | 1.11 / 1.19 / 1.24 | 1.21 / 1.49 / 2.34 / 5.6 | 650 -> 280 |
+| calibration stream 0% | 1.13 / 1.22 / 1.26 | 1.21 / 1.58 / 2.59 / 6.2 | 650 -> 250 |
+| stream 5% | 1.12 / 1.21 / 1.25 | 1.21 / 1.53 / 2.47 / 5.9 | 650 -> 260 |
+| stream 20% | 1.10 / 1.16 / 1.21 | 1.21 / 1.40 / 2.10 / 5.0 | 650 -> 310 |
+| 3.1-5.5k knot 0.80 instead of 0.663 | 1.08 / 1.18 / 1.23 | 1.12 / 1.39 / 2.31 / 5.6 | 650 -> 280 |
+| <= 256-label ratio flat beyond 16.9k | 1.11 / 1.19 / 1.23 | 1.21 / 1.49 / 2.33 / 5.5 | 650 -> 280 |
+| > 256-label ratio keeps the N slope (-0.51) | 1.11 / 1.19 / 1.23 | 1.21 / 1.49 / 2.33 / 5.9 | 650 -> 280 |
+| above 32k, the new code's own slope 3.53 instead of the matrix path's 5.2 | 1.11 / 1.19 / 1.24 | 1.21 / 1.49 / 2.34 / 6.0 | 650 -> 280 |
+| the verifier's time fits as the ratio: 0.93 (N/4000)^-0.96 | 1.05 / 1.22 / 1.24 | 1.06 / 1.33 / 2.60 / 5.1 | 650 -> 250 |
+| time level x0.58, both versions (T4) | 1.11 / 1.20 / 1.24 | 1.21 / 1.49 / 2.34 / 5.6 | 380 -> 160 |
+| analytic: review factors at their low corner | 1.10 / 1.16 / 1.20 | 1.27 / 1.66 / 4.71 / - (E = 2 not reached) | 22,000 -> 4,600 |
+| analytic: review factors at their high corner | 1.12 / 1.22 / 1.28 | 1.16 / 1.39 / 1.94 / 2.9 | 120 -> 62 |
+| analytic: extra assignments m = 2.0 | 1.11 / 1.20 / 1.24 | 1.26 / 1.61 / 3.19 / 8.4 | 2,300 -> 730 |
+
+* Under the same analytic variants, plain only gives x1.06-1.08 at 1,000 CPU-years and 1.2-2.1x
+  CPU at E = 1.
+* The stream variants scale R above 5k by -10% to +12.5%. Their effect is a guide to the fit's
+  scatter, which is ±10-15% on a knot: ±0.03 in the E ratios and ±10-15% in the CPU for E = 1.
+
+**T12. Cost per expected magic square by N band** (base assignments x 2.7, as existence.md §6)
+
+| N band | < 2k | 2-4k | 4-8k | 8-16k | 16-32k | 32-64k |
+|---|---|---|---|---|---|---|
+| E available | 0.03 | 0.14 | 0.39 | 0.70 | 0.85 | 0.71 |
+| CPU-yr per expected square: fdb77fc | 160 | 1,400 | 14,000 | 1.9x10^5 | 4.5x10^6 | 2.5x10^8 |
+| integrated, best mode | 160 | 1,200 | 8,400 | 7.7x10^4 | 5.8x10^5 | 2.6x10^7 (1.1x10^7 at its own slope) |
+| fdb77fc / integrated | 1.0 | 1.2 | 1.7 | 2.5 | 7.9 | 9.6 (22) |
+
+### 7.4 Caveats
+
+* **d-first writes no semi-magic squares**, except through the calibration stream (10% of the
+  CPU of the d-first sums is assumed; T11 has 0-20%).
+  * Scheduler v2 does not launch d-first units yet. So the "best mode" rows are what the ideal
+    frontier collects once it runs `msearch --diag-first --calib-r1-stride k` at N >= 5,000.
+  * Until then, the "plain only" rows apply.
+  * Engine 3's time law has no term for the d-first time, nor for the 0.26x above 256 labels.
+* **The ratios rest on 13 sums, 6 of them of 13 7 4 3 1 1.**
+  * The 3.1-5.5k knot is a single sum. Its 137 labels let nearly every r1 drop a word, which
+    gives 0.663.
+  * At 0.80 (the geometric mean of new / base at 137-252 labels), the gain at 1 CPU-year falls
+    from x1.11 to x1.08, and the CPU factor at E = 0.1 from 1.21 to 1.12. From 100 CPU-years
+    on, the E ratios change by <= 0.01.
+* **Sums with more than 256 labels decide the large-E end.**
+  * Their ratio rests on three sums at N = 21-32k and is held flat beyond them. The new code
+    therefore keeps the existence model's slope of 5.2 above 2x10^4, which cx/profile traced
+    to fdb77fc's matrix path. The new code itself measured N^3.5.
+  * Letting the ratio fall further changes only E(10^4) and the CPU at F = 0.5: 9,800-10,000
+    instead of 10,500 CPU-years.
+  * Up to E ~ 1.35 (1,000 CPU-years) these sums hold <= 13% of the frontier's E.
+* **The time model** is the existence model (§3, §4). Its level cancels in the ratios (x0.58
+  gives the same factors, T11).
+* **The ratios are for this machine's native build**: AVX-512 with VPOPCNTDQ and GFNI. Other
+  targets were measured only on the bench sums (N < 2.3k), where cascadelake runs at
+  0.97-1.03x fdb77fc.
+
+### 7.5 Files (`integ/forecast/` in `research/retrospective/scripts.tar.xz`)
+
+* `forecast_new.py` imports `retro_lib` and runs `frontier_rev.py` as `retro.py` does. It holds
+  the 13 measured sums, the R_new construction and the variants, and writes `results_new.json`
+  (central, the variants, R_new at selected N, and where the frontier is).
+* The analytic variants are `python3 forecast_new.py tag=_anlow analytic_rev_args='[...]'`
+  (with sens.py's arguments). They write `results_new_{anlow,anhigh,m20}.json`.
+* A run takes ~45 s, most of it loading the lens cache that gives the > 256-label share.
+
 ## Generated tables
 
 Produced by `retro.py`; every setting is in `results.json`. E is the expected number of magic squares found, C the CPU in single-core CPU-years. Unless marked, E is the existence study's analytic model as revised (`synth/rev/frontier_rev.py`, VAR {'SQ12': 1.23, 'PAIR': 0.87, 'NTR': 1.35, 'K7': 0.85, 'X01': 0.92, 'C53': 2.0, 'MULT': 2.7}): ideal order of all sums with S <= 2 S_min, all exponent assignments by E_all(C) = 2.7 E(C/2.7) plus the P*p sums. The time per sum is R_v(N) x the existence time model (scheduler model to N = 4,000, 51.3 s (N/4000)^3.92 above, slope 5.2 above 2x10^4).
