@@ -1,0 +1,323 @@
+From 3978e1eb67f150de3c3418ac83015250a3401551 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 04:04:35 +0000
+Subject: [PATCH 3/3] measure: go/no-go counts of lazy class pair rules (stage
+ A of c2/classhall; -DCLASS_SUP only)
+
+On the c2/vdclass prototype: in the scalar CLASS_FIX at level >= 6, among
+the entries that pass level 2, count those a lazy pair test would have to
+examine: a non-d cell that only one available class covers (in some
+XO[c]), or an available class with exactly one cell; and the entries the
+pair rules drop. CLASS_STAGED=1 runs the passes at level 2 until quiet,
+then at the pair level (the lazy order; the same fixpoint and nodes).
+"clscyc" prints the TSC cycles of the class checks and of the search.
+Measurement only; default builds unchanged (bench quick 1,770,779 nodes).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ src/c/arrange.c      |  70 +++++++++++++++++++++++++-
+ src/c/arrange_core.h | 116 +++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 176 insertions(+), 10 deletions(-)
+
+diff --git a/src/c/arrange.c b/src/c/arrange.c
+index d25b7b6..69d0703 100644
+--- a/src/c/arrange.c
++++ b/src/c/arrange.c
+@@ -254,7 +254,7 @@ typedef struct {
+   uint32_t *r1_list, r1_nlist;
+ #ifdef CLASS_SUP
+   /* class labels (V_d: d's numbers, the top ncls labels; 0 = off) */
+-  int ncls, cls_mode, cls_match, cls_level, cls_vec, cls_repl, cls_perm;
++  int ncls, cls_mode, cls_match, cls_level, cls_vec, cls_repl, cls_perm, cls_staged;
+   uint64_t clsmask[CARRY_WORDS];
+ #endif
+ #ifdef DPROF
+@@ -743,6 +743,66 @@ uint64_t hall_tests[CLS_NL], hall_fail[CLS_NL], hall_kmin[CLS_NL][8],
+     hall_few1[CLS_NL], hall_few2[CLS_NL], hall_few3[CLS_NL],
+     hall_fail_few2[CLS_NL], hall_fail_few3[CLS_NL];
+ uint32_t cls_absent_L[CLS_NL];
++/* the TSC cycles of the class checks (CLASS_VEC / CLASS_FIX) and of the
++ * whole search, printed on exit as "clscyc" */
++#include <x86intrin.h>
++uint64_t cls_cyc, cls_search_cyc;
++static void __attribute__((destructor)) clscyc_print(void) {
++  if (cls_search_cyc)
++    fprintf(stderr, "clscyc: class %.4fG of search %.4fG cycles (%.2f%%)\n",
++            cls_cyc * 1e-9, cls_search_cyc * 1e-9,
++            100.0 * cls_cyc / cls_search_cyc);
++}
++/*
++ * The go/no-go counts of the lazy pair rules (c2/classhall, stage A), in
++ * the scalar CLASS_FIX at level >= 6, per layer, among the entries that
++ * pass level 2 in a pass at the pair level (with CLASS_STAGED=1 the passes
++ * run at level 2 until quiet, then at the pair level: the lazy order):
++ *   (i)   a non-d cell outside the placed vectors that exactly one
++ *         available class (not the entry's) covers, i.e. in some XO[c];
++ *   (i2)  two such cells of the same class (the cell side pair rule);
++ *   (sc2) two such cells of any classes (a one-mask popcount gate for i2);
++ *   (ii)  an available class (not the entry's) with exactly one cell;
++ *   (ii2) two such classes with the same cell (the class side pair rule);
++ *   (iii) the entries the pair rules drop (cell side after class side);
++ *   (ow)  (i) or a class with at most one cell per 64-bit word.
++ * Also the entry tests and passes at level 2 and at the pair level, the
++ * calls that reach the pair level and those where the pairs drop entries,
++ * and histograms of the classes to meet and of the non-d cells.
++ */
++uint64_t sa_t2[CLS_NL], sa_t6[CLS_NL], sa_p2[CLS_NL], sa_p6[CLS_NL],
++    sa_n2[CLS_NL], sa_i[CLS_NL], sa_i2[CLS_NL], sa_ii[CLS_NL], sa_ii2[CLS_NL],
++    sa_any[CLS_NL], sa_drop[CLS_NL], sa_drop_cell[CLS_NL],
++    sa_drop_cls[CLS_NL], sa_calls6[CLS_NL], sa_calls_drop[CLS_NL],
++    sa_ncx[CLS_NL][8], sa_nzc[CLS_NL][8], sa_sc2[CLS_NL], sa_onew[CLS_NL];
++static void __attribute__((destructor)) sa_print(void) {
++  for (int l = 0; l < CLS_NL; l++)
++    if (sa_t2[l] + sa_t6[l]) {
++      const double n2 = (double)sa_n2[l];
++      fprintf(stderr,
++              "stageA (%d,%d): tests lvl2 %lu lvl6 %lu passes lvl2 %lu lvl6 %lu "
++              "calls-reaching-lvl6 %lu calls-with-pair-drops %lu | passing "
++              "level 2 in lvl6 passes %lu: (i) %lu %.4f (i2) %lu %.4f (ii) %lu "
++              "%.4f (ii2) %lu %.4f (i|ii) %lu %.4f (iii) dropped %lu %.4f "
++              "(cell %lu cls %lu) | (sc2) %lu %.4f (ow) %lu %.4f\n",
++              l / 9, l % 9, (unsigned long)sa_t2[l], (unsigned long)sa_t6[l],
++              (unsigned long)sa_p2[l], (unsigned long)sa_p6[l],
++              (unsigned long)sa_calls6[l], (unsigned long)sa_calls_drop[l],
++              (unsigned long)sa_n2[l], (unsigned long)sa_i[l], sa_i[l] / n2,
++              (unsigned long)sa_i2[l], sa_i2[l] / n2, (unsigned long)sa_ii[l],
++              sa_ii[l] / n2, (unsigned long)sa_ii2[l], sa_ii2[l] / n2,
++              (unsigned long)sa_any[l], sa_any[l] / n2,
++              (unsigned long)sa_drop[l], sa_drop[l] / n2,
++              (unsigned long)sa_drop_cell[l], (unsigned long)sa_drop_cls[l],
++              (unsigned long)sa_sc2[l], sa_sc2[l] / n2,
++              (unsigned long)sa_onew[l], sa_onew[l] / n2);
++      fprintf(stderr, "stageA (%d,%d) classes to meet (ncx) hist:", l / 9, l % 9);
++      for (int k = 0; k < 8; k++) fprintf(stderr, " %lu", (unsigned long)sa_ncx[l][k]);
++      fprintf(stderr, " | non-d cells outside C hist:");
++      for (int k = 0; k < 8; k++) fprintf(stderr, " %lu", (unsigned long)sa_nzc[l][k]);
++      fprintf(stderr, "\n");
++    }
++}
+ static void __attribute__((destructor)) cls_print(void) {
+   for (int l = 0; l < CLS_NL; l++)
+     if (cls_calls[l])
+@@ -1181,6 +1241,8 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
+         s.cls_vec = ve && atoi(ve) > 0;
+         const char *re = getenv("CLASS_REPL");
+         s.cls_repl = s.cls_vec && re && atoi(re) > 0;
++        const char *se = getenv("CLASS_STAGED");
++        s.cls_staged = se && atoi(se) > 0;
+         const char *pe = getenv("CLASS_PERM");
+         s.cls_perm = pe && atoi(pe) > 0;
+         for (size_t x = L - ntop; x < L; x++)
+@@ -1354,7 +1416,13 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
+ #endif
+   double t1 = wall_time();
+ 
++#ifdef CLASS_SUP
++  const uint64_t clscyc_t0 = __rdtsc();
++#endif
+   search_root(&s, W_, carry);
++#ifdef CLASS_SUP
++  cls_search_cyc += __rdtsc() - clscyc_t0;
++#endif
+ #ifdef DPROF
+   if (s.dp_ht) {
+     for (size_t v = 0; v < count; v++)
+diff --git a/src/c/arrange_core.h b/src/c/arrange_core.h
+index fac827d..b669cab 100644
+--- a/src/c/arrange_core.h
++++ b/src/c/arrange_core.h
+@@ -1394,7 +1394,22 @@ static __attribute__((noinline)) int CLASS_FIX(sstate_t *s, int d, int a,
+   const int n = s->n, nc = s->ncls;
+   const size_t cap = s->cap;
+   int quiet = 0;
+-  while (quiet < 2) {
++  int lvl = s->cls_staged && s->cls_level >= 5 ? 2 : s->cls_level;
++  int reached6 = 0, dropped6 = 0;
++  for (;;) {
++    if (quiet >= 2) {
++      if (lvl < s->cls_level) {
++        lvl = s->cls_level;
++        quiet = 0;
++      } else {
++        break;
++      }
++    }
++    if (lvl >= 6 && !reached6) {
++      reached6 = 1;
++      sa_calls6[pl]++;
++    }
++    if (lvl >= 6) sa_p6[pl]++; else sa_p2[pl]++;
+     const int oa = 1 - a;
+     uint64_t G[SQ_MAX_N][W];
+     memset(G, 0, sizeof(G));
+@@ -1505,6 +1520,7 @@ static __attribute__((noinline)) int CLASS_FIX(sstate_t *s, int d, int a,
+             break;
+           }
+       }
++    if (lvl >= 6) sa_t6[pl] += ca; else sa_t2[pl] += ca;
+     for (uint32_t i = 0; i < ca; i++) {
+       const int j = CLS_OF(s, la, cap, i);
+       uint64_t bad = 0;
+@@ -1527,7 +1543,8 @@ static __attribute__((noinline)) int CLASS_FIX(sstate_t *s, int d, int a,
+          * need other-axis vectors of distinct classes, not placed ones: a
+          * matching of cells to classes (cell z ~ class c iff z in G[c];
+          * the d cell only to its own class) */
+-        int cm[8], nzc = 0;
++        int cm[8], nzc = 0, isd[8];
++        int bitsw[8];
+         for (int w = 0; w < W; w++) {
+           uint64_t x = la[w * cap + i] & ~C[w];
+           while (x) {
+@@ -1541,20 +1558,85 @@ static __attribute__((noinline)) int CLASS_FIX(sstate_t *s, int d, int a,
+               m &= 1 << j;
+             else
+               m &= ~(1 << j); /* (a class-j vector would meet it twice) */
++            isd[nzc] = (int)(s->clsmask[w] >> b & 1);
++            bitsw[nzc] = w;
+             cm[nzc++] = m;
+           }
+         }
+         /* Hall: every subset of cells has enough classes (nzc <= 6) */
+         int ok = 1, kmin = 99;
+-        if (s->cls_level != 4) {
++        /* stage A: the gating counts, at the pair level, among the entries
++         * passing level 2 */
++        if (lvl >= 6) {
++          int un2 = 0, avail2 = ((1 << nc) - 1) & ~pcls;
++          for (int t = 0; t < nzc; t++)
++            un2 |= cm[t];
++          if ((un2 & avail2) == avail2) {
++            sa_n2[pl]++;
++            int gi = 0, gi2 = 0, gii = 0, gii2 = 0, ow = 0;
++            int cntc[8] = {0}, ncx = 0, nnd = 0;
++            for (int t = 0; t < nzc; t++)
++              if (!isd[t]) {
++                nnd++;
++                if (__builtin_popcount(cm[t]) == 1) {
++                  gi = 1;
++                  if (++cntc[__builtin_ctz(cm[t])] >= 2)
++                    gi2 = 1;
++                }
++              }
++            int sc1[8];
++            for (int c = 0; c < nc; c++) {
++              sc1[c] = -1;
++              if (!(avail2 >> c & 1) || c == j)
++                continue;
++              ncx++;
++              int k1 = 0, last = -1, perw[8] = {0};
++              for (int t = 0; t < nzc; t++)
++                if (!isd[t] && (cm[t] >> c & 1)) {
++                  k1++;
++                  last = t;
++                  perw[bitsw[t]]++;
++                }
++              if (k1 == 1) {
++                gii = 1;
++                sc1[c] = last;
++              }
++              /* a class with <= 1 cell in each word (a superset of k1 == 1) */
++              int okw = 1;
++              for (int w = 0; w < W; w++)
++                okw &= perw[w] <= 1;
++              ow |= okw;
++            }
++            for (int c = 0; c < nc; c++)
++              for (int c2 = c + 1; c2 < nc; c2++)
++                if (sc1[c] >= 0 && sc1[c] == sc1[c2])
++                  gii2 = 1;
++            {
++              int nsc = 0;
++              for (int t = 0; t < nzc; t++)
++                nsc += !isd[t] && __builtin_popcount(cm[t]) == 1;
++              sa_sc2[pl] += nsc >= 2;
++            }
++            sa_i[pl] += gi;
++            sa_i2[pl] += gi2;
++            sa_ii[pl] += gii;
++            sa_ii2[pl] += gii2;
++            sa_any[pl] += gi | gii;
++            sa_onew[pl] += ow | gi;
++            sa_ncx[pl][ncx < 8 ? ncx : 7]++;
++            sa_nzc[pl][nnd < 8 ? nnd : 7]++;
++          }
++        }
++        if (lvl != 4) {
+           /* the cheap parts: class side singles (every available class
+            * covers a cell), cell side pairs (two cells, one class) */
+           int un = 0, avail = ((1 << nc) - 1) & ~pcls;
+           for (int t = 0; t < nzc; t++)
+             un |= cm[t];
+-          if (s->cls_level >= 2 && (un & avail) != avail)
++          if (lvl >= 2 && (un & avail) != avail)
+             ok = 0, kmin = 6;
+-          if (s->cls_level >= 5) {
++          const int ok_before_pairs = ok;
++          if (lvl >= 5) {
+             /* class side pairs: two available classes (not j) cover at
+              * least two cells together */
+             int sc[SQ_MAX_N]; /* cells (bit t) each class covers */
+@@ -1570,13 +1652,22 @@ static __attribute__((noinline)) int CLASS_FIX(sstate_t *s, int d, int a,
+                     c2 != j && __builtin_popcount(sc[c] | sc[c2]) < 2)
+                   ok = 0, kmin = 3;
+           }
+-          if (s->cls_level == 3 || s->cls_level >= 6)
++          const int ok_after_cls = ok;
++          if (lvl == 3 || lvl >= 6)
+             for (int t = 0; t < nzc && ok; t++)
+               for (int u = t + 1; u < nzc && ok; u++)
+                 if (__builtin_popcount(cm[t] | cm[u]) < 2)
+                   ok = 0, kmin = 2;
++          if (lvl >= 6 && ok_before_pairs && !ok) {
++            sa_drop[pl]++;
++            dropped6 = 1;
++            if (ok_after_cls)
++              sa_drop_cell[pl]++;
++            else
++              sa_drop_cls[pl]++;
++          }
+         }
+-        for (int sub = 1; s->cls_level == 4 && sub < (1 << nzc); sub++) {
++        for (int sub = 1; lvl == 4 && sub < (1 << nzc); sub++) {
+           int u = 0, k = 0;
+           for (int t = 0; t < nzc; t++)
+             if (sub >> t & 1) {
+@@ -1624,17 +1715,22 @@ static __attribute__((noinline)) int CLASS_FIX(sstate_t *s, int d, int a,
+       s->nvalid[d][a] = k;
+       for (int w = 0; w < W; w++)
+         s->uni[d][a][w] = un[w];
+-      if (s->np[a] + (int)k < n)
++      if (s->np[a] + (int)k < n) {
++        sa_calls_drop[pl] += dropped6;
+         return 1;
++      }
+       const uint64_t *Ca = s->cells[d][a];
+       uint64_t dead = 0;
+       for (int w = 0; w < W; w++)
+         dead |= C[w] & ~Ca[w] & ~un[w];
+-      if (dead)
++      if (dead) {
++        sa_calls_drop[pl] += dropped6;
+         return 2;
++      }
+     }
+     a = 1 - a;
+   }
++  sa_calls_drop[pl] += dropped6;
+   return 0;
+ }
+ #endif
+@@ -1941,7 +2037,9 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+       const int cpl = 9 * s->np[ROW] + s->np[COL];
+       cls_calls[cpl]++;
+       const uint32_t k0 = s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
++      const uint64_t clscyc_t0 = __rdtsc();
+       dead = s->cls_vec ? CLASS_VEC(s, d + 1, o) : CLASS_FIX(s, d + 1, o, cpl);
++      cls_cyc += __rdtsc() - clscyc_t0;
+       cls_kill[cpl] += dead != 0;
+       cls_kfc[cpl] += dead == 2;
+       cls_touched[cpl] +=
+-- 
+2.43.0
+

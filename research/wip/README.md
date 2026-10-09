@@ -6,6 +6,7 @@ is reclaimed. Each directory under patches/ applies with `git am`:
 | patches/ | base | what |
 |---|---|---|
 | cx-profile, cx-decomp, cx-magic, cx-prune | fdb77fc | instrumentation and negative-result prototypes of the complexity study |
+| c2-classhall | be625d8 | round 2: the V_d profile's DPROF instrumentation (c2/profile), the class-matching support prototype (c2/vdclass, `-DCLASS_SUP`) and the stage-A counts of its pair rules (research/ideas.md, "Pair rules on top of the class support") |
 
 Notes: complexity-profile.md (where the N^4 comes from), complexity-study.md
 (ideas, picks, prototype measurements, verifier reports).

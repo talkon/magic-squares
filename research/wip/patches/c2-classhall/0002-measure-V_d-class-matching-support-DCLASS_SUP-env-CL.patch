@@ -1,0 +1,761 @@
+From 65c6495651794de015bfa7963401738ea87de466 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 02:10:58 +0000
+Subject: [PATCH 2/3] measure: V_d class-matching support (-DCLASS_SUP, env
+ CLASS_SUP/CLASS_LVL/CLASS_VEC; compiled out by default)
+
+Every vector of V_d has exactly one of d's numbers (its class), and the 6
+rows (cols) of a square have the 6 classes. So a candidate's cells outside
+the placed vectors of the other axis need other-axis candidates of
+distinct, unplaced classes (non-d cells: not its own class): a matching.
+Scalar fixpoints (levels 1-6, full Hall = 4) and a vectorized level 2/5/6
+on the class-sorted carried lists (CLASS_VEC), by layer (CLASS_SUP mode).
+Measurement only; default builds unchanged (bench quick 1,770,779 nodes).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ src/c/arrange.c      |  85 +++++++
+ src/c/arrange_core.h | 587 ++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 671 insertions(+), 1 deletion(-)
+
+diff --git a/src/c/arrange.c b/src/c/arrange.c
+index f21fffc..d25b7b6 100644
+--- a/src/c/arrange.c
++++ b/src/c/arrange.c
+@@ -252,6 +252,11 @@ typedef struct {
+     double t, t2, q, q2, nodes;
+   } r1s[8];
+   uint32_t *r1_list, r1_nlist;
++#ifdef CLASS_SUP
++  /* class labels (V_d: d's numbers, the top ncls labels; 0 = off) */
++  int ncls, cls_mode, cls_match, cls_level, cls_vec, cls_repl, cls_perm;
++  uint64_t clsmask[CARRY_WORDS];
++#endif
+ #ifdef DPROF
+   /* with dprof_vec: bitset -> vector index (open addressing, index + 1),
+    * the deepest searched node of each vector, and the vectors placed on
+@@ -728,6 +733,58 @@ static void r1_account(sstate_t *s, int h, uint32_t r1, uint64_t squares,
+ 
+ /* instantiate the recursive search for each bitset width (the carried path
+  * also for 5-7 words) */
++#ifdef CLASS_SUP
++#define CLS_NL 81
++uint64_t cls_calls[CLS_NL], cls_kill[CLS_NL], cls_kfc[CLS_NL],
++    cls_touched[CLS_NL], cls_removed[CLS_NL], cls_passes[CLS_NL];
++uint64_t cls_absent[CLS_NL][128];
++uint64_t cls_perm_dead[CLS_NL], cls_perm_drop[CLS_NL];
++uint64_t hall_tests[CLS_NL], hall_fail[CLS_NL], hall_kmin[CLS_NL][8],
++    hall_few1[CLS_NL], hall_few2[CLS_NL], hall_few3[CLS_NL],
++    hall_fail_few2[CLS_NL], hall_fail_few3[CLS_NL];
++uint32_t cls_absent_L[CLS_NL];
++static void __attribute__((destructor)) cls_print(void) {
++  for (int l = 0; l < CLS_NL; l++)
++    if (cls_calls[l])
++      fprintf(stderr,
++              "clsup (%d,%d): calls %lu killed %lu (by fc %lu) shrunk-alive "
++              "%lu removed %lu passes %lu\n",
++              l / 9, l % 9, (unsigned long)cls_calls[l],
++              (unsigned long)cls_kill[l], (unsigned long)cls_kfc[l],
++              (unsigned long)cls_touched[l], (unsigned long)cls_removed[l],
++              (unsigned long)cls_passes[l]);
++  for (int l = 0; l < CLS_NL; l++)
++    if (cls_perm_dead[l] || cls_perm_drop[l])
++      fprintf(stderr, "perm (%d,%d): dead %lu dropped %lu\n", l / 9, l % 9,
++              (unsigned long)cls_perm_dead[l], (unsigned long)cls_perm_drop[l]);
++  for (int l = 0; l < CLS_NL; l++)
++    if (hall_tests[l])
++      fprintf(stderr,
++              "hall (%d,%d): tests %lu fail %lu kmin2 %lu kmin3 %lu kmin4 %lu "
++              "kmin5 %lu kmin6 %lu | tests with >=1 cell of 1 class %lu, "
++              ">=2 cells of <=2 classes %lu, >=2 of <=3 %lu | fails with >=2 "
++              "of <=2 %lu, >=2 of <=3 %lu\n",
++              l / 9, l % 9, (unsigned long)hall_tests[l],
++              (unsigned long)hall_fail[l], (unsigned long)hall_kmin[l][2],
++              (unsigned long)hall_kmin[l][3], (unsigned long)hall_kmin[l][4],
++              (unsigned long)hall_kmin[l][5], (unsigned long)hall_kmin[l][6],
++              (unsigned long)hall_few1[l], (unsigned long)hall_few2[l],
++              (unsigned long)hall_few3[l], (unsigned long)hall_fail_few2[l],
++              (unsigned long)hall_fail_few3[l]);
++  for (int l = 0; l < CLS_NL; l++) {
++    uint64_t t = 0;
++    for (int a = 0; a < 128; a++)
++      t += cls_absent[l][a];
++    if (!t)
++      continue;
++    fprintf(stderr, "absent (%d,%d) L~%u:", l / 9, l % 9, cls_absent_L[l]);
++    for (int a = 0; a < 128; a++)
++      if (cls_absent[l][a])
++        fprintf(stderr, " %d:%lu", a, (unsigned long)cls_absent[l][a]);
++    fprintf(stderr, "\n");
++  }
++}
++#endif
+ #define W 2
+ #include "arrange_core.h"
+ #undef W
+@@ -1103,6 +1160,34 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
+     while (k < count && s.lab[k][0] == L - 1)
+       k++;
+     s.root_limit = k;
++#ifdef CLASS_SUP
++    /* class mode: every vector has exactly one of the top ntop labels */
++    const char *ce = getenv("CLASS_SUP");
++    if (ce && atoi(ce) > 0) {
++      int ok = 1;
++      for (size_t v = 0; v < count && ok; v++) {
++        int c = 0;
++        for (int p = 0; p < n; p++)
++          c += s.lab[v][p] >= L - (size_t)ntop && s.lab[v][p] < L;
++        ok = c == 1;
++      }
++      if (ok) {
++        s.ncls = ntop;
++        s.cls_mode = atoi(ce);
++        const char *le = getenv("CLASS_LVL");
++        s.cls_level = le ? atoi(le) : 1;
++        s.cls_match = s.cls_level >= 2;
++        const char *ve = getenv("CLASS_VEC");
++        s.cls_vec = ve && atoi(ve) > 0;
++        const char *re = getenv("CLASS_REPL");
++        s.cls_repl = s.cls_vec && re && atoi(re) > 0;
++        const char *pe = getenv("CLASS_PERM");
++        s.cls_perm = pe && atoi(pe) > 0;
++        for (size_t x = L - ntop; x < L; x++)
++          s.clsmask[x >> 6] |= (uint64_t)1 << (x & 63);
++      }
++    }
++#endif
+   }
+   /* r1 sampling plan, over the roots [0, root_limit) */
+   if (opts->r1_nlist > 0 && opts->r1_list) {
+diff --git a/src/c/arrange_core.h b/src/c/arrange_core.h
+index 2da4d96..fac827d 100644
+--- a/src/c/arrange_core.h
++++ b/src/c/arrange_core.h
+@@ -1102,6 +1102,542 @@ static __attribute__((noinline)) int SUPPORT_AGAIN(sstate_t *s, int d,
+                                                    int a) {
+   return SUPPORT(s, d, a, 1);
+ }
++
++#if defined(CLASS_SUP) && defined(CARRY)
++/*
++ * MEASUREMENT ONLY (-DCLASS_SUP, env CLASS_SUP=1): the class-aware support
++ * filter of a V_d search. Every vector of V_d has exactly one of d's
++ * numbers (its class: the top ncls labels), so a candidate col of class j
++ * meets every row of class j at a_j, and a cell z != a_j of it cannot lie
++ * in its row of the square if that row has class j. So each non-d cell of
++ * a candidate of class j must be covered by a placed vector of the other
++ * axis or by a candidate of the other axis of another class (its d cell by
++ * a class-j one, as in SUPPORT). Scalar, iterated to the fixpoint on both
++ * axes, after SUPPORT; counts only, not timing.
++ */
++#define CLS_OF CAT(cls_of, W)
++static inline int CLS_OF(const sstate_t *s, const uint64_t *list, size_t cap,
++                         uint32_t i) {
++  for (int w = W - 1; w >= 0; w--) {
++    const uint64_t t = list[w * cap + i] & s->clsmask[w];
++    if (t)
++      return (int)(s->L - 1 - (64 * w + __builtin_ctzll(t)));
++  }
++  return 0; /* (cannot happen in a V_d search) */
++}
++#ifndef CLS_PM_DEFINED
++#define CLS_PM_DEFINED
++/* bit S of HAS[c]: subset S of the 6 classes contains c */
++static uint64_t cls_has[8];
++static void cls_has_init(void) {
++  for (int c = 0; c < 6; c++) {
++    cls_has[c] = 0;
++    for (int S = 0; S < 64; S++)
++      if (S >> c & 1)
++        cls_has[c] |= (uint64_t)1 << S;
++  }
++}
++/* does the bipartite graph cells t < m (adj[t]: class mask) x classes have
++ * a matching saturating the cells whose classes are exactly `full`? */
++static int cls_pm(const int *adj, int m, int full) {
++  uint64_t reach = 1;
++  for (int t = 0; t < m; t++) {
++    uint64_t nr = 0;
++    for (int c = 0; c < 6; c++)
++      if (adj[t] >> c & 1)
++        nr |= (reach & ~cls_has[c]) << (1 << c);
++    reach = nr;
++    if (!reach)
++      return 0;
++  }
++  return (int)(reach >> full & 1);
++}
++#endif
++#define CLS_BOUNDS CAT(cls_bounds, W)
++#define CLASS_VEC CAT(class_vec, W)
++/* the class blocks of a class-sorted list: block c is [b[c], b[c + 1]) */
++static void CLS_BOUNDS(const sstate_t *s, const uint64_t *list, uint32_t cnt,
++                       uint32_t *b) {
++  const size_t cap = s->cap;
++  const int nc = s->ncls;
++  uint32_t i = 0;
++  for (int c = 0; c < nc; c++) {
++    b[c] = i;
++    /* first index >= i whose class is > c (classes ascend) */
++    uint32_t lo = i, hi = cnt;
++    while (lo < hi) {
++      const uint32_t mid = lo + (hi - lo) / 2;
++      if (CLS_OF(s, list, cap, mid) <= c)
++        lo = mid + 1;
++      else
++        hi = mid;
++    }
++    i = lo;
++  }
++  b[nc] = cnt;
++}
++/*
++ * Vectorized class check (level 2): on class-sorted carried lists, block by
++ * block, an entry of class j is dropped if a cell of it is not in a placed
++ * vector of the other axis nor in an other-axis candidate of another class
++ * (its d cell: of class j), or if some class c != j, not placed on the
++ * other axis, has no candidate there that meets it outside the placed
++ * vectors. Both axes, to the fixpoint. Returns nonzero if the node is dead.
++ */
++static __attribute__((noinline)) int CLASS_VEC(sstate_t *s, int d, int a) {
++  const int n = s->n, nc = s->ncls;
++  const size_t cap = s->cap;
++  uint64_t G[2][SQ_MAX_N][W];
++  uint32_t bnd[2][SQ_MAX_N + 1];
++  int pcls[2] = {0, 0};
++  for (int ax = 0; ax < 2; ax++) {
++    for (int q = 0; q < s->np[ax]; q++) {
++      const uint64_t *pw = s->placedw[ax][q];
++      for (int w = W - 1; w >= 0; w--)
++        if (pw[w] & s->clsmask[w]) {
++          pcls[ax] |= 1 << (int)(s->L - 1 - (64 * w + __builtin_ctzll(
++                                                          pw[w] & s->clsmask[w])));
++          break;
++        }
++    }
++    CLS_BOUNDS(s, s->vw[d][ax], s->nvalid[d][ax], bnd[ax]);
++  }
++  /* the per-class unions of the other axis of the first pass */
++  {
++    const int oa = 1 - a;
++    const uint64_t *list = s->vw[d][oa];
++    for (int c = 0; c < nc; c++) {
++      __m512i acc[W];
++      for (int w = 0; w < W; w++)
++        acc[w] = _mm512_setzero_si512();
++      for (uint32_t i = bnd[oa][c]; i < bnd[oa][c + 1]; i += 8) {
++        const uint32_t r = bnd[oa][c + 1] - i;
++        const __mmask8 live = r >= 8 ? 0xff : (__mmask8)((1u << r) - 1);
++        for (int w = 0; w < W; w++)
++          acc[w] = _mm512_or_si512(
++              acc[w], _mm512_maskz_loadu_epi64(live, list + w * cap + i));
++      }
++      for (int w = 0; w < W; w++)
++        G[oa][c][w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
++    }
++  }
++  int quiet = 0, first = 1;
++  int lvl = s->cls_level >= 5 ? 2 : s->cls_level; /* the pairs last */
++  for (;;) {
++    if (quiet >= 2) {
++      if (lvl < s->cls_level) {
++        lvl = s->cls_level;
++        quiet = 0;
++      } else {
++        break;
++      }
++    }
++    const int oa = 1 - a;
++    const uint64_t *C = s->cells[d][oa];
++    uint64_t *list = s->vw[d][a];
++    uint64_t allc[W];
++    for (int w = 0; w < W; w++) {
++      allc[w] = 0;
++      for (int c = 0; c < nc; c++)
++        allc[w] |= G[oa][c][w];
++    }
++    uint32_t k = 0;
++    const uint32_t cnt0 = s->nvalid[d][a];
++    uint32_t nb[SQ_MAX_N + 1];
++    uint64_t un[W];
++    for (int w = 0; w < W; w++)
++      un[w] = 0;
++    for (int j = 0; j < nc; j++) {
++      nb[j] = k;
++      const uint32_t b0 = bnd[a][j], b1 = bnd[a][j + 1];
++      if (b0 == b1) {
++        for (int w = 0; w < W; w++)
++          G[a][j][w] = 0;
++        continue;
++      }
++      /* bad cells for class j; the other classes' coverable cells */
++      __m512i BAD[W], GX[SQ_MAX_N][W];
++      int ncx = 0, dead_block = 0;
++      for (int w = 0; w < W; w++) {
++        uint64_t oth = 0;
++        for (int c = 0; c < nc; c++)
++          if (c != j)
++            oth |= G[oa][c][w];
++        BAD[w] = _mm512_set1_epi64(
++            (long long)~(C[w] | (G[oa][j][w] & s->clsmask[w]) | oth));
++      }
++      for (int c = 0; c < nc; c++) {
++        if (c == j || (pcls[oa] >> c & 1))
++          continue;
++        uint64_t any = 0;
++        for (int w = 0; w < W; w++) {
++          const uint64_t g = G[oa][c][w] & ~C[w];
++          any |= g;
++          GX[ncx][w] = _mm512_set1_epi64((long long)g);
++        }
++        if (!any)
++          dead_block = 1;
++        ncx++;
++      }
++      /* the cells only class c covers (of the available classes) */
++      __m512i XO[SQ_MAX_N][W];
++      if (lvl == 6)
++        for (int c = 0; c < ncx; c++)
++          for (int w = 0; w < W; w++) {
++            __m512i o = _mm512_setzero_si512();
++            for (int c2 = 0; c2 < ncx; c2++)
++              if (c2 != c)
++                o = _mm512_or_si512(o, GX[c2][w]);
++            XO[c][w] = _mm512_andnot_si512(o, GX[c][w]);
++          }
++      __m512i acc[W];
++      for (int w = 0; w < W; w++)
++        acc[w] = _mm512_setzero_si512();
++      if (!dead_block)
++        for (uint32_t i = b0; i < b1; i += 8) {
++          const uint32_t r = b1 - i;
++          const __mmask8 live = r >= 8 ? 0xff : (__mmask8)((1u << r) - 1);
++          __m512i x[W];
++          for (int w = 0; w < W; w++)
++            x[w] = _mm512_maskz_loadu_epi64(live, list + w * cap + i);
++          __m512i t = _mm512_and_si512(x[0], BAD[0]);
++          for (int w = 1; w < W; w++)
++            t = _mm512_ternarylogic_epi64(t, x[w], BAD[w], 0xF8);
++          __mmask8 keep = _mm512_mask_testn_epi64_mask(live, t, t);
++          for (int c = 0; c < ncx && keep; c++) {
++            __m512i h = _mm512_and_si512(x[0], GX[c][0]);
++            for (int w = 1; w < W; w++)
++              h = _mm512_ternarylogic_epi64(h, x[w], GX[c][w], 0xF8);
++            keep = _mm512_mask_test_epi64_mask(keep, h, h);
++          }
++          if (lvl == 6 && keep) {
++            /* cell side pairs: two cells of the entry that only class c
++             * (of the available ones) covers */
++            for (int c = 0; c < ncx && keep; c++) {
++              __m512i cn = _mm512_setzero_si512();
++              for (int w = 0; w < W; w++)
++                cn = _mm512_add_epi64(
++                    cn, _mm512_popcnt_epi64(_mm512_and_si512(x[w], XO[c][w])));
++              keep = _mm512_mask_cmplt_epi64_mask(keep, cn,
++                                                  _mm512_set1_epi64(2));
++            }
++          }
++          if (lvl >= 5 && keep && ncx >= 2) {
++            /* class side pairs: two available classes whose only cell of
++             * the entry is the same cell */
++            __m512i H[SQ_MAX_N][W];
++            __mmask8 one[SQ_MAX_N];
++            for (int c = 0; c < ncx; c++) {
++              __m512i cn = _mm512_setzero_si512();
++              for (int w = 0; w < W; w++) {
++                H[c][w] = _mm512_and_si512(x[w], GX[c][w]);
++                cn = _mm512_add_epi64(cn, _mm512_popcnt_epi64(H[c][w]));
++              }
++              one[c] = _mm512_mask_cmpeq_epi64_mask(keep, cn,
++                                                    _mm512_set1_epi64(1));
++            }
++            __mmask8 viol = 0;
++            for (int c = 0; c < ncx; c++) {
++              if (!one[c])
++                continue;
++              for (int c2 = c + 1; c2 < ncx; c2++) {
++                __mmask8 m = one[c] & one[c2];
++                for (int w = 0; w < W && m; w++)
++                  m = _mm512_mask_cmpeq_epi64_mask(m, H[c][w], H[c2][w]);
++                viol |= m;
++              }
++            }
++            keep &= (__mmask8)~viol;
++          }
++          const int nk = __builtin_popcount(keep);
++          const __mmask8 sm = (__mmask8)((1u << nk) - 1);
++          for (int w = 0; w < W; w++) {
++            __m512i y = _mm512_maskz_compress_epi64(keep, x[w]);
++            _mm512_mask_storeu_epi64(list + w * cap + k, sm, y);
++            acc[w] = _mm512_or_si512(acc[w], y);
++          }
++          k += (uint32_t)nk;
++        }
++      for (int w = 0; w < W; w++) {
++        G[a][j][w] = (uint64_t)_mm512_reduce_or_epi64(acc[w]);
++        un[w] |= G[a][j][w];
++      }
++    }
++    nb[nc] = k;
++    for (int j = 0; j <= nc; j++)
++      bnd[a][j] = nb[j];
++    cls_passes[9 * s->np[ROW] + s->np[COL]]++;
++    if (k == cnt0 && !first) {
++      quiet++;
++    } else {
++      quiet = k == cnt0 ? quiet + 1 : 1;
++      s->nvalid[d][a] = k;
++      for (int w = 0; w < W; w++)
++        s->uni[d][a][w] = un[w];
++      if (s->np[a] + (int)k < n)
++        return 1;
++      const uint64_t *Ca = s->cells[d][a];
++      uint64_t dead = 0;
++      for (int w = 0; w < W; w++)
++        dead |= C[w] & ~Ca[w] & ~un[w];
++      if (dead)
++        return 2;
++    }
++    first = 0;
++    a = oa;
++  }
++  return 0;
++}
++#define CLASS_FIX CAT(class_fix, W)
++static __attribute__((noinline)) int CLASS_FIX(sstate_t *s, int d, int a,
++                                               int pl) {
++  const int n = s->n, nc = s->ncls;
++  const size_t cap = s->cap;
++  int quiet = 0;
++  while (quiet < 2) {
++    const int oa = 1 - a;
++    uint64_t G[SQ_MAX_N][W];
++    memset(G, 0, sizeof(G));
++    const uint64_t *lo = s->vw[d][oa];
++    const uint32_t co = s->nvalid[d][oa];
++    for (uint32_t i = 0; i < co; i++) {
++      const int c = CLS_OF(s, lo, cap, i);
++      for (int w = 0; w < W; w++)
++        G[c][w] |= lo[w * cap + i];
++    }
++    const uint64_t *C = s->cells[d][oa];
++    uint64_t A[SQ_MAX_N][W];
++    for (int j = 0; j < nc; j++)
++      for (int w = 0; w < W; w++) {
++        uint64_t x = C[w] | (G[j][w] & s->clsmask[w]);
++        for (int c = 0; c < nc; c++)
++          if (c != j)
++            x |= G[c][w];
++        A[j][w] = x;
++      }
++    uint64_t *la = s->vw[d][a];
++    const uint32_t ca = s->nvalid[d][a];
++    /* placed-vector permutations: the a-vectors of the square meet a placed
++     * oa-vector p at distinct cells and have distinct classes, so the
++     * unmatched cells of p and the classes not placed on axis a are
++     * matched perfectly by the a candidates (cell y ~ class c iff an
++     * a candidate of class c meets p at y; a non-d cell of p never by p's
++     * class, its d cell only by it); an a candidate of class c meeting p
++     * at y needs (y, c) in some perfect matching */
++    uint64_t AL[SQ_MAX_N][SQ_MAX_N][W];
++    const int nqp = s->cls_perm ? s->np[oa] : 0;
++    if (nqp) {
++      if (!cls_has[1])
++        cls_has_init();
++      uint64_t Ga[SQ_MAX_N][W];
++      memset(Ga, 0, sizeof(Ga));
++      for (uint32_t i = 0; i < ca; i++) {
++        const int c = CLS_OF(s, la, cap, i);
++        for (int w = 0; w < W; w++)
++          Ga[c][w] |= la[w * cap + i];
++      }
++      int pca = 0; /* classes placed on axis a */
++      for (int q = 0; q < s->np[a]; q++) {
++        const uint64_t *pw = s->placedw[a][q];
++        for (int w = W - 1; w >= 0; w--)
++          if (pw[w] & s->clsmask[w]) {
++            pca |= 1 << (int)(s->L - 1 -
++                              (64 * w + __builtin_ctzll(pw[w] & s->clsmask[w])));
++            break;
++          }
++      }
++      const int full = ((1 << nc) - 1) & ~pca;
++      const uint64_t *Cac = s->cells[d][a];
++      for (int q = 0; q < nqp; q++) {
++        const uint64_t *pw = s->placedw[oa][q];
++        int pc = 0; /* p's class */
++        for (int w = W - 1; w >= 0; w--)
++          if (pw[w] & s->clsmask[w]) {
++            pc = (int)(s->L - 1 - (64 * w + __builtin_ctzll(pw[w] & s->clsmask[w])));
++            break;
++          }
++        int adj[8], m = 0, cw[8], cb[8];
++        for (int w = 0; w < W; w++) {
++          uint64_t x = pw[w] & ~Cac[w];
++          while (x) {
++            const int b = __builtin_ctzll(x);
++            x &= x - 1;
++            int am = 0;
++            for (int c = 0; c < nc; c++)
++              if ((full >> c & 1) && (Ga[c][w] >> b & 1))
++                am |= 1 << c;
++            if (s->clsmask[w] >> b & 1)
++              am &= 1 << pc;
++            else
++              am &= ~(1 << pc);
++            cw[m] = w;
++            cb[m] = b;
++            adj[m++] = am;
++          }
++        }
++        memset(AL[q], 0, sizeof(AL[q]));
++        if (!cls_pm(adj, m, full)) {
++          cls_perm_dead[pl]++;
++          return 3;
++        }
++        for (int t = 0; t < m; t++)
++          for (int c = 0; c < nc; c++)
++            if (adj[t] >> c & 1) {
++              const int keep_adj = adj[t];
++              adj[t] = 1 << c;
++              if (cls_pm(adj, m, full))
++                AL[q][c][cw[t]] |= (uint64_t)1 << cb[t];
++              adj[t] = keep_adj;
++            }
++      }
++    }
++    uint32_t k = 0;
++    uint64_t un[W];
++    memset(un, 0, sizeof(un));
++    /* class-matching mode: the other axis' classes of the placed vectors */
++    int pcls = 0; /* bitmask of classes of placed vectors on the other axis */
++    if (s->cls_match)
++      for (int q = 0; q < s->np[oa]; q++) {
++        const uint64_t *pw = s->placedw[oa][q];
++        for (int w = W - 1; w >= 0; w--)
++          if (pw[w] & s->clsmask[w]) {
++            pcls |= 1 << (int)(s->L - 1 - (64 * w + __builtin_ctzll(pw[w] & s->clsmask[w])));
++            break;
++          }
++      }
++    for (uint32_t i = 0; i < ca; i++) {
++      const int j = CLS_OF(s, la, cap, i);
++      uint64_t bad = 0;
++      for (int w = 0; w < W; w++)
++        bad |= la[w * cap + i] & ~A[j][w];
++      if (bad)
++        continue;
++      if (nqp) {
++        uint64_t pb = 0;
++        for (int q = 0; q < nqp; q++)
++          for (int w = 0; w < W; w++)
++            pb |= la[w * cap + i] & s->placedw[oa][q][w] & ~AL[q][j][w];
++        if (pb) {
++          cls_perm_drop[pl]++;
++          continue;
++        }
++      }
++      if (s->cls_match) {
++        /* the cells of the entry not in a placed vector of the other axis
++         * need other-axis vectors of distinct classes, not placed ones: a
++         * matching of cells to classes (cell z ~ class c iff z in G[c];
++         * the d cell only to its own class) */
++        int cm[8], nzc = 0;
++        for (int w = 0; w < W; w++) {
++          uint64_t x = la[w * cap + i] & ~C[w];
++          while (x) {
++            const int b = __builtin_ctzll(x);
++            x &= x - 1;
++            int m = 0;
++            for (int c = 0; c < nc; c++)
++              if (!(pcls >> c & 1) && (G[c][w] >> b & 1))
++                m |= 1 << c;
++            if (s->clsmask[w] >> b & 1)
++              m &= 1 << j;
++            else
++              m &= ~(1 << j); /* (a class-j vector would meet it twice) */
++            cm[nzc++] = m;
++          }
++        }
++        /* Hall: every subset of cells has enough classes (nzc <= 6) */
++        int ok = 1, kmin = 99;
++        if (s->cls_level != 4) {
++          /* the cheap parts: class side singles (every available class
++           * covers a cell), cell side pairs (two cells, one class) */
++          int un = 0, avail = ((1 << nc) - 1) & ~pcls;
++          for (int t = 0; t < nzc; t++)
++            un |= cm[t];
++          if (s->cls_level >= 2 && (un & avail) != avail)
++            ok = 0, kmin = 6;
++          if (s->cls_level >= 5) {
++            /* class side pairs: two available classes (not j) cover at
++             * least two cells together */
++            int sc[SQ_MAX_N]; /* cells (bit t) each class covers */
++            for (int c = 0; c < nc; c++) {
++              sc[c] = 0;
++              for (int t = 0; t < nzc; t++)
++                if (cm[t] >> c & 1)
++                  sc[c] |= 1 << t;
++            }
++            for (int c = 0; c < nc && ok; c++)
++              for (int c2 = c + 1; c2 < nc && ok; c2++)
++                if ((avail >> c & 1) && (avail >> c2 & 1) && c != j &&
++                    c2 != j && __builtin_popcount(sc[c] | sc[c2]) < 2)
++                  ok = 0, kmin = 3;
++          }
++          if (s->cls_level == 3 || s->cls_level >= 6)
++            for (int t = 0; t < nzc && ok; t++)
++              for (int u = t + 1; u < nzc && ok; u++)
++                if (__builtin_popcount(cm[t] | cm[u]) < 2)
++                  ok = 0, kmin = 2;
++        }
++        for (int sub = 1; s->cls_level == 4 && sub < (1 << nzc); sub++) {
++          int u = 0, k = 0;
++          for (int t = 0; t < nzc; t++)
++            if (sub >> t & 1) {
++              u |= cm[t];
++              k++;
++            }
++          if (__builtin_popcount(u) < k) {
++            ok = 0;
++            if (k < kmin)
++              kmin = k;
++          }
++        }
++        /* stats: cells with few classes (the prefilter's view) */
++        int few1 = 0, few2 = 0, few3 = 0;
++        for (int t = 0; t < nzc; t++) {
++          const int pc = __builtin_popcount(cm[t]);
++          few1 += pc <= 1;
++          few2 += pc <= 2;
++          few3 += pc <= 3;
++        }
++        hall_tests[pl]++;
++        hall_few2[pl] += few2 >= 2;
++        hall_few3[pl] += few3 >= 2;
++        hall_few1[pl] += few1 >= 1;
++        if (!ok) {
++          hall_fail[pl]++;
++          hall_kmin[pl][kmin < 8 ? kmin : 7]++;
++          hall_fail_few2[pl] += few2 >= 2;
++          hall_fail_few3[pl] += few3 >= 2;
++          continue;
++        }
++      }
++      for (int w = 0; w < W; w++) {
++        la[w * cap + k] = la[w * cap + i];
++        un[w] |= la[w * cap + i];
++      }
++      k++;
++    }
++    cls_passes[pl]++;
++    if (k == ca) {
++      quiet++;
++    } else {
++      quiet = 1;
++      cls_removed[pl] += ca - k;
++      s->nvalid[d][a] = k;
++      for (int w = 0; w < W; w++)
++        s->uni[d][a][w] = un[w];
++      if (s->np[a] + (int)k < n)
++        return 1;
++      const uint64_t *Ca = s->cells[d][a];
++      uint64_t dead = 0;
++      for (int w = 0; w < W; w++)
++        dead |= C[w] & ~Ca[w] & ~un[w];
++      if (dead)
++        return 2;
++    }
++    a = 1 - a;
++  }
++  return 0;
++}
++#endif
+ #endif
+ 
+ static void SEARCH_REC(sstate_t *s, int d);
+@@ -1334,8 +1870,25 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+         CP_WHY(CD_CROSS);
+       }
+     }
++#ifdef CLASS_SUP
++    const int cls_here =
++        sup && s->ncls &&
++        (s->cls_mode == 1 ||
++         (s->cls_mode == 2 && s->np[ROW] + s->np[COL] <= 2) ||
++         (s->cls_mode == 3 && s->np[ROW] + s->np[COL] == 3) ||
++         (s->cls_mode == 4 && s->np[ROW] + s->np[COL] <= 3) ||
++         (s->cls_mode == 5 && s->np[ROW] + s->np[COL] == 1) ||
++         (s->cls_mode == 6 && s->np[ROW] + s->np[COL] == 2));
++#else
++    const int cls_here = 0;
++#endif
+     /* the b candidates are closed already, the o candidates may not be */
+-    if (!dead && sup) {
++#ifdef CLASS_SUP
++    const int cls_skip = cls_here && s->cls_repl;
++#else
++    const int cls_skip = 0;
++#endif
++    if (!dead && sup && !cls_skip) {
+       CP_RESET();
+       dead = SUPPORT(s, d + 1, o, 1);
+ #ifdef DPROF
+@@ -1383,6 +1936,18 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+         CP_WHY(CD_AFTER);
+       }
+     }
++#ifdef CLASS_SUP
++    if (!dead && cls_here) {
++      const int cpl = 9 * s->np[ROW] + s->np[COL];
++      cls_calls[cpl]++;
++      const uint32_t k0 = s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL];
++      dead = s->cls_vec ? CLASS_VEC(s, d + 1, o) : CLASS_FIX(s, d + 1, o, cpl);
++      cls_kill[cpl] += dead != 0;
++      cls_kfc[cpl] += dead == 2;
++      cls_touched[cpl] +=
++          !dead && s->nvalid[d + 1][ROW] + s->nvalid[d + 1][COL] < k0;
++    }
++#endif
+     if (!dead) {
+       /* the child survives: count the labels of its lists, for the cells
+        * each list covers (the unmatched cells of the other axis); only
+@@ -1486,6 +2051,20 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+ }
+ 
+ static void SEARCH_REC(sstate_t *s, int d) {
++#if defined(CLASS_SUP) && defined(CARRY)
++  if (s->np[ROW] + s->np[COL] <= 3) {
++    /* labels present in the node's lists and placed vectors */
++    int pres = 0;
++    for (int w = 0; w < W; w++)
++      pres += __builtin_popcountll(s->uni[d][ROW][w] | s->uni[d][COL][w] |
++                                   s->cells[d][ROW][w] | s->cells[d][COL][w]);
++    int ab = (int)s->L - pres;
++    if (ab > 127) ab = 127;
++    if (ab < 0) ab = 0;
++    cls_absent[9 * s->np[ROW] + s->np[COL]][ab]++;
++    cls_absent_L[9 * s->np[ROW] + s->np[COL]] = s->L;
++  }
++#endif
+ #ifdef PROFILE
+   prof_vr[d] += s->nvalid[d][ROW];
+   prof_vc[d] += s->nvalid[d][COL];
+@@ -1744,6 +2323,12 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
+ #undef CROSS
+ #undef SUPPORT_AGAIN
+ #undef CROSS_CHUNK
++#ifdef CLASS_FIX
++#undef CLASS_FIX
++#undef CLS_OF
++#undef CLS_BOUNDS
++#undef CLASS_VEC
++#endif
+ #undef TRY_CHILD_INLINE
+ #undef CROSS_SIMD
+ #undef COUNT_BYTES
+-- 
+2.43.0
+

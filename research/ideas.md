@@ -2564,3 +2564,145 @@ CPU used: ~1.5 CPU-hours in all.
 * Gates: ~15 min.
 * Measurements: ~10 min.
 * x* checks: ~5 min.
+## Pair rules on top of the class support (October 2026, branch c2/classhall: no-go at stage A, not built)
+
+Question: the class support (`class_support = 1`, the level 2 of the
+c2/vdclass prototype; "Class support in the V_d searches", branch
+c2/classsup) checks, at the (1,1) children of a V_d search, that
+each candidate's cells and the classes it has to meet allow a matching:
+every cell needs a class (the "bad" test) and every class needs a cell
+(the "meet" test). The prototype's level 6 adds Hall's condition on pairs:
+* cell side: two cells of the candidate that only the same class c covers
+  (both in XO[c], the cells that class c alone covers outside the placed
+  vectors);
+* class side: two classes whose only cell of the candidate is the same
+  cell.
+
+On the same d, level 6 has 22-25% fewer nodes than level 2 (a2000
+2,420,190 -> 1,876,913; a2200 7,205,201 -> 5,537,591; a2400 9,367,374 ->
+7,060,610; 27% at a2650, 44% at c3648). It kills 2.6-3.3x more (1,1)
+children. But the eager vectorized version (`CLASS_VEC=1 CLASS_LVL=6`)
+is 1.24-1.58x slower.
+
+The plan was a lazy version (`class_support = 2`): after the level-2
+fixpoint, a masked test of 8 entries at a time against the OR of the XO[c]
+and against the single-cell classes, with the exact test only on the lanes
+that hit. Stage A was to decide by counting first:
+* GO if the entries that need the exact test, (i) ∪ (ii) below, are at
+  most 25% of the entries that pass level 2;
+* and if the gated test is estimated at <= 5% of the d-first time.
+
+**Answer: no-go on both counts.**
+* Two thirds of the entries that pass level 2 need the exact test, in
+  all three sums counted.
+* The gated test would cost ~23% of the d-first time.
+* Even at zero cost, the pair rules would bring the d-first time only to
+  0.75-0.85 of level 2's. That leaves no room under the success bar
+  (<= 0.90 at N >= 15k).
+* Stage B was not built.
+* The instrumentation is in `research/wip/patches/c2-classhall/`: three
+  patches on be625d8 (c2/profile's DPROF instrumentation, the c2/vdclass
+  prototype, and the stage-A counts; `-DCLASS_SUP` only, default builds
+  unchanged).
+
+**Stage A counts.**
+* Method: the scalar CLASS_FIX at level 6 (`CLASS_SUP=6 CLASS_LVL=6
+  CLASS_VEC=0`), the (1,1) children, d-sampled at offset 13.
+* Each pass tests every entry. The counts are per entry test, among the
+  tests that pass level 2.
+* The classes are the available classes other than the entry's. The cells
+  are the entry's cells outside the placed vectors, other than its d cell.
+* (i) a cell that exactly one class covers, i.e. a cell in some XO[c];
+* (ii) a class with exactly one cell of the entry;
+* (i2), (ii2): the actual violations, two such cells of one class or two
+  such classes on one cell;
+* (iii): the entries that the pair rules drop.
+
+| sum (stride) | N | d | tests passing level 2 | (i) | (ii) | **(i) ∪ (ii)** | (i2) | (ii2) | (iii) dropped | calls with drops |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 13 7 4 3 1 1 / 2000 (200) | 7,593 | 38 | 126.7M | 51.0% | 47.2% | **66.4%** | 1.95% | 1.83% | 3.03% | 99.9% |
+| 13 7 4 3 1 1 / 2200 (500) | 15,199 | 31 | 401.3M | 50.1% | 48.1% | **66.6%** | 1.92% | 1.85% | 3.05% | 99.97% |
+| 13 7 4 3 1 1 / 2400 (1200) | 22,993 | 20 | 602.7M | 50.3% | 47.5% | **66.3%** | 1.87% | 1.77% | 2.96% | 99.99% |
+
+* **Why so many.** At a (1,1) child, a candidate has k = 4 or 5 cells
+  outside the placed vector, other than its d cell. It has exactly k
+  classes to meet: k = 5 when its class is the placed vector's (37-54% of
+  the tests), 4 otherwise.
+  * So the matching is perfect and tight. A cell or class with a single
+    partner is the norm, and an actual violation is rare: (iii) is 3%.
+  * A cell covered by no class, or a class with no cell, is level 2's
+    business.
+* **The lazy order changes nothing.** `CLASS_STAGED=1` runs level 2 to
+  its fixpoint, then the pair passes; nodes are the same. At a2000:
+  * 82,895 of the 94,781 calls reach the pair stage;
+  * that stage takes 7.1 passes per call (pair drops in 99.9% of the
+    calls, which re-open level 2 on the other axis);
+  * it makes 100.7M entry tests, against 134.1M in the level-2 stage;
+  * (i) ∪ (ii) is 68.3% of the 94.4M tests that pass level 2.
+* **Cheaper gates.**
+  * (sc2), two single-class cells of any classes, is a one-mask popcount
+    gate for the cell side, and it is 11.7% (a2000). But the cell side
+    alone (level 3) gives -13.8% nodes at a2000 (2,085,773), against
+    -22.4% for both sides.
+  * The class side has no one-mask superset. "At most one cell per
+    64-bit word" hits 80-87%.
+* **Cost estimate** (a2200, by the go/no-go rule):
+  * The level-2 pass of c2/classsup (its CLASS_PROF build, the same d)
+    costs 9,234 cycles per call, 14.7% of the search. That is ~342 groups of 8 per
+    call, ~3.4 cycles per entry slot.
+  * The lazy pair stage needs ~1,080 gated tests per call (a2200's
+    unstaged count x the a2000 staged / unstaged ratio 0.77).
+  * At ~4x the per-entry cost of level 2, that is ~14.6k cycles per call,
+    1.6x the whole level-2 pass: ~23% of the d-first time against <= 5%.
+
+**The ceiling: the pair rules at zero cost.**
+* Method: the prototype's vectorized level 2 against its eager level 6
+  (`CLASS_VEC=1`), with TSC cycles around the class checks and the whole
+  search (`clscyc`). Min of 2 alternating runs, the same d. The samples
+  of c2/classsup: c3648 (14 7 4 4 1 0 0 1 / 3648) at offset 517, the
+  others (a = 13 7 4 3 1 1) at offset 13.
+* "rest" is the search without the class checks.
+* The bound, (rest at level 6 + class checks at level 2) / (search at
+  level 2), is the d-first time if the pairs cost nothing and level 2 cost
+  no more than now.
+
+| sum (stride) | N | nodes l2 -> l6 | search Gcyc l2 / eager l6 | class checks l2 / l6 | rest l2 -> l6 | bound | eager l6 / l2 |
+| --- | ---: | --- | --- | --- | --- | ---: | ---: |
+| a2000 (200) | 7,593 | 2,420,190 -> 1,876,913 (0.78) | 2.78 / 4.39 | 0.71 / 2.75 | 2.06 -> 1.64 (0.80) | 0.85 | 1.58 |
+| a2200 (500) | 15,199 | 7,205,201 -> 5,537,591 (0.77) | 12.46 / 17.06 | 2.35 / 9.16 | 10.11 -> 7.91 (0.78) | 0.82 | 1.37 |
+| c3648 (1000) | 20,538 | 2,027,116 -> 1,127,691 (0.56) | 5.69 / 7.97 | 1.74 / 5.44 | 3.94 -> 2.54 (0.64) | 0.75 | 1.40 |
+| a2400 (1200) | 22,993 | 9,367,374 -> 7,060,610 (0.75) | 19.09 / 25.92 | 3.15 / 13.64 | 15.95 -> 12.28 (0.77) | 0.81 | 1.36 |
+| a2650 (3000) | 31,743 | 5,634,085 -> 4,088,228 (0.73) | 17.95 / 22.18 | 2.70 / 10.73 | 15.25 -> 11.45 (0.75) | 0.79 | 1.24 |
+
+* **The budget.** Hitting <= 0.90 needs the whole pair stage to cost <=
+  8% (a2200), 9% (a2400), 11% (a2650) or 15% (c3648) of the level-2
+  time. Hitting <= 1.02 at a2000 needs <= 17%.
+* **The lazy design costs more than that.** The prototype's CLASS_VEC
+  already runs the pairs only once level 2 is quiet ("the pairs last"),
+  so the lazy design saves only the lanes the gate lets through:
+  * the exact test still runs on 0.68 of the pair stage's lanes;
+  * the gate test and the stage's extra level-2 passes run on all of
+    them (at a2200, 2.58M passes against 1.35M at level 2);
+  * an implementation like c2/classsup's might be ~1.34x cheaper than the
+    prototype's (its level 2 takes 9,234 cycles per call against the
+    prototype's 12,400 at a2200).
+  * That is at best ~0.5 of the eager pair work. The eager pair work (the
+    l6 - l2 class checks above) is 45-73% of the level-2 time, so the
+    lazy version would still cost ~23-37%.
+  * That gives ~1.0-1.1 at N >= 15k and ~1.2 at a2000.
+* **Cell side alone.** Level 3 with the (sc2) gate would cost little, but
+  at a2000 its ceiling is ~0.90: nodes x0.86 and rest ~x0.87 by the same
+  elasticity, with level 2's class cost. So it is ~0.9 at best, and not
+  tried.
+
+**Takeaway.**
+* The Hall pairs of the class matching kill real work: 22-44% of the
+  nodes, 20-36% of the rest of the search.
+* But they are a dense test. Two thirds of the candidates have a forced
+  cell or class, and only 3% violate.
+* So the test cannot be gated cheaply, and an exact per-entry test (a
+  per-class popcount, or the per-label class masks with a table-driven
+  Hall check) costs more than the pruning saves.
+* This suggests that any further gain from the class structure must
+  come from fewer candidates entering the (1,1) children, not from a
+  stronger test there.
