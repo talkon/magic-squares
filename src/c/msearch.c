@@ -31,8 +31,9 @@
  *                     vector d of the sum (unreduced), the semi-magic
  *                     search on V_d = {v : |v & d| = 1} finds every
  *                     (square, SP traversal) pair once, so every magic
- *                     square (twice, once per diagonal); the other sums
- *                     get the plain search
+ *                     square (twice, once per diagonal; once or twice with
+ *                     the star cover, --dfirst-star); the other sums get
+ *                     the plain search
  *   --diag-first-min-n N0   default 5000, about where d-first and the
  *                     plain search cost the same per sum (d-first / plain
  *                     CPU, with the class support: 1.24x at N = 4.1k,
@@ -65,6 +66,20 @@
  *                     estimates the sum's semi-magic squares and plain time
  *                     (not in a sum whose d loop --time-limit or
  *                     --total-nodes stopped)
+ *   --dfirst-star K   the star cover (dfirst.h, dfirst_set_star; even n
+ *                     only): x*, the number whose d hold the most predicted
+ *                     cost, is chosen from the whole unreduced list, and of
+ *                     the d containing it ("star d", ranked by index) only
+ *                     every K-th is searched (rank % K == 0; K = -1: none;
+ *                     K = 0: no star cover). Default 4 for even n (1.05-
+ *                     1.08x less CPU per sum at N = 7.6-23k), 0 for odd n.
+ *                     Every magic square is still found (its other
+ *                     diagonal lacks x*) and flagged; the (square, d) pairs
+ *                     of the star d are estimated (K x those of the
+ *                     searched ones)
+ *   --dfirst-star-only   search only the star d that --dfirst-star K (>= 1;
+ *                     here by default 1) searches (a measurement of their
+ *                     cost; the sum is not complete)
  *
  * r1 sampling of the plain search (measurements; the squares and the sum
  * record become "csquare" / "csum" records with estimates):
@@ -117,7 +132,21 @@
  * range; vd_time, setup_time, search_time: wall-clock sums over d), and
  * complete says that every d of the sum was
  * searched (not a --d-range part, a --d-stride sample, or a truncated
- * run). With --diag-first the "done" record has "mode":"dfirst" (and
+ * run; with --dfirst-star K, every d without x*: every magic square was
+ * found, but the pairs of the star d are estimated). With the star cover
+ * (K != 0) the dsum record also has star_x (x*), star_k (K), star_only,
+ * nd_star (star d in [d_lo, d_hi)), nd_star_skipped, nd_star_searched (of
+ * the sampled d), pairs_star, nodes_star and cpu_star (of the star d
+ * searched), pred_star_share (the star d's predicted share of the d loop's
+ * CPU, over the whole list), star_freq_rank (x*'s rank by the number of d
+ * containing it), pred_share_top_freq (that of the most frequent number)
+ * and star_time (the process CPU of choosing x*, in time and cpu, not
+ * scaled in est_time); its est_pairs, est_nodes and est_time weigh a
+ * searched star d K x (d_stride x K; with K = -1 they cover the d without
+ * x* only, with --dfirst-star-only the star d only), and se_pairs /
+ * se_time are those of the two strata (star d and the others), each
+ * sampled at random. A dchunk record has star_k, nd_star_skipped and
+ * pairs_star then. With --diag-first the "done" record has "mode":"dfirst" (and
  * diag_first_min_n): its range then also holds the d-first sums, which
  * have no "sum" record but are not empty, and with --d-range lo:hi, lo > 0,
  * the plain sums of the range get a "skip" record instead of a search
@@ -397,21 +426,43 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
                            size_t d_stride, int64_t d_offset, uint64_t seed,
                            size_t d_lo, size_t d_hi, size_t d_chunk,
                            FILE *d_log, uint32_t calib_stride, int top_root,
+                           int star_k, int star_only,
                            double enum_share, double reduce_time,
                            double pre_cpu, double deadline) {
   const double c0 = cpu_time();
   dfirst_t *df = dfirst_new(red, 0, red->count, all, start_i, raw);
   dfirst_set_top_root(df, top_root);
   const double t_index = cpu_time() - c0;
+  /* the star cover: x* from the whole list (every unit of the sum agrees) */
+  const int star = star_k != 0 || star_only;
+  dfirst_star_t sx;
+  memset(&sx, 0, sizeof(sx));
+  double t_star = 0;
+  if (star) {
+    const double cs = cpu_time();
+    sx = dfirst_star_choose(df);
+    dfirst_set_star(df, sx.x, star_k, star_only);
+    if (star_only && star_k == 0)
+      star_k = 1;
+    t_star = cpu_time() - cs;
+  }
   const uint64_t sd = splitmix(seed ^ (S * 0x9E3779B97F4A7C15ull));
   const size_t off = d_offset >= 0 ? (size_t)d_offset % d_stride
                                    : (size_t)(splitmix(sd + 101) % d_stride);
   const size_t hi = d_hi < raw ? d_hi : raw, lo = d_lo < hi ? d_lo : hi;
   ctx->S = S;
   ctx->magic_pairs = 0;
-  if (d_log)
-    fprintf(d_log, "# S %lu N %zu Nred %zu stride %zu offset %zu\n",
+  if (d_log) {
+    fprintf(d_log, "# S %lu N %zu Nred %zu stride %zu offset %zu",
             (unsigned long)S, raw, red->count, d_stride, off);
+    if (star)
+      fprintf(d_log,
+              " star_x %lu star_k %d star_only %d nd_star %lu pred_share %.6f "
+              "star_time %.6f",
+              (unsigned long)sx.x, star_k, star_only, (unsigned long)sx.nstar,
+              sx.share, t_star);
+    fputc('\n', d_log);
+  }
   dfirst_stats_t tot;
   memset(&tot, 0, sizeof(tot));
   const size_t base = lo + off;
@@ -440,15 +491,30 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
     tot.cpu_seconds += st.cpu_seconds;
     tot.d_pairs2 += st.d_pairs2;
     tot.truncated |= st.truncated;
+    tot.nd_star_skipped += st.nd_star_skipped;
+    tot.nd_other_skipped += st.nd_other_skipped;
+    tot.nd_star += st.nd_star;
+    tot.nodes_star += st.nodes_star;
+    tot.pairs_star += st.pairs_star;
+    tot.d_cpu_star += st.d_cpu_star;
+    tot.d_cpu2_star += st.d_cpu2_star;
+    tot.d_pairs2_star += st.d_pairs2_star;
     fprintf(out,
             "{\"type\":\"dchunk\",\"n\":%d,\"P\":[%s],\"S\":%lu,\"d_lo\":%zu,"
             "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
             "\"nvecs_raw\":%zu,\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,"
-            "\"time\":%.6f,\"truncated\":%d}\n",
+            "\"time\":%.6f,\"truncated\":%d",
             n, pstr, (unsigned long)S, c, c2, d_stride, off,
             (unsigned long)st.nd, raw, (unsigned long)st.nodes,
             (unsigned long)st.pairs, (unsigned long)st.partners,
             cpu_time() - cc, st.truncated);
+    if (star)
+      fprintf(out,
+              ",\"star_k\":%d,\"star_only\":%d,\"nd_star_skipped\":%lu,"
+              "\"pairs_star\":%lu",
+              star_k, star_only, (unsigned long)st.nd_star_skipped,
+              (unsigned long)st.pairs_star);
+    fprintf(out, "}\n");
     fflush(out);
     /* --time-limit: also between the chunks of a d-first sum, which can
      * take hours (the sum is then not complete) */
@@ -461,8 +527,9 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
    * hence its magic squares, are all found (a d-range unit, a d sample,
    * a truncated or stopped run is not complete) */
   const int complete = lo == 0 && hi == raw && d_stride == 1 &&
-                       !tot.truncated && !stopped;
+                       !tot.truncated && !stopped && !star_only;
   const uint32_t labels = dfirst_num_labels(df);
+  const uint64_t nd_star_range = dfirst_star_count(df, lo, hi);
   dfirst_free(df);
   const double cpu = cpu_time() - c0;
   /* estimates for the d in [lo, hi): stride x the sampled totals, and the
@@ -470,12 +537,50 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
   const double k = (double)d_stride, m = (double)tot.nd;
   const double Nd = (double)(hi - lo);
   double se_time = 0, se_pairs = 0;
-  if (m >= 2) {
+  double est_pairs = k * (double)tot.pairs, est_nodes = k * (double)tot.nodes;
+  double est_time = t_index + k * (cpu - t_index);
+  if (!star && m >= 2) {
     const double f = Nd * Nd * (1 - m / Nd) / m / (m - 1);
     const double ct = tot.d_cpu; /* the sum over d of the per-d CPU */
     const double vt = f * (tot.d_cpu2 - ct * ct / m);
     const double vp =
         f * (tot.d_pairs2 - (double)tot.pairs * (double)tot.pairs / m);
+    se_time = vt > 0 ? sqrt(vt) : 0;
+    se_pairs = vp > 0 ? sqrt(vp) : 0;
+  } else if (star) {
+    /* two strata, the d without x* (weight 1, 0 with --dfirst-star-only)
+     * and the star d (weight K, 0 with K = -1), each weighted by d_stride:
+     * est = d_stride (w_o x the others' totals + w_s x the star d's); the
+     * d loop's CPU (without the choice of x*) is split between them by
+     * their per-d CPU. Standard errors: each stratum a simple random
+     * sample of its d in [lo, hi) */
+    const double w_o = star_only ? 0.0 : 1.0;
+    const double w_s = star_k >= 1 ? (double)star_k : 0.0;
+    const double po = (double)(tot.pairs - tot.pairs_star),
+                 ps = (double)tot.pairs_star;
+    const double co = tot.d_cpu - tot.d_cpu_star, cs = tot.d_cpu_star;
+    est_pairs = k * (w_o * po + w_s * ps);
+    est_nodes = k * (w_o * (double)(tot.nodes - tot.nodes_star) +
+                     w_s * (double)tot.nodes_star);
+    const double loop = cpu - t_index - t_star;
+    est_time = t_index + t_star +
+               (co + cs > 0 ? k * loop * (w_o * co + w_s * cs) / (co + cs) : 0.0);
+    double vt = 0, vp = 0;
+    const struct {
+      double w, Nh, nh, sy, sy2, sp, sp2;
+    } h[2] = {{w_o, Nd - (double)nd_star_range, (double)(tot.nd - tot.nd_star),
+               co, tot.d_cpu2 - tot.d_cpu2_star, po,
+               tot.d_pairs2 - tot.d_pairs2_star},
+              {w_s, (double)nd_star_range, (double)tot.nd_star, cs,
+               tot.d_cpu2_star, ps, tot.d_pairs2_star}};
+    for (int j = 0; j < 2; j++) {
+      if (h[j].w == 0 || h[j].nh < 2 || h[j].Nh <= h[j].nh)
+        continue;
+      const double f =
+          h[j].Nh * h[j].Nh * (1 - h[j].nh / h[j].Nh) / h[j].nh / (h[j].nh - 1);
+      vt += f * (h[j].sy2 - h[j].sy * h[j].sy / h[j].nh);
+      vp += f * (h[j].sp2 - h[j].sp * h[j].sp / h[j].nh);
+    }
     se_time = vt > 0 ? sqrt(vt) : 0;
     se_pairs = vp > 0 ? sqrt(vp) : 0;
   }
@@ -490,16 +595,31 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           "\"vd_time\":%.6f,\"setup_time\":%.6f,\"search_time\":%.6f,"
           "\"est_time\":%.6g,\"se_time\":%.6g,\"enum_time\":%.6f,"
           "\"reduce_time\":%.6f,\"cpu\":%.6f,\"truncated\":%d,"
-          "\"complete\":%d,\"engine\":%d}\n",
+          "\"complete\":%d,\"engine\":%d",
           n, pstr, (unsigned long)pexp_value(p), (unsigned long)S, red->count,
           raw, labels, lo, hi, d_stride, off, (unsigned long)tot.nd,
           tot.nd ? (double)tot.vd_total / (double)tot.nd : 0.0,
           (unsigned long)tot.nodes, (unsigned long)tot.pairs,
           (unsigned long)tot.partners, (unsigned long)ctx->magic_pairs,
-          k * (double)tot.pairs, se_pairs, k * (double)tot.nodes, cpu, t_index,
+          est_pairs, se_pairs, est_nodes, cpu, t_index,
           tot.vd_seconds, tot.setup_seconds, tot.search_seconds,
-          t_index + k * (cpu - t_index), se_time, enum_share, reduce_time,
+          est_time, se_time, enum_share, reduce_time,
           cpu + pre_cpu, tot.truncated, complete, ENGINE_VERSION);
+  if (star)
+    fprintf(out,
+            ",\"star_x\":%lu,\"star_k\":%d,\"star_only\":%d,\"nd_star\":%lu,"
+            "\"nd_star_skipped\":%lu,\"nd_star_searched\":%lu,"
+            "\"nd_other_skipped\":%lu,\"pairs_star\":%lu,\"nodes_star\":%lu,"
+            "\"cpu_star\":%.6f,\"pred_star_share\":%.6g,"
+            "\"star_freq_rank\":%d,\"nd_star_all\":%lu,"
+            "\"pred_share_top_freq\":%.6g,\"star_time\":%.6f",
+            (unsigned long)sx.x, star_k, star_only,
+            (unsigned long)nd_star_range, (unsigned long)tot.nd_star_skipped,
+            (unsigned long)tot.nd_star, (unsigned long)tot.nd_other_skipped,
+            (unsigned long)tot.pairs_star, (unsigned long)tot.nodes_star,
+            tot.d_cpu_star, sx.share, sx.freq_rank, (unsigned long)sx.nstar,
+            sx.top_freq_share, t_star);
+  fprintf(out, "}\n");
   fflush(out);
   uint64_t nodes = tot.nodes;
   /* (not after --time-limit or --total-nodes stopped the d loop: the
@@ -538,6 +658,9 @@ int main(int argc, char *argv[]) {
   uint32_t calib_stride = 0;
   int d_top_root = 1; /* see dfirst_set_top_root */
   int d_class_support = 1; /* search_opts_t class_support in V_d */
+  /* --dfirst-star K (default: 4 for even n, 0 for odd n), and
+   * --dfirst-star-only (default K then 1) */
+  int star_k = 0, star_k_set = 0, star_only = 0;
   const char *dfirst_opt = NULL; /* a d-first option given (for the check) */
   /* r1 sampling of the plain search */
   uint32_t r1_stride = 0, r1_strata[8];
@@ -564,6 +687,8 @@ int main(int argc, char *argv[]) {
       {"sample-seed", required_argument, 0, 1012},
       {"d-plain-root", no_argument, 0, 1013},
       {"no-class-support", no_argument, 0, 1014},
+      {"dfirst-star", required_argument, 0, 1015},
+      {"dfirst-star-only", no_argument, 0, 1016},
       {"vec-size", required_argument, 0, 'n'},
       {"min-sum", required_argument, 0, 'a'},
       {"max-sum", required_argument, 0, 'b'},
@@ -709,6 +834,26 @@ int main(int argc, char *argv[]) {
       d_class_support = 0;
       dfirst_opt = "no-class-support";
       break;
+    case 1015:
+      /* K >= 1, or -1 (skip every star d), or 0 (off) */
+      if (!strcmp(optarg, "-1"))
+        star_k = -1;
+      else {
+        const uint64_t v = arg_u64(optarg, "dfirst-star");
+        if (v > 1000000) {
+          fprintf(stderr, "msearch: bad value '%s' for --dfirst-star\n",
+                  optarg);
+          return 2;
+        }
+        star_k = (int)v;
+      }
+      star_k_set = 1;
+      dfirst_opt = "dfirst-star";
+      break;
+    case 1016:
+      star_only = 1;
+      dfirst_opt = "dfirst-star-only";
+      break;
     default:
       return 2;
     }
@@ -724,7 +869,8 @@ int main(int argc, char *argv[]) {
             "[--no-cross] [--pretest-min K]\n"
             "  [--diag-first [--diag-first-min-n N0] [--d-stride k] "
             "[--d-offset o] [--d-range lo:hi] [--d-chunk C] [--d-log FILE] "
-            "[--d-plain-root] [--no-class-support] [--calib-r1-stride k]]\n"
+            "[--d-plain-root] [--no-class-support] [--calib-r1-stride k] "
+            "[--dfirst-star K] [--dfirst-star-only]]\n"
             "  [--r1-stride k] [--r1-offset o] [--r1-strata k1,k2,..] "
             "[--r1-log FILE] [--sample-seed X]\n"
             "  e1 e2 ...   (P = 2^e1 3^e2 5^e3 ...; see the header of "
@@ -737,6 +883,20 @@ int main(int argc, char *argv[]) {
   }
   /* (a no-op outside the V_d searches: it needs their top numbers) */
   opts.class_support = diag_first && d_class_support;
+  /* the star cover needs disjoint diagonals: those of an odd square share
+   * their center, which may be x*; by default K = 4 (research/ideas.md,
+   * "The star cover of the d loop": 1.05-1.08x less CPU per sum at N =
+   * 7.6-23k), and 1 (every star d) for --dfirst-star-only */
+  if (!star_k_set)
+    star_k = star_only ? 1 : n % 2 ? 0 : 4;
+  if ((star_k != 0 || star_only) && n % 2) {
+    fprintf(stderr, "msearch: --dfirst-star needs an even --vec-size\n");
+    return 2;
+  }
+  if (star_only && star_k < 0) {
+    fprintf(stderr, "msearch: --dfirst-star-only needs --dfirst-star K >= 1\n");
+    return 2;
+  }
 
   FILE *out = stdout;
   if (out_file) {
@@ -851,7 +1011,8 @@ int main(int argc, char *argv[]) {
         total_nodes += run_dfirst(out, &ctx, pstr, n, &p, S, &all, start_i,
                                   raw, &red, &opts, d_stride, d_offset, seed,
                                   d_range_lo, d_range_hi, d_chunk, d_log,
-                                  calib_stride, d_top_root, enum_time * share,
+                                  calib_stride, d_top_root, star_k, star_only,
+                                  enum_time * share,
                                   reduce_time, pre_cpu,
                                   time_limit > 0 ? t_start + time_limit : 0);
         if (total_node_limit && total_nodes >= total_node_limit)

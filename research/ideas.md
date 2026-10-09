@@ -2357,3 +2357,210 @@ Fits of t = a (N / 4000)^b CPU-s on the same 11 sums (4.1-31.7k):
     fuller matchings), left out by the brief;
   * the matrix path (the V_d with more than 512 labels, or without
     AVX-512BW, get no class support).
+## The star cover of the d loop (October 2026, branch c2/star)
+
+The two diagonals of an n x n square of even order have no cell in common.
+A magic square's n^2 numbers are distinct, so its two diagonals (both SP
+traversals) have no number in common either. So for any number x, at most
+one of them contains x, and the d-first loop finds the square from the
+other one.
+
+* The loop may skip every "star d", the d of the sum that contain a
+  chosen x*. Every magic square is still found, once instead of twice when
+  x* is on one of its diagonals.
+* The square is still flagged: the partner test runs against the whole
+  diagonal set, star d included.
+* Only (square, SP traversal) pairs are lost. A systematic sample of the
+  star d (every K-th, by rank in the unreduced list) estimates them.
+* Not for odd n: the two diagonals share their center cell, which may be
+  x*.
+
+**Implementation** (src/c/dfirst.c, msearch):
+
+* `dfirst_star_choose` picks x* from the whole unreduced list, so every
+  `--d-range` unit and `--d-stride` sample of a sum agrees.
+  * For every d, one pass over the postings of d's numbers gives |V_d| and
+    the class sizes (R = the rarest class). No V_d is built.
+  * x* = argmax over x of the sum, over the d containing x, of
+    |V_d|^5.5 R^1.4, the per-d cost law of
+    research/wip/complexity-profile.md. Ties go to the smaller x.
+  * The CPU time is 0.036 s at N = 5.9k and 0.55 s at 31.7k: 0.03% and
+    0.001% of the sum's d-first CPU. A d-range unit pays it again, which
+    is still negligible. The fallback to the most frequent number was not
+    needed.
+* `dfirst_set_star(x, K, only)` sets the filter. With K >= 1 only the star
+  d of rank % K == 0 are searched; with K = -1 none are.
+* msearch options:
+  * `--dfirst-star K` defaults to 4 for even n and to off for odd n.
+    `--dfirst-star 0` gives be625d8's output. A nonzero K with odd n is
+    refused.
+  * `--dfirst-star-only` searches only the star d, for measurements. The
+    sum is then not complete.
+* The dsum record gets `star_x`, `star_k`, `nd_star`, `nd_star_skipped`,
+  `nd_star_searched`, `pairs_star`, `nodes_star`, `cpu_star`,
+  `pred_star_share`, `star_freq_rank`, `pred_share_top_freq` and
+  `star_time`.
+* The estimates (`est_pairs`, `est_nodes`, `est_time`) weigh a searched
+  star d K x the d-stride weight.
+  * With K = -1 they cover the d without x* only, and the schedulers do not
+    count them.
+  * `se_*` come from two strata (star d and the others), each a simple
+    random sample of its d in the range.
+* `complete` still means that every magic square of the sum was found.
+* Scheduler (both models): a complete sum's pairs count through
+  `est_pairs`, once per sum (`scheduler.dsum_est_pairs`: totals
+  `dfirst_pairs`, `dfirst_est_pairs`, `dfirst_est_sums`,
+  `dfirst_star_sums`; SUMMARY_VERSION 4). A magic square is counted once,
+  whether it came once or twice.
+
+**Correctness.**
+
+* (a) 39 small sums with N = 452-3,626 (cx/dfirst's gate-(b) list: 15 SP
+  pairs, 2 of them on a star d) were each run with K = 0, 1, 4 and -1.
+  * The K = 4 and K = -1 runs' "dsquare" records are byte-identical to the
+    K = 0 run's records, filtered to the d without x* plus (K = 4) the star
+    d of rank % 4 == 0. Star membership and ranks come from the K = 1 run's
+    d log.
+  * K = 1 equals K = 0: the same pairs, nodes and estimates.
+  * The counts (nd + nd_star_skipped = N, nd_star_searched = ceil(nd_star
+    / 4)) and est_pairs = pairs + 3 x pairs_star hold.
+  * The default equals K = 4.
+* (b) Magic exactness.
+  * `fuzz_arrange --dfirst` now checks, per check:
+    * x* against brute force (|V_d| and R recounted; the same weights
+      summed in the same order; ties to the smaller number);
+    * the filter with K = -1, a random K in 1-5, `only`, and a d-stride 3
+      split, against the brute-force pairs filtered the same way, with the
+      partner flags and the counts;
+    * with x forced onto one diagonal of the planted magic pair (and not
+      the other) and K = -1, the planted square must come exactly once,
+      from the other diagonal, flagged.
+  * 2,500 fresh seeds gave 0 fails. They covered: default modes 600;
+    `--n 6` 300 (402 planted 6x6 magic pairs); `--n 4` 200; `--n 8` 100;
+    mode 1 300; mode 7 200; the matrices build 300 plus mode 7 100;
+    portable 200; no-GFNI 200.
+  * Totals: 24,062 star runs, 737,723 kept pairs checked (198,642
+    brute-force pairs, 111,404 flagged), and 4,062 planted magic squares
+    with x* on one diagonal, all found and flagged.
+  * Mode 5 (hubs) was stopped after 34 CPU-min inside its brute-force
+    oracle. A rerun with `--budget 5000000` passed: 25 seeds ran (5 skipped
+    by the oracle budget), with 48 planted squares.
+  * Eight mutants of dfirst.c were each caught (14-120 fails in 60 seeds):
+    the last number of d not tested, the rank offset, the exponent, ties
+    to the larger number, the class count, `only` inverted, the skip
+    counts, and the partner test made to ignore star d.
+  * On real sums (a driver in the scratchpad, c2/star/real/star_real.c),
+    222 magic pairs were planted in the box configuration: 3 per semi-magic
+    square of 7 sums, N = 1.5-3k, the pairs added to the unreduced list.
+    Two checks:
+    * x* chosen on the augmented list (on a planted diagonal 66 times), K
+      = -1, every planted square found and flagged;
+    * x forced onto each planted diagonal: 444 checks, each found once from
+      the other diagonal, flagged.
+  * No result file holds a known magic square (none is known), so the
+    "known magic squares" half of the gate is vacuous.
+* (c) `--dfirst-star 0` is byte-identical to be625d8 on the 39 sums, except
+  for the timing fields. Gates (a) and (c) were rerun on the final binary,
+  with K = 4 as the default. arrange.c is untouched: bench quick / full /
+  prod give 1,770,779 / 14,958,507 / 50,375,738 nodes, all ok.
+* (d) `test_scheduler.py` `test_dfirst_star` runs synthetic star records
+  through both schedulers.
+  * A complete K = 4 sum: est_pairs, not pairs or K x pairs_star again.
+  * A duplicate unit of it (K = 0), counted once.
+  * A K = -1 sum: covered, its pairs found, no estimate.
+  * A star-only part: not covered.
+  * Magic squares that came once and twice: counted once each.
+  * Fits unchanged, and incremental reads equal to a full read.
+  * On msearch output: three `--d-range` units of a sum choose the same x*,
+    and their counts, pairs and est_pairs add up to the whole sum's. K = 1
+    equals K = 0, the default is K = 4, and odd n has no star cover.
+* `ctest -R fast_` passes (48 tests). The new tests are
+  `fast_msearch_dfirst_star` and five new refusals in
+  `fast_msearch_bad_args`. dfirst.c and msearch.c compile with `-Wall
+  -Wextra -Werror -std=c17 -pedantic-errors`.
+* The independent x* check (scratchpad c2/star/gates/xstar.py: numpy from
+  bin/enumerate's
+  unreduced and reduced lists) agrees exactly at S = 849 and on a1950,
+  a2000, b1200, c3648 and a2400: x*, its share, its star d and its
+  frequency rank.
+
+**Measured share.** s is the star d's share of the d loop's CPU.
+
+* Method: per-d CPU from the d log, min of 2 alternating replicates, one
+  heavy process at a time, ~10 CPU-min.
+* The star d: all of them at 7.6k and 11.7k (`--dfirst-star 1
+  --dfirst-star-only`), and 40-41 at 20-23k (K = 23 or 25).
+* The other d: a d-stride sample of ~150 d.
+* s = A / (A + B), with A the star d's CPU and B the other d's CPU
+  estimated from the stride sample. The SE is by the delta method; A / T
+  (T from the stride sample alone) agrees within 0.001.
+
+| sum | N | x* (freq rank) | star d (share of d) | star d / mean d cost | predicted s | measured s | error | 1/(1 - 0.75 s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 13 7 4 3 1 1 / 2000 | 7,593 | 280 (1) | 627 (8.3%) | 1.14 | 0.0958 | 0.094 +- 0.005 | -2.0% | 1.076 |
+| 12 6 3 2 1 1 / 1200 | 11,698 | 24 (4) | 707 (6.0%) | 1.20 | 0.0748 | 0.073 +- 0.004 | -2.0% | 1.058 |
+| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 840 (8) | 1,018 (5.0%) | 1.36 | 0.0686 | 0.067 +- 0.005 | -2.1% | 1.053 |
+| 13 7 4 3 1 1 / 2400 | 22,993 | 720 (31) | 919 (4.0%) | 1.51 | 0.0632 | 0.061 +- 0.005 | -3.9% | 1.048 |
+
+* Every success criterion is met:
+  * s >= 0.06 at 7-12k and >= 0.05 at 20-23k;
+  * the prediction is within 2-4% (bar 30%), slightly high everywhere;
+  * the choice of x* takes <= 0.03% of the CPU.
+* **K = 4 is now the d-first default.** It searches a quarter of the star
+  d, so the CPU per sum, and with it the CPU per expected magic square,
+  falls by 1/(1 - 0.75 s): **1.076x at 7.6k, 1.058x at 11.7k, 1.053x at
+  20.5k and 1.048x at 23k**.
+  * K = -1 would give 1/(1 - s): 1.065-1.10x, but no estimate of the star
+    d's pairs.
+* The predicted share on all 12 sums of the round-2 profile is 0.104 at
+  5.9k, 0.093-0.096 at 6.7-7.6k, 0.075-0.085 at 11-15k, 0.066-0.082 at
+  16-21k and 0.062-0.068 at 23-32k.
+  * It goes as ~0.110 (N/4000)^-0.28. With the measured 2-4% bias, K = 4
+    saves 1.08x at 5.9k down to 1.048x at 31.7k.
+  * So the gain is a constant factor, not a change of the N exponent. It
+    shrinks slowly (+0.015 on the exponent of the time per sum), because
+    x*'s share of the d falls (~N^-0.46) faster than its d's cost ratio
+    rises (1.14 -> 1.51).
+* The chosen x* is the most frequent number on 5 of the 12 sums, and of
+  rank 4-31 on the others.
+  * Choosing by cost gains up to 24% of share over the most frequent
+    number (c3648: 0.069 against 0.056; a2650: 0.062 against 0.054). It
+    gains nothing at a2400 (0.0632 against 0.0629, the most frequent
+    number being 420).
+* The pairs lose a little precision. A star d's pairs count K x, so the
+  variance of est_pairs grows by about (K - 1) x the star d's share of the
+  pairs (~1.2x at K = 4). Magic squares are unaffected.
+
+**Limits (negative results).**
+
+* The star is about the most an exact skip rule of this kind can take.
+  * A skipped family of d is safe if no two of its members can be the two
+    diagonals of a magic square. Without knowing the squares, that means
+    pairwise intersecting families.
+  * The other intersecting families, such as the d holding 2 of 3 fixed
+    numbers or Hilton-Milner families, are much smaller than a star. 2 of
+    3 numbers holds ~3 f^2 of the d, against f ~ 0.04-0.09 for a star.
+    (By estimate, not measured.)
+  * So the cover tops out at the largest star share, 6-10%.
+* Two stars cannot be combined: a magic square with x1 on one diagonal and
+  x2 on the other would be lost.
+
+**For the integration** with the scheduler that launches d-first units
+(e0ace54, after be625d8):
+
+* Its d-first time law takes a part's share of the sum from
+  `[d_lo, d_lo + nd)`. With the star cover nd counts only the d searched,
+  so use `d_hi`.
+* Its loop CPU is then the star-reduced cost. Either learn the law "as
+  run" (every unit at K = 4; the old K = 0 records are 5-8% high), or
+  scale K = 0 records by (1 - 0.75 pred_star_share), which those records
+  lack (~0.07 at 20k).
+* `dfirst_args` should pass `--dfirst-star 4` explicitly, so that a unit's
+  cost does not depend on the binary's default.
+
+CPU used: ~1.5 CPU-hours in all.
+
+* Fuzz: ~55 min, of which mode 5 took 34.
+* Gates: ~15 min.
+* Measurements: ~10 min.
+* x* checks: ~5 min.

@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "dfirst.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -68,7 +69,13 @@ struct dfirst_s {
   int top_root; /* see dfirst_set_top_root */
   /* per-d scratch of vd_labels: a stamp per number id */
   uint32_t *lstamp, lcur;
+  /* the star filter (dfirst_set_star): on, k, only, and the rank of each
+   * diagonal among the star d (STAR_NONE: not a star d) */
+  int star_on, star_k, star_only;
+  uint64_t star_x;
+  uint32_t *star_rank;
 };
+#define STAR_NONE UINT32_MAX
 
 void dfirst_set_top_root(dfirst_t *df, int on) { df->top_root = on; }
 
@@ -226,6 +233,7 @@ void dfirst_free(dfirst_t *df) {
   free(df->dsorted);
   free(df->sidx);
   free(df->lstamp);
+  free(df->star_rank);
   free(df);
 }
 
@@ -286,6 +294,127 @@ size_t dfirst_vd(dfirst_t *df, size_t i, vec_list_t *out) {
     }
   }
   return k;
+}
+
+/* ------------------------------------------------------------ star cover */
+
+dfirst_star_t dfirst_star_choose(dfirst_t *df) {
+  dfirst_star_t out;
+  memset(&out, 0, sizeof(out));
+  const double c0 = thread_cpu();
+  const int n = df->n;
+  const uint32_t L = df->L;
+  /* per number id: the summed weights of the d through it, and their
+   * number */
+  double *score = calloc(L + 1, sizeof(double));
+  uint64_t *dcnt = calloc(L + 1, sizeof(uint64_t));
+  uint64_t *val = calloc(L + 1, sizeof(uint64_t));
+  for (uint32_t h = 0; h < (1u << df->hbits); h++)
+    if (df->hval[h])
+      val[df->hval[h] - 1] = df->hkey[h];
+  double total = 0;
+  for (size_t i = 0; i < df->dcount; i++) {
+    const uint64_t *d = vec_list_get(df->diags, df->dstart + i);
+    int64_t id[SQ_MAX_N];
+    int missing = 0;
+    size_t nt = 0;
+    /* the hit counters along d's postings (as dfirst_vd) */
+    for (int p = 0; p < n; p++) {
+      id[p] = num_id(df, d[p]);
+      if (id[p] < 0) {
+        missing = 1;
+        continue;
+      }
+      dcnt[id[p]]++;
+      for (uint32_t k = df->first[id[p]]; k < df->first[id[p] + 1]; k++) {
+        const uint32_t v = df->post[k];
+        if (df->hit[v]++ == 0)
+          df->touched[nt++] = v;
+      }
+    }
+    /* the classes of V_d: the vectors through d[p] that meet d once */
+    uint64_t vd = 0, R = UINT64_MAX;
+    for (int p = 0; p < n && !missing; p++) {
+      uint64_t c = 0;
+      for (uint32_t k = df->first[id[p]]; k < df->first[id[p] + 1]; k++)
+        c += df->hit[df->post[k]] == 1;
+      vd += c;
+      if (c < R)
+        R = c;
+    }
+    for (size_t t = 0; t < nt; t++)
+      df->hit[df->touched[t]] = 0;
+    /* a number of d in no vector: V_d holds no square (its search has no
+     * root), weight 0 */
+    if (missing || R == 0)
+      continue;
+    const double w = pow((double)vd, 5.5) * pow((double)R, 1.4);
+    total += w;
+    for (int p = 0; p < n; p++)
+      score[id[p]] += w;
+  }
+  int64_t best = -1, top = -1;
+  for (uint32_t x = 0; x < L; x++) {
+    if (best < 0 || score[x] > score[best] ||
+        (score[x] == score[best] && val[x] < val[best]))
+      best = x;
+    if (top < 0 || dcnt[x] > dcnt[top] ||
+        (dcnt[x] == dcnt[top] && val[x] < val[top]))
+      top = x;
+  }
+  if (best >= 0) {
+    out.x = val[best];
+    out.nstar = dcnt[best];
+    out.share = total > 0 ? score[best] / total : 0.0;
+    out.freq_rank = 1;
+    for (uint32_t x = 0; x < L; x++)
+      out.freq_rank += x != (uint32_t)best &&
+                       (dcnt[x] > dcnt[best] ||
+                        (dcnt[x] == dcnt[best] && val[x] < val[best]));
+    out.top_freq = val[top];
+    out.top_freq_share = total > 0 ? score[top] / total : 0.0;
+  }
+  free(score);
+  free(dcnt);
+  free(val);
+  out.seconds = thread_cpu() - c0;
+  return out;
+}
+
+void dfirst_set_star(dfirst_t *df, uint64_t x, int k, int only) {
+  const int n = df->n;
+  if (k < -1)
+    k = -1;
+  if (only && k == 0)
+    k = 1;
+  df->star_on = k != 0;
+  df->star_k = k;
+  df->star_only = only && k != 0;
+  df->star_x = x;
+  free(df->star_rank);
+  df->star_rank = NULL;
+  if (!df->star_on)
+    return;
+  df->star_rank = malloc((df->dcount + 1) * sizeof(uint32_t));
+  uint32_t r = 0;
+  for (size_t i = 0; i < df->dcount; i++) {
+    const uint64_t *d = vec_list_get(df->diags, df->dstart + i);
+    int has = 0;
+    for (int p = 0; p < n; p++)
+      has |= d[p] == x;
+    df->star_rank[i] = has ? r++ : STAR_NONE;
+  }
+}
+
+uint64_t dfirst_star_count(const dfirst_t *df, size_t lo, size_t hi) {
+  if (!df->star_on)
+    return 0;
+  if (hi > df->dcount)
+    hi = df->dcount;
+  uint64_t c = 0;
+  for (size_t i = lo; i < hi; i++)
+    c += df->star_rank[i] != STAR_NONE;
+  return c;
 }
 
 /* the top-label root pays with the carried bitsets and with the matrices
@@ -419,6 +548,21 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
   vec_list_init(&sub, n);
   const double c0 = thread_cpu();
   for (size_t i = lo + off % stride; i < hi; i += stride) {
+    /* the star filter: a star d of a skipped rank, or (only) a d without
+     * the star number, is not searched */
+    int star = 0;
+    if (df->star_on) {
+      const uint32_t rk = df->star_rank[i];
+      star = rk != STAR_NONE;
+      if (star ? df->star_k < 0 || rk % (uint32_t)df->star_k != 0
+               : df->star_only) {
+        if (star)
+          st.nd_star_skipped++;
+        else
+          st.nd_other_skipped++;
+        continue;
+      }
+    }
     const double ci = thread_cpu(), w0 = wall_time();
     sub.count = 0;
     dfirst_vd(df, i, &sub);
@@ -470,10 +614,22 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
     st.d_cpu += cd;
     st.d_cpu2 += cd * cd;
     st.d_pairs2 += (double)ic.pairs * (double)ic.pairs;
-    if (dlog)
-      fprintf(dlog, "%zu %zu %d %lu %lu %.6f %.6f %.6f %.6f\n", i, sub.count,
+    if (star) {
+      st.nd_star++;
+      st.nodes_star += ss.nodes;
+      st.pairs_star += ic.pairs;
+      st.d_cpu_star += cd;
+      st.d_cpu2_star += cd * cd;
+      st.d_pairs2_star += (double)ic.pairs * (double)ic.pairs;
+    }
+    if (dlog) {
+      fprintf(dlog, "%zu %zu %d %lu %lu %.6f %.6f %.6f %.6f", i, sub.count,
               ss.num_labels, (unsigned long)ss.nodes, (unsigned long)ic.pairs,
               w1 - w0, ss.setup_seconds, ss.seconds, cd);
+      if (df->star_on)
+        fprintf(dlog, " %d", star);
+      fputc('\n', dlog);
+    }
     if (ic.stopped) {
       st.stopped = 1;
       break;

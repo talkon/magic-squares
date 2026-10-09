@@ -1144,8 +1144,14 @@ def report(results, pinfo, model, top=20):
           f"{len(sq)} semi-magic squares ({3600 * len(sq) / max(cpu, 1):.0f}/CPU-hour)")
     if results.dsums:
         dcpu = sum(r.get("cpu", r["time"]) for v in results.dsums.values() for r in v)
+        # the pairs of the sums searched in full (their first complete
+        # record), estimated over every d (dsum_est_pairs)
+        full = [next((r for r in v if r.get("complete")), None) for v in results.dsums.values()]
+        est = [dsum_est_pairs(r) for r in full if r is not None]
         print(f"d-first (not in the fits): {len(results.dsums)} sums, {dcpu / 3600:.2f} "
-              f"CPU-hours, {len(results.dmagic)} magic squares")
+              f"CPU-hours, {len(results.dmagic)} magic squares, "
+              f"{sum(e for e in est if e is not None):.1f} (square, SP traversal) pairs "
+              f"estimated over {sum(e is not None for e in est)} sums searched in full")
         for q in sorted(results.dmagic.values(), key=lambda q: (q["S"], q["hash"])):
             print(f"  MAGIC (d-first) P={p_str(q['P']):18} S={q['S']:5}  {q.get('grid')}")
     types = {}
@@ -1992,6 +1998,19 @@ SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
 # the d-first / plain ratio pairs, the CPU of killed d-first units, SP-type
 # squares found d-first
 SUMMARY_VERSION = 5
+
+
+def dsum_est_pairs(r):
+    """the estimated (square, SP traversal) pairs over all the d of a "dsum"
+    record's range (est_pairs; a record without it: pairs), or None where
+    the record estimates only some of them: with the star cover (msearch
+    --dfirst-star K, star_k = K) the star d are searched every K-th and
+    their pairs weighed K x in est_pairs, but with K = -1 none is searched
+    (est_pairs covers the other d only) and with --dfirst-star-only only
+    they are"""
+    if r.get("star_only") or r.get("star_k", 0) < 0:
+        return None
+    return float(r.get("est_pairs", r.get("pairs", 0)))
 
 
 def sum_cpu(r):

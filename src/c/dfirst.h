@@ -17,7 +17,8 @@
  * need not survive the reduction), these are the (square, SP traversal)
  * pairs, and a magic square is a square with two of them that fit on the
  * two diagonals together, so it is found (at least) twice, once per
- * diagonal (see research/ideas.md, "Diagonal-first search").
+ * diagonal (see research/ideas.md, "Diagonal-first search"; at least
+ * once with the star filter below).
  *
  * V_d is built from a number -> vector posting index over the search's
  * vectors: a hit counter per vector is bumped along the postings of d's
@@ -57,6 +58,15 @@ typedef struct {
                                      pairs (for standard errors) */
   int truncated;      /* some V_d search hit opts->node_limit */
   int stopped;        /* the callback asked to stop */
+  /* the star filter (dfirst_set_star; all 0 without it): the d of the
+   * sample that it skipped (star d not of a searched rank, and with only
+   * the d without the star number), and of the d searched (counted in nd,
+   * nodes, pairs, d_cpu.. above too) the star d, with their nodes, pairs
+   * and the sums over them of the per-d CPU, its squares and the squares
+   * of the pairs */
+  uint64_t nd_star_skipped, nd_other_skipped, nd_star;
+  uint64_t nodes_star, pairs_star;
+  double d_cpu_star, d_cpu2_star, d_pairs2_star;
 } dfirst_stats_t;
 
 /*
@@ -94,11 +104,60 @@ uint32_t dfirst_num_labels(const dfirst_t *df);
 int dfirst_in_set(const dfirst_t *df, const uint64_t *t);
 
 /*
+ * The star cover (research/ideas.md, "The star cover of the d loop"). The
+ * two diagonals of a magic square of even order n have no cell in common,
+ * so (its n^2 numbers being distinct) no number in common: whatever the
+ * number x, at most one of them contains x, and the square is found from
+ * the other one. So the d-first loop still finds every magic square (once
+ * instead of twice when one diagonal contains x), and flags it (the
+ * partner test runs against the whole diagonal set), without the "star
+ * d", the diagonals that contain x. They lose only (square, d) pairs,
+ * which a sample of them (every k-th) estimates. Not for odd n: the two
+ * diagonals share the center cell.
+ *
+ * dfirst_star_choose picks x = x*, the number whose star d hold the most
+ * predicted cost: x* = argmax_x sum over the d containing x of
+ * |V_d|^5.5 R_d^1.4 (R_d: the rarest class of V_d, i.e. the fewest vectors
+ * of V_d through one number of d, which the top-label root searches; the
+ * per-d cost law of research/wip/complexity-profile.md), ties to the
+ * smaller x, over the whole diagonal set (so every --d-range unit and
+ * --d-stride sample of a sum agrees). One pass over the postings of every
+ * d (no V_d is built).
+ */
+typedef struct {
+  uint64_t x;          /* x* (0 if no number of the set is in vecs) */
+  double share;        /* predicted cost share of its star d:
+                          sum over them of the weights / sum over all d */
+  uint64_t nstar;      /* d of the set that contain x */
+  int freq_rank;       /* x's rank (1 = most) by the number of d of the
+                          set containing it, ties counted ahead */
+  uint64_t top_freq;   /* the number in the most d (ties: smaller) */
+  double top_freq_share; /* its predicted cost share */
+  double seconds;      /* thread CPU of the choice */
+} dfirst_star_t;
+dfirst_star_t dfirst_star_choose(dfirst_t *df);
+
+/*
+ * The star filter of dfirst_search, with x the star number: the star d
+ * are ranked by their index in the diagonal set (0, 1, ..); k >= 1:
+ * search only the star d of rank % k == 0 (k = 1: all of them); k = -1:
+ * none; k = 0: no filter (only = 0). With only, the d without x are not
+ * searched (a measurement of the star d's cost; k = 0 is then k = 1). The
+ * d that the filter skips are counted in nd_star_skipped /
+ * nd_other_skipped, not searched, not logged.
+ */
+void dfirst_set_star(dfirst_t *df, uint64_t x, int k, int only);
+/* the star d with index in [lo, hi) of the diagonal set (0 without a star
+ * filter) */
+uint64_t dfirst_star_count(const dfirst_t *df, size_t lo, size_t hi);
+
+/*
  * Search V_d for the diagonals i = lo + off, lo + off + stride, ... < hi
  * (stride 1, off 0: all of [lo, hi); stride > 1 with a random off: an
- * unbiased sample, stride x the totals estimates the full loop). If dlog is
- * set, one line per d: "i |V_d| labels nodes pairs vd_s setup_s search_s
- * cpu_s".
+ * unbiased sample, stride x the totals estimates the full loop), except the
+ * d that the star filter skips. If dlog is set, one line per d searched:
+ * "i |V_d| labels nodes pairs vd_s setup_s search_s cpu_s", plus " star"
+ * (1 for a star d, else 0) with a star filter.
  */
 dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
                              size_t off, const search_opts_t *opts,

@@ -29,6 +29,7 @@
  */
 /* clock_gettime and the CPU-time clocks also under a strict -std=c17 */
 #define _POSIX_C_SOURCE 200809L
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1154,18 +1155,106 @@ static int d_cb(const dsquare_t *ds, void *ctx) {
   dp_push(&d_found, &dp);
   return 0;
 }
-static bool same_dpairs(void) {
+static bool same_dpairs_as(const dplist_t *exp) {
   canon_len = 2 * n * n;
   if (d_found.k)
     qsort(d_found.a, d_found.k, sizeof(dpair_t), cmp_dpair);
-  if (d_found.k != d_brute.k)
+  if (d_found.k != exp->k)
     return false;
   for (int i = 0; i < d_found.k; i++)
-    if (cmp_dpair(&d_found.a[i], &d_brute.a[i]))
+    if (cmp_dpair(&d_found.a[i], &exp->a[i]))
       return false;
   return true;
 }
+static bool same_dpairs(void) { return same_dpairs_as(&d_brute); }
+
+/* the star cover (dfirst_set_star) against brute force: x* recomputed
+ * from the family and the diagonal list (|V_d| and the rarest class of
+ * every d, in list order, the same weights summed in the same order, so
+ * the same doubles), and the pairs the filter must keep */
+static uint64_t brute_star(const vec_list_t *l, const vec_list_t *dl,
+                           double *share, uint64_t other, double *rel) {
+  /* the numbers of the family, ascending */
+  uint64_t *num = malloc((l->count * n + 1) * 8);
+  size_t nn = 0;
+  for (size_t v = 0; v < l->count; v++)
+    for (int p = 0; p < n; p++)
+      num[nn++] = vec_list_get(l, v)[p];
+  qsort(num, nn, 8, cmp_u64);
+  size_t k = 0;
+  for (size_t i = 0; i < nn; i++)
+    if (!k || num[k - 1] != num[i])
+      num[k++] = num[i];
+  nn = k;
+  double *score = calloc(nn + 1, sizeof(double)), total = 0;
+  for (size_t i = 0; i < dl->count; i++) {
+    const uint64_t *d = vec_list_get(dl, i);
+    uint64_t c[MAXN] = {0}, vd = 0, R = UINT64_MAX;
+    for (size_t v = 0; v < l->count; v++) {
+      const uint64_t *e = vec_list_get(l, v);
+      if (meet(e, d) != 1)
+        continue;
+      vd++;
+      for (int p = 0; p < n; p++)
+        for (int q = 0; q < n; q++)
+          c[p] += e[q] == d[p];
+    }
+    for (int p = 0; p < n; p++)
+      R = c[p] < R ? c[p] : R;
+    if (R == 0)
+      continue;
+    const double w = pow((double)vd, 5.5) * pow((double)R, 1.4);
+    total += w;
+    for (int p = 0; p < n; p++) {
+      const uint64_t *f = bsearch(&d[p], num, nn, 8, cmp_u64);
+      score[f - num] += w; /* (in a vector of V_d: in the family) */
+    }
+  }
+  size_t best = 0; /* ties: the smaller number, i.e. the first */
+  for (size_t i = 1; i < nn; i++)
+    if (score[i] > score[best])
+      best = i;
+  const uint64_t x = nn ? num[best] : 0;
+  *share = nn && total > 0 ? score[best] / total : 0.0;
+  /* how far below the best another number's score is (relative; 0: a
+   * tie), as the two may differ by rounding (contracted multiply-adds) */
+  const uint64_t *fo = nn ? bsearch(&other, num, nn, 8, cmp_u64) : NULL;
+  *rel = !fo ? 1.0 : score[best] > 0 ? (score[best] - score[fo - num]) / score[best] : 0.0;
+  free(num);
+  free(score);
+  return x;
+}
+static bool memchr_u64(const uint64_t *t, uint64_t x) {
+  for (int i = 0; i < n; i++)
+    if (t[i] == x)
+      return true;
+  return false;
+}
+static int *d_rank; /* per dset tuple: its rank among the star d, or -1 */
+static void star_ranks(const vec_list_t *dl, const int *ord, uint64_t x) {
+  free(d_rank);
+  d_rank = malloc((ndset + 1) * sizeof(int));
+  int r = 0;
+  for (size_t i = 0; i < dl->count; i++) {
+    const uint64_t *d = vec_list_get(dl, i);
+    int has = 0;
+    for (int p = 0; p < n; p++)
+      has |= d[p] == x;
+    d_rank[ord[i]] = has ? r++ : -1;
+  }
+}
+/* the brute pairs that the filter (k, only) keeps */
+static void star_expect(dplist_t *out, int k, bool only) {
+  out->k = 0;
+  for (int i = 0; i < d_brute.k; i++) {
+    const uint64_t *f = bsearch(d_brute.a[i].d, dset, ndset, n * 8, cmp_tuple);
+    const int r = d_rank[(f - dset) / n];
+    if (r < 0 ? !only : k >= 1 && r % k == 0)
+      dp_push(out, &d_brute.a[i]);
+  }
+}
 static uint64_t d_pairs_total, d_partner_total, d_planted;
+static uint64_t star_runs, star_kept_pairs, star_planted;
 /* returns the number of failures */
 static int dfirst_check(uint64_t seed, const vec_list_t *l,
                         const search_opts_t *o, const char *vname,
@@ -1250,7 +1339,6 @@ static int dfirst_check(uint64_t seed, const vec_list_t *l,
       t[j] = dset[(size_t)ord[i] * n + n - 1 - j];
     vec_list_push(&dl, t);
   }
-  free(ord);
   brute_pairs();
   int fails = 0;
   dfirst_t *df = dfirst_new(l, 0, l->count, &dl, 0, dl.count);
@@ -1282,15 +1370,119 @@ static int dfirst_check(uint64_t seed, const vec_list_t *l,
       dfirst_search(df, 0, dl.count, 3, off, o, d_cb, NULL, NULL);
     split_ok = same_dpairs() && !d_invalid;
   }
+  /* the star cover: x* as dfirst_star_choose picks it (checked against
+   * brute force), then the filter with K = -1, a random K >= 1 (with and
+   * without only, and a d-stride 3 split), and x forced onto one planted
+   * diagonal (not the other: for odd n they share the center) with
+   * K = -1, where the planted square must come once, from the other
+   * diagonal, flagged */
+  bool star_ok = true;
+  const char *star_what = "";
+  {
+    static dplist_t exp;
+    double bshare, rel;
+    const dfirst_star_t sx = dfirst_star_choose(df);
+    const uint64_t bx = brute_star(l, &dl, &bshare, sx.x, &rel);
+    /* the same number (or one whose score is within rounding of it, but
+     * not an exact tie, which goes to the smaller number), and its share */
+    if ((sx.x != bx && (rel > 1e-12 || rel == 0.0)) ||
+        (sx.x == bx && fabs(sx.share - bshare) > 1e-12 * bshare)) {
+      star_ok = false;
+      star_what = "choice";
+    }
+    struct {
+      uint64_t x;
+      int k, only, stride;
+    } runs[5];
+    const int k1 = rint_(1, 5), k2 = rint_(1, 4), k3 = rint_(1, 4);
+    runs[0].x = runs[1].x = runs[2].x = runs[3].x = sx.x;
+    runs[0].k = -1, runs[0].only = 0, runs[0].stride = 1;
+    runs[1].k = k1, runs[1].only = 0, runs[1].stride = 1;
+    runs[2].k = k2, runs[2].only = 1, runs[2].stride = 1;
+    runs[3].k = k3, runs[3].only = 0, runs[3].stride = 3;
+    runs[4].x = 0, runs[4].k = -1, runs[4].only = 0, runs[4].stride = 1;
+    int nruns = 4, pt_star = -1;
+    if (planted >= 0) {
+      /* x on planted diagonal pt_star, not on the other */
+      pt_star = rint_(0, 1);
+      int p;
+      do
+        p = rint_(0, n - 1);
+      while (memchr_u64(pt[1 - pt_star], pt[pt_star][p]));
+      runs[4].x = pt[pt_star][p];
+      nruns = 5;
+    }
+    for (int r = 0; r < nruns && star_ok; r++) {
+      dfirst_set_star(df, runs[r].x, runs[r].k, runs[r].only);
+      star_ranks(&dl, ord, runs[r].x);
+      d_found.k = 0;
+      d_invalid = 0;
+      dfirst_stats_t s1;
+      memset(&s1, 0, sizeof(s1));
+      for (int off = 0; off < runs[r].stride; off++) {
+        dfirst_stats_t t1 = dfirst_search(df, 0, dl.count, runs[r].stride,
+                                          off, o, d_cb, NULL, NULL);
+        s1.nd += t1.nd;
+        s1.pairs += t1.pairs;
+        s1.pairs_star += t1.pairs_star;
+        s1.nd_star += t1.nd_star;
+        s1.nd_star_skipped += t1.nd_star_skipped;
+        s1.nd_other_skipped += t1.nd_other_skipped;
+      }
+      star_expect(&exp, runs[r].k, runs[r].only);
+      /* the counts: every index once, the star d's pairs */
+      uint64_t ps = 0, nstar = 0;
+      for (int i = 0; i < d_found.k; i++) {
+        const uint64_t *f =
+            bsearch(d_found.a[i].d, dset, ndset, n * 8, cmp_tuple);
+        ps += f && d_rank[(f - dset) / n] >= 0;
+      }
+      for (int j = 0; j < ndset; j++)
+        nstar += d_rank[j] >= 0;
+      const bool counts =
+          s1.nd + s1.nd_star_skipped + s1.nd_other_skipped == dl.count &&
+          s1.pairs == (uint64_t)d_found.k && s1.pairs_star == ps &&
+          s1.nd_star + s1.nd_star_skipped == (runs[r].k == 0 ? 0 : nstar) &&
+          dfirst_star_count(df, 0, dl.count) == nstar;
+      if (!same_dpairs_as(&exp) || d_invalid || !counts) {
+        star_ok = false;
+        star_what = r == 4 ? "planted run" : !counts ? "counts" : "pairs";
+        break;
+      }
+      star_runs++;
+      star_kept_pairs += exp.k;
+      if (r == 4) {
+        /* the planted square: once, from the other diagonal, flagged */
+        int seen = 0;
+        for (int i = 0; i < d_found.k; i++)
+          if (!cmp_canon(&d_found.a[i].sq, &oracle_out.a[planted]))
+            for (int t = 0; t < 2; t++) {
+              uint64_t x[MAXN];
+              memcpy(x, pt[t], n * 8);
+              qsort(x, n, 8, cmp_u64);
+              if (!memcmp(x, d_found.a[i].d, n * 8))
+                seen |= (d_found.a[i].partner ? 1 : 4) << t;
+            }
+        if (seen != 1 << (1 - pt_star)) {
+          star_ok = false;
+          star_what = "planted MISSING";
+        }
+        star_planted++;
+      }
+    }
+    dfirst_set_star(df, 0, 0, 0);
+  }
+  free(ord);
   dfirst_free(df);
   vec_list_free(&dl);
-  if (!same || !planted_ok || !split_ok) {
+  if (!same || !planted_ok || !split_ok || !star_ok) {
     fails++;
     printf("DFIRST MISMATCH seed %lu n %d nv %d diags %d variant %s top_root "
-           "%d: found %d brute %d invalid %d planted %s split %s\n",
+           "%d: found %d brute %d invalid %d planted %s split %s star %s%s\n",
            (unsigned long)seed, n, nv, ndset, vname, top_root, d_found.k,
            d_brute.k,
-           d_invalid, planted_ok ? "ok" : "MISSING", split_ok ? "ok" : "BAD");
+           d_invalid, planted_ok ? "ok" : "MISSING", split_ok ? "ok" : "BAD",
+           star_ok ? "ok" : "BAD ", star_what);
     char path[256];
     snprintf(path, sizeof(path), "fail_%lu.txt", (unsigned long)seed);
     dump(path, seed);
@@ -1541,9 +1733,12 @@ int main(int argc, char **argv) {
   if (cross)
     printf("cross-checked %d\n", crossed);
   if (dfirst)
-    printf("dfirst: (square, d) pairs %lu, flagged %lu, planted pairs %lu\n",
+    printf("dfirst: (square, d) pairs %lu, flagged %lu, planted pairs %lu; "
+           "star runs %lu, pairs kept %lu, planted with x* on a diagonal "
+           "%lu\n",
            (unsigned long)d_pairs_total, (unsigned long)d_partner_total,
-           (unsigned long)d_planted);
+           (unsigned long)d_planted, (unsigned long)star_runs,
+           (unsigned long)star_kept_pairs, (unsigned long)star_planted);
   printf("diff-only %d\n", diffonly);
   printf("ran %d skipped %d fails %d squares %lu inst_with_squares %lu "
          "W2 %d W3 %d W4 %d W8 %d W16+ %d\n",

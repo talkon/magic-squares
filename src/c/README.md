@@ -56,7 +56,7 @@ row and col once) that fit on the two diagonals together. For every vector
 d of the sum (the unreduced list), the semi-magic search on
 V_d = {v : |v & d| = 1} finds the squares with d as a traversal, so the loop
 over d finds every (square, SP traversal) pair once, and every magic square
-twice (src/c/dfirst.c; research/ideas.md, "Diagonal-first search in
+twice (once or twice with the star cover below; src/c/dfirst.c; research/ideas.md, "Diagonal-first search in
 msearch"). V_d comes from a number -> vector posting index (O(sum of the
 posting lengths) per d). Every square of V_d contains all of d, so d's
 numbers get the top labels and only the first rows through the rarest of
@@ -114,6 +114,26 @@ in every d-first sum of the run whose d loop was not stopped by
 `--time-limit` or `--total-nodes` (scheduler v2 passes it only to the unit
 of a sum that has none yet, normally the first, and passes d-range units a
 `--d-chunk` of 1/8 of their d so that they checkpoint and stop inside).
+
+`--dfirst-star K` (even n only; default 4, and 0 = off for odd n) is the
+star cover (research/ideas.md, "The star cover of the d loop"): the two
+diagonals of a magic square of even order have no number in common, so for
+any number x one of them lacks x and finds the square. msearch picks x*
+from the sum's whole unreduced list (the same in every `--d-range` unit and
+`--d-stride` sample: the number whose d hold the most predicted cost, sum
+over the d containing it of |V_d|^5.5 R^1.4, R the rarest class of V_d;
+0.04-0.55 s at N = 5.9-31.7k) and searches only every K-th of the "star d"
+containing it (by rank in the list; K = -1: none; K = 0: all, the output of
+be625d8). The star d hold 6-10% of the d loop's CPU at N = 7.6-23k, so K = 4
+takes 1.05-1.08x less CPU per sum (per expected magic square). Every magic
+square is still found and flagged (the partner test uses every d), once
+instead of twice when x* is on one of its diagonals; the pairs of the star
+d are estimated (`est_pairs` = the others' pairs + K x the searched star
+d's), and the dsum record gets `star_x`, `star_k`, `nd_star`,
+`nd_star_skipped`, `nd_star_searched`, `pairs_star`, `cpu_star`,
+`pred_star_share`, `star_freq_rank`, `star_time` (see msearch.c). The
+schedulers count such a complete sum as searched and its pairs by
+`est_pairs`. `--dfirst-star-only` searches only the star d (measurements).
 
 ### r1 sampling (measurements)
 
