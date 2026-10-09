@@ -58,6 +58,8 @@
  *   --calib-r1-stride k   for each d-first sum, also run the plain search
  *                     on every k-th first row r1 (random offset), which
  *                     estimates the sum's semi-magic squares and plain time
+ *                     (not in a sum whose d loop --time-limit or
+ *                     --total-nodes stopped)
  *
  * r1 sampling of the plain search (measurements; the squares and the sum
  * record become "csquare" / "csum" records with estimates):
@@ -495,7 +497,10 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           cpu + pre_cpu, tot.truncated, complete, ENGINE_VERSION);
   fflush(out);
   uint64_t nodes = tot.nodes;
-  if (calib_stride > 0) {
+  /* (not after --time-limit or --total-nodes stopped the d loop: the
+   * stream would run on past the limit, and the scheduler gives it to the
+   * unit that continues the sum) */
+  if (calib_stride > 0 && !stopped) {
     search_opts_t so = *opts;
     so.r1_stride = calib_stride;
     so.r1_offset = (uint32_t)(splitmix(sd + 202) % calib_stride);
