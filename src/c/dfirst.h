@@ -67,6 +67,9 @@ typedef struct {
   uint64_t nd_star_skipped, nd_other_skipped, nd_star;
   uint64_t nodes_star, pairs_star;
   double d_cpu_star, d_cpu2_star, d_pairs2_star;
+  /* the d searched with the class support on (opts->class_support and the
+   * gate of dfirst_set_class_min_labels) */
+  uint64_t nd_class;
 } dfirst_stats_t;
 
 /*
@@ -96,6 +99,24 @@ size_t dfirst_vd(dfirst_t *df, size_t i, vec_list_t *out);
  * matrices of up to 4 words; research/ideas.md).
  */
 void dfirst_set_top_root(dfirst_t *df, int on);
+
+/*
+ * The gate of the class support (search_opts_t class_support, which the
+ * caller's opts turn on): it runs only in the V_d with at least min_labels
+ * labels (0: in every V_d). Default DFIRST_CLASS_MIN_LABELS = 137, from the
+ * paired per-d CPU of 20 sums at N = 0.7-7.6k (on / off, by the V_d's
+ * labels): 1.33-1.47x at <= 124 labels (two 64-bit words; every |V_d|
+ * from 200 to 1,000), 1.12x at 125-128, 1.05x at 129-132, 1.00x at
+ * 133-136, 0.97x at 137-140 and 0.85-0.93x above. |V_d| alone does not
+ * separate them (two-word V_d of 600-1,000 vectors: 1.36-1.43x; wider
+ * ones of the same size: 0.94-0.97x). Gated there, no sum of the 20 was
+ * slower (worst 1.000; at 129: 1.035), and the sums at N >= 5.7k kept their
+ * gain (research/ideas.md, "Integration of the round-2 d-first changes").
+ * The gate costs one pass over V_d's numbers (vd_labels, which the
+ * top-root choice computes anyway where the sum has few labels).
+ */
+#define DFIRST_CLASS_MIN_LABELS 137
+void dfirst_set_class_min_labels(dfirst_t *df, uint32_t min_labels);
 
 /* distinct numbers among the search's vectors */
 uint32_t dfirst_num_labels(const dfirst_t *df);

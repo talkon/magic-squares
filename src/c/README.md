@@ -67,7 +67,15 @@ vector of V_d holds exactly one of d's numbers, its class, so the V_d
 searches also prune with the class support (see the list below; on by
 default, `--no-class-support` turns it off for A/B runs): 0.39-0.63x the
 nodes and 0.60-0.76x the CPU per sum at N >= 11.7k (0.81-0.89x at
-5.9-11.3k, 0.99x at 4.1k), the same pairs. Per sum, against the plain
+5.9-11.3k, 0.99x at 4.1k), the same pairs. It runs only in the V_d with at
+least `--class-support-min-labels` labels (default 137; 0: every V_d): in
+the narrower V_d it cost more than it saved, 1.33-1.47x their CPU at <= 124
+labels (two 64-bit words) whatever |V_d|, 1.05-1.12x at 125-132, even at
+133-136 (paired per d on 20 sums at N = 0.7-7.6k), which made whole sums
+with at most 128 labels 1.1-1.6x slower (N 0.7-3k). Gated, none of the 20
+sums is slower and those at N >= 5.7k keep their gain; the dsum record's
+`nd_class` counts the d searched with it (research/ideas.md, "Integration
+of the round-2 d-first changes"). Per sum, against the plain
 search of this code (CPU, paired, research/ideas.md "Measurements on the
 integrated binary" and "Class support in the V_d searches"): 1.24x at N =
 4.1k, 0.53x at 6.7k, 0.51x at 7.6k, 0.38x at 11.7k, 0.32-0.34x at

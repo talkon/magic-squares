@@ -67,6 +67,7 @@ struct dfirst_s {
   int ninv;
   int inv[DF_MAX_INV][SQ_MAX_N];
   int top_root; /* see dfirst_set_top_root */
+  uint32_t cls_min_labels; /* see dfirst_set_class_min_labels */
   /* per-d scratch of vd_labels: a stamp per number id */
   uint32_t *lstamp, lcur;
   /* the star filter (dfirst_set_star): on, k, only, and the rank of each
@@ -78,6 +79,10 @@ struct dfirst_s {
 #define STAR_NONE UINT32_MAX
 
 void dfirst_set_top_root(dfirst_t *df, int on) { df->top_root = on; }
+
+void dfirst_set_class_min_labels(dfirst_t *df, uint32_t min_labels) {
+  df->cls_min_labels = min_labels;
+}
 
 static inline uint32_t hash_u64(uint64_t x, int bits) {
   return (uint32_t)((x * 0x9E3779B97F4A7C15ull) >> (64 - bits));
@@ -217,6 +222,7 @@ dfirst_t *dfirst_new(const vec_list_t *vecs, size_t vstart, size_t vcount,
     cur[i] = -1;
   gen_inv(df, cur, n % 2);
   df->top_root = 1;
+  df->cls_min_labels = DFIRST_CLASS_MIN_LABELS;
   return df;
 }
 
@@ -589,10 +595,16 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
     memset(&ss, 0, sizeof(ss));
     search_opts_t o = *opts;
     uint64_t top[SQ_MAX_N];
+    uint32_t vl = 0; /* V_d's labels, where needed */
+    /* the class support only where it pays (dfirst_set_class_min_labels) */
+    if (o.class_support && df->cls_min_labels > 0 &&
+        (vl = vd_labels(df, &sub)) < df->cls_min_labels)
+      o.class_support = 0;
     /* the top-label root, where it pays (see dfirst_set_top_root): every
      * V_d of the sum, or else this V_d by its own labels */
-    if (df->top_root && (top_root_pays(df->L, opts) ||
-                         top_root_pays(vd_labels(df, &sub), opts))) {
+    if (df->top_root &&
+        (top_root_pays(df->L, opts) ||
+         top_root_pays(vl ? vl : (vl = vd_labels(df, &sub)), opts))) {
       /* d's numbers by the number of vectors of V_d through them */
       const uint64_t *d = ic.d;
       size_t cnt[SQ_MAX_N] = {0};
@@ -617,6 +629,7 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
     }
     if (sub.count >= (size_t)(2 * n))
       ss = search_vectors(&sub, 0, sub.count, &o, inner_cb, &ic);
+    st.nd_class += o.class_support != 0;
     st.nodes += ss.nodes;
     st.pairs += ic.pairs;
     st.partners += ic.partners;

@@ -2717,3 +2717,68 @@ that hit. Stage A was to decide by counting first:
 * This suggests that any further gain from the class structure must
   come from fewer candidates entering the (1,1) children, not from a
   stronger test there.
+
+## Integration of the round-2 d-first changes (October 2026, branch integ/round2)
+
+c2/classsup (f46b203, a30a7fc), c2/star (3e7519a) and c2/classhall (edfd553,
+docs only) were cherry-picked onto main (189b49f: scheduler v2 with d-first
+units), with the fixes their verifiers asked for. Measurements in this
+section: one 4-core shared machine, `nice -n 10`, one heavy process at a
+time, alternating arms of one binary, min of 2 rounds (scratch:
+`integ2/gate/` and `integ2/e4/`).
+
+### The gate of the class support
+
+The class support was slower on small sums (gate (c) above: 1.36x the
+d-first CPU at N <= 3k), and v2 may run d-first from N' ~3.4k on (and from
+`--dfirst-min-n` 2000 with `--dfirst on`), below msearch's own 5000.
+
+* **Measurement.** Per-d thread CPU from `--d-log`, class support on and
+  off, the same d (`--d-stride`, offset 7, `--dfirst-star 0`), min of 2
+  rounds per d, on 20 sums at N = 0.7-7.6k (gate (c)'s list, 13 7 4 3 1 1
+  / 1900, 1950, 2000, 12 6 3 2 1 0 1 / 939, 951, 12 6 3 2 1 1 / 950).
+* **What decides it is the V_d's label count, not |V_d|.** On / off by
+  the V_d's labels (all 20 sums pooled):
+
+  | V_d labels | d | on / off |
+  | --- | ---: | ---: |
+  | <= 116 | 13,958 | 1.465 |
+  | 117-124 | 4,776 | 1.33-1.34 |
+  | 125-128 | 1,773 | 1.118 |
+  | 129-132 | 1,068 | 1.049 |
+  | 133-136 | 2,856 | 0.997 |
+  | 137-140 | 544 | 0.967 |
+  | 141-160 | 4,929 | 0.85-0.93 |
+  | > 160 | 3,369 | 0.884 |
+
+  By |V_d| alone the two-word V_d (<= 128 labels) of 600-1,000 vectors
+  were 1.36-1.43x, the wider ones of the same size 0.94-0.97x. A V_d of two
+  words is cheap per node, and the class support's fixed costs per call
+  (bounds, unions, keep masks, compaction) are not; the third word holds
+  only the class labels at first.
+* **The gate:** class support only in the V_d with at least 137 labels
+  (`dfirst_set_class_min_labels`, msearch `--class-support-min-labels`,
+  default `DFIRST_CLASS_MIN_LABELS` = 137; 0: every V_d). The label count
+  is one pass over V_d's numbers (`vd_labels`, which the top-root choice
+  already computes where the sum has few labels). Per sum, from the same
+  per-d data, gated at L labels (on / off of the whole d loop):
+
+  | gate | worst sum | s4031 (12 6 3 2 1 0 1 / 939, N 4.0k) | s4111 (13 7 4 3 1 1 / 1900) | N >= 5.7k |
+  | --- | ---: | ---: | ---: | ---: |
+  | none | 1.594 | 1.037 | 0.981 | 0.866-0.892 |
+  | 129 (three words) | 1.035 | 1.035 | 0.981 | same |
+  | 133 | 1.010 | 1.010 | 0.978 | same |
+  | **137** | **1.000** | 1.000 | 0.992 | same |
+
+  So no sum of the 20 is slower with the gate, the sums at N <= 3k are
+  as without the class support, and nothing is lost above ~5k (all their
+  V_d have more than 140 labels). The dsum record's `nd_class` counts the
+  d searched with it.
+* Exactness: the class support is exact in any V_d, so any on/off pattern
+  over the d gives the same pairs. `fuzz_arrange --dfirst` now runs the
+  class support in every V_d on two seeds of three and, on the third, gates
+  it at a random label count of the instance, which splits its V_d.
+  `class_gate_test.sh` (ctest `fast_msearch_class_gate`) checks 16 5 4 2 /
+  849 (102 labels: no class support, the nodes of `--no-class-support`)
+  and d 0-100 of 13 7 4 3 1 1 / 1900 (V_d of 129-137 labels: some d with
+  it; the gated nodes between off and on; the same pairs in all runs).

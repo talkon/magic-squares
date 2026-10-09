@@ -61,6 +61,11 @@
  *                     (search_opts_t class_support, on by default with
  *                     --diag-first: 0.60-0.76x the CPU per sum at N >=
  *                     11.7k; the same pairs, for A/B runs)
+ *   --class-support-min-labels L   the class support only in the V_d
+ *                     with at least L labels (default 137: in the
+ *                     narrower V_d it cost more than it saved, 1.33-1.47x
+ *                     their CPU at <= 124 labels; dfirst.h); 0: every V_d.
+ *                     The dsum record has nd_class, the d searched with it
  *   --calib-r1-stride k   for each d-first sum, also run the plain search
  *                     on every k-th first row r1 (random offset), which
  *                     estimates the sum's semi-magic squares and plain time
@@ -432,11 +437,13 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
                            size_t d_lo, size_t d_hi, size_t d_chunk,
                            FILE *d_log, uint32_t calib_stride, int top_root,
                            int star_k, int star_only, uint64_t star_force,
+                           uint32_t cls_min_labels,
                            double enum_share, double reduce_time,
                            double pre_cpu, double deadline) {
   const double c0 = cpu_time();
   dfirst_t *df = dfirst_new(red, 0, red->count, all, start_i, raw);
   dfirst_set_top_root(df, top_root);
+  dfirst_set_class_min_labels(df, cls_min_labels);
   const double t_index = cpu_time() - c0;
   /* the star cover: x* from the whole list (every unit of the sum agrees) */
   const int star = star_k != 0 || star_only;
@@ -504,6 +511,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
     tot.d_cpu_star += st.d_cpu_star;
     tot.d_cpu2_star += st.d_cpu2_star;
     tot.d_pairs2_star += st.d_pairs2_star;
+    tot.nd_class += st.nd_class;
     fprintf(out,
             "{\"type\":\"dchunk\",\"n\":%d,\"P\":[%s],\"S\":%lu,\"d_lo\":%zu,"
             "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
@@ -615,6 +623,11 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
           tot.vd_seconds, tot.setup_seconds, tot.search_seconds,
           est_time, se_time, enum_share, reduce_time,
           cpu + pre_cpu, tot.truncated, complete, ENGINE_VERSION);
+  /* (the d searched with the class support: those whose V_d passed its
+   * gate, --class-support-min-labels) */
+  if (opts->class_support)
+    fprintf(out, ",\"nd_class\":%lu,\"class_min_labels\":%u",
+            (unsigned long)tot.nd_class, cls_min_labels);
   if (star)
     fprintf(out,
             ",\"star_x\":%lu,\"star_k\":%d,\"star_only\":%d,\"nd_star\":%lu,"
@@ -668,6 +681,8 @@ int main(int argc, char *argv[]) {
   uint32_t calib_stride = 0;
   int d_top_root = 1; /* see dfirst_set_top_root */
   int d_class_support = 1; /* search_opts_t class_support in V_d */
+  /* ... in the V_d with at least this many labels (dfirst.h) */
+  uint32_t cls_min_labels = DFIRST_CLASS_MIN_LABELS;
   /* --dfirst-star K (default: 4 for even n, 0 for odd n), and
    * --dfirst-star-only (default K then 1) */
   int star_k = 0, star_k_set = 0, star_only = 0;
@@ -701,6 +716,7 @@ int main(int argc, char *argv[]) {
       {"dfirst-star", required_argument, 0, 1015},
       {"dfirst-star-only", no_argument, 0, 1016},
       {"dfirst-star-x", required_argument, 0, 1017},
+      {"class-support-min-labels", required_argument, 0, 1018},
       {"vec-size", required_argument, 0, 'n'},
       {"min-sum", required_argument, 0, 'a'},
       {"max-sum", required_argument, 0, 'b'},
@@ -875,6 +891,18 @@ int main(int argc, char *argv[]) {
       }
       dfirst_opt = "dfirst-star-x";
       break;
+    case 1018: {
+      const uint64_t v = arg_u64(optarg, "class-support-min-labels");
+      if (v > 100000) {
+        fprintf(stderr,
+                "msearch: bad value '%s' for --class-support-min-labels\n",
+                optarg);
+        return 2;
+      }
+      cls_min_labels = (uint32_t)v;
+      dfirst_opt = "class-support-min-labels";
+      break;
+    }
     default:
       return 2;
     }
@@ -890,7 +918,8 @@ int main(int argc, char *argv[]) {
             "[--no-cross] [--pretest-min K]\n"
             "  [--diag-first [--diag-first-min-n N0] [--d-stride k] "
             "[--d-offset o] [--d-range lo:hi] [--d-chunk C] [--d-log FILE] "
-            "[--d-plain-root] [--no-class-support] [--calib-r1-stride k] "
+            "[--d-plain-root] [--no-class-support] "
+            "[--class-support-min-labels L] [--calib-r1-stride k] "
             "[--dfirst-star K] [--dfirst-star-only] [--dfirst-star-x X]]\n"
             "  [--r1-stride k] [--r1-offset o] [--r1-strata k1,k2,..] "
             "[--r1-log FILE] [--sample-seed X]\n"
@@ -1038,7 +1067,7 @@ int main(int argc, char *argv[]) {
                                   raw, &red, &opts, d_stride, d_offset, seed,
                                   d_range_lo, d_range_hi, d_chunk, d_log,
                                   calib_stride, d_top_root, star_k, star_only,
-                                  star_force,
+                                  star_force, cls_min_labels,
                                   enum_time * share,
                                   reduce_time, pre_cpu,
                                   time_limit > 0 ? t_start + time_limit : 0);

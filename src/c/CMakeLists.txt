@@ -160,6 +160,10 @@ add_test(NAME fast_msearch_dfirst_849 COMMAND sh -c
 # ... also without the class support of the V_d searches
 add_test(NAME fast_msearch_dfirst_849_no_class_support COMMAND sh -c
   "$<TARGET_FILE:msearch> --diag-first --diag-first-min-n 0 --no-class-support --sums 849 16 5 4 2 | grep -c '\"type\":\"dsquare\"' | grep -qx 1")
+# the gate of the class support (--class-support-min-labels, default 137):
+# off in the V_d of fewer labels, the same pairs either way
+add_test(NAME fast_msearch_class_gate COMMAND sh
+  ${CMAKE_CURRENT_SOURCE_DIR}/class_gate_test.sh $<TARGET_FILE:msearch>)
 # the star cover (--dfirst-star K, by default 4): the pair of S = 849 is
 # on a d without x*, so it is found with K = -1 too; K = 1 searches every d
 # (the nodes of the run without the star cover); x* = 48 forced is the
@@ -171,7 +175,7 @@ add_test(NAME fast_msearch_dfirst_star COMMAND sh -c
 add_test(NAME fast_msearch_no_sample_env COMMAND sh -c
   "SAMPLE_STRIDE=3 SAMPLE_LOG=/dev/null $<TARGET_FILE:msearch> --sums 327 10 4 3 2 | grep -c '\"type\":\"square\"' | grep -qx 1")
 add_test(NAME fast_msearch_bad_args COMMAND sh -c
-  "m=$<TARGET_FILE:msearch>; for a in '--diag-first --d-range 5:3' '--diag-first --d-range x' '--d-stride 3' '--calib-r1-stride 2' '--r1-strata 1,2,3,4,5,6,7,8,9' '--min-sum 3x' '--diag-first --diag-first-min-n abc' '--diag-first --d-log /nonexistent/x' '--no-class-support' '--dfirst-star 4' '--diag-first --dfirst-star -2' '--diag-first --dfirst-star 4x' '--vec-size 5 --diag-first --dfirst-star 4' '--diag-first --dfirst-star -1 --dfirst-star-only' '--dfirst-star-x 5' '--diag-first --dfirst-star 0 --dfirst-star-x 5' '--diag-first --dfirst-star-x 0'; do $m $a --sums 327 10 4 3 2 > /dev/null 2>&1; [ $? -eq 2 ] || { echo \"accepted: $a\"; exit 1; }; done")
+  "m=$<TARGET_FILE:msearch>; for a in '--diag-first --d-range 5:3' '--diag-first --d-range x' '--d-stride 3' '--calib-r1-stride 2' '--r1-strata 1,2,3,4,5,6,7,8,9' '--min-sum 3x' '--diag-first --diag-first-min-n abc' '--diag-first --d-log /nonexistent/x' '--no-class-support' '--dfirst-star 4' '--diag-first --dfirst-star -2' '--diag-first --dfirst-star 4x' '--vec-size 5 --diag-first --dfirst-star 4' '--diag-first --dfirst-star -1 --dfirst-star-only' '--dfirst-star-x 5' '--diag-first --dfirst-star 0 --dfirst-star-x 5' '--diag-first --dfirst-star-x 0' '--class-support-min-labels 0' '--diag-first --class-support-min-labels x'; do $m $a --sums 327 10 4 3 2 > /dev/null 2>&1; [ $? -eq 2 ] || { echo \"accepted: $a\"; exit 1; }; done")
 # saturated byte counters at the node below r1 (every unmatched cell in
 # >= 255 candidates, so the cell is chosen among the saturated counts; the
 # oracle is too slow there, so the variants are compared with each other,
