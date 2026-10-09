@@ -94,8 +94,13 @@
  * per (square, d) pair (a square appears once per SP traversal: dedupe by
  * hash; set_count = its traversals among the sum's vectors = sp_count;
  * partner: another of them fits on the other diagonal with d, i.e. magic),
- *   {"type":"dchunk","S":..,"d_lo":..,"d_hi":..,"nd":..,"pairs":..,...}
- * per completed chunk of d, and a final
+ *   {"type":"dchunk","S":..,"d_lo":..,"d_hi":..,"nd":..,"nvecs_raw":..,
+ *    "pairs":..,"time":..,"truncated":0|1,...}
+ * per completed chunk of d (every index of [d_lo, d_hi) searched when
+ * d_stride is 1; nvecs_raw: the number of d of the sum, so that the parts
+ * of a sum split by --d-range can be merged and resumed from these records
+ * even when a unit was killed before its "dsum"; time: the chunk's process
+ * CPU seconds), and a final
  *   {"type":"dsum","mode":"dfirst",...,"nd":..,"d_stride":..,"pairs":..,
  *    "est_pairs":..,"time":..,"est_time":..,...,"cpu":..,"complete":0|1}
  * where pairs is the number of (square, SP traversal) pairs (what a magic
@@ -431,11 +436,12 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
     fprintf(out,
             "{\"type\":\"dchunk\",\"n\":%d,\"P\":[%s],\"S\":%lu,\"d_lo\":%zu,"
             "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
-            "\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,\"time\":%.6f}\n",
+            "\"nvecs_raw\":%zu,\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,"
+            "\"time\":%.6f,\"truncated\":%d}\n",
             n, pstr, (unsigned long)S, c, c2, d_stride, off,
-            (unsigned long)st.nd, (unsigned long)st.nodes,
+            (unsigned long)st.nd, raw, (unsigned long)st.nodes,
             (unsigned long)st.pairs, (unsigned long)st.partners,
-            cpu_time() - cc);
+            cpu_time() - cc, st.truncated);
     fflush(out);
     /* --time-limit: also between the chunks of a d-first sum, which can
      * take hours (the sum is then not complete) */
