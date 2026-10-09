@@ -1,8 +1,10 @@
 """calibrate.py plugin: scheduler v2's pre-registered per-traversal rates
 (predictions.json, frozen) for the square's (P, S), as an i.i.d. model."""
 import json
+import os
 
-PRED = "/tmp/claude-0/-home-user-magic-squares/f8940ae0-7961-577c-be6c-6db2a2de5f8e/scratchpad/calib-target/predictions.json"
+PRED = os.path.join(os.environ.get("CALIB_TARGET_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")),
+                    "predictions.json")
 _T = None
 
 

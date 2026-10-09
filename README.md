@@ -240,7 +240,8 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
   N ~ 3k-32k vectors. The expected total is finite, ~4.6 (68%: 2.2-13).
 * Expected magic squares found with the current build and an ideal choice of
   (P, S): **0.16 in 1 CPU-year, 0.34 in 10, 0.64 in 100, 1.1 in 1,000**
-  (68% band x/÷2). Everything searched so far holds ~0.005.
+  (68% band x/÷2; x/÷1.8 after the calibration search below, at the
+  smaller sums). Everything searched so far holds ~0.005.
 * The scheduler as fitted forecasts only 0.015-0.018 for itself in 1
   CPU-year ([research/forecast.md](research/forecast.md)). Scored by the
   analytic model, its choices are worth ~0.05, about 3x less than the ideal
@@ -255,10 +256,27 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
   **0.12 magic squares in 1 CPU-year, 0.25 in 10 and 0.39 in 100**
   (`forecast --shipped`; 90% band from its calibration 0.04-0.32 at 1
   CPU-year). Units it ranks highest came in at 0.7-0.9 of prediction on
-  held-out data, so quote **about 0.1 and 0.2**. Scored by the same model,
+  held-out data, so the quote was **about 0.1 and 0.2**. Scored by the same model,
   the old scheduler's choices collect 0.059 and 0.096 (x2.0 / x2.6). The
   ideal frontier above uses a slower time law and is not directly
   comparable (v2 reaches ~2/3 of it under that law).
+* **Calibration search in the target region**
+  ([research/calibration-target.md](research/calibration-target.md)).
+  321 pre-registered sums at N' 3-45k (fresh (P, S), 312 new P) were searched
+  in 4.9 CPU-hours. Results against the frozen predictions:
+  * Squares per sum: **1.04** at N' 3-6k and **1.28** at 6-12k. The
+    shipped x0.8 at 6-12k refits to x0.93.
+  * S traversals per square: 0.94-0.97. P traversals: 1.02-1.08.
+  * SP pairs: 7 against 5.46. The SP coupling beyond the S and P rates is
+    f_rho 1.06 (68% 0.84-1.34), still uncalibrated as the
+    pre-registration said it would be.
+  * No winner's curse within a band, so the x0.8 discount is dropped.
+  * Updated forecast: **0.126 in 1 CPU-year (90% band 0.052-0.31) and
+    0.28 in 10 (0.12-0.73)**, i.e. quote **about 0.13 and 0.28**. The
+    class-factor part of the band shrank from ln sd ~0.57 to ~0.1. What
+    remains is the SP coupling (f_rho^2, ln sd 0.47).
+  * The existence estimate's level factor goes from x/÷2.0 to x/÷1.8. Its
+    large-N widening is unchanged: the search has only 7 sums at 12-45k.
 * Speedups are best compared by the ratio of E at a fixed budget: 10x faster
   gives x2.2 at 1 CPU-year and x1.5 at 1,000; time ~ N^2 instead of ~N^4
   beyond N = 4,000 gives x1.1 and x1.7.

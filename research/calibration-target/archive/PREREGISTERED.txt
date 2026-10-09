@@ -1,0 +1,14 @@
+Pre-registration of the calibration search (calib-target)
+registered: 2026-10-09T04:16:57Z (before any calibration run; runs/ is empty)
+predictions.json sha256: c1e673b595d7de9452a5c2c01113967c4c6579220c885a3d25e15ed270b06c08
+plan.json sha256:        4be7288dd4ac2e6f9e7dd74e6f6e7592f1b814dd9dce82b7197a2fdf6ae9a714
+run.sh sha256:           60565a8c7775669a70df48b28871bcfb3cd0bc79d7e642c6739ee94c85ac018e
+runner.py sha256:        c8145b30ca107d21c110a3debaea1ae818bb32d4bea83d2c0da4c8b8912cea64
+bin/msearch sha256:      4bf407c22d6af325f8c8bd900a11b953fb27e3f5e92834f365f9ef1cf3396951  (copy of /home/user/magic-squares/cmake-build-release/src/c/msearch, repo e0ace54)
+work/sim.py sha256: 0bfc0606a98f9d23165f588a40de386ef6be689c6eeeea513d356e867ee40fbf
+work/cm.py sha256: 2fbb5f7dc76d71f96d9e962cbfcf1571f14935d8f7d84b7ebf02375f63845314
+work/explore.py sha256: e16fe111081aeed490e006c619e3e4d691239665dffdccfdb0d6555c43ccec44
+work/design.py sha256: 324c4eca420e2b39ffd7619273a9090dd9fa10d24245da09e6f539e0de43deb3
+work/searched.py sha256: d25734f27f34f838e55c57255f8fc715954bba93494d28b437ec92e671ba9965
+repo commit: e0ace5436d2fa69f2f33966ee5333a8a5146f9cc
+The predictions are not to be changed after this time; the analysis uses predictions.json as frozen.

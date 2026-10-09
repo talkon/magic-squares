@@ -11,8 +11,16 @@
    the time truth corrected by the measured CPU (variant "time").
 3. Per-sum E by cell at 1 and 10 CPU-years, for the bands from draws.
 
-usage: forecast_update.py VARIANT   (shipped | updated | time | glm)
-writes analysis/fc_<VARIANT>.npz and prints E at the marks
+The GLM refit uses A_SQ = 6 (env CT_A_SQ; the scheduler ships 15): the
+between-sum sd of squares obs/pred measured here is ~0.40 after stratum
+means (1/0.4^2 ~ 6), against the 0.26 that A_SQ 15 assumes. A_SQ only sets
+the quasi-Poisson dispersion of the squares GLM; variant "updated_a15" keeps
+15 (sensitivity).
+
+usage: forecast_update.py VARIANT   (shipped | updated | updated_a15 | time | glm)
+writes $CALIB_TARGET_DIR/analysis/fc_<VARIANT>.npz and prints E at the marks;
+needs the scheduler state (profile store) in $CALIB_TARGET_DIR/state; run
+one at a time with nice -n 19 (~4 CPU-minutes each)
 """
 import argparse
 import json
@@ -23,12 +31,15 @@ import time
 
 import numpy as np
 
-CT = "/tmp/claude-0/-home-user-magic-squares/f8940ae0-7961-577c-be6c-6db2a2de5f8e/scratchpad/calib-target"
-WT = "/home/user/magic-squares/.claude/worktrees/calib-target"
-sys.path.insert(0, os.path.join(WT, "scripts"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ctpaths  # noqa: E402
+
+CT = ctpaths.CT
+sys.path.insert(0, ctpaths.SCRIPTS)
 import scheduler as S  # noqa: E402
 import amodel as am  # noqa: E402
 
+A_SQ_MAIN = float(os.environ.get("CT_A_SQ", "6"))
 PRED = json.load(open(os.path.join(CT, "predictions.json")))
 AN = json.load(open(os.path.join(CT, "analysis", "results.json")))
 OBS = {o["id"]: o for o in AN["per_run"]}
@@ -52,7 +63,7 @@ def cell_table(phi_between_A=None):
     ee = np.zeros((S.NCELLS, 3))
     for p in PRED["runs"]:
         c = int(p["cell"])
-        R = load(p["out"])
+        R = load(ctpaths.run_path(p["out"]))
         if p["mode"] == "plain":
             sq = R.get("square", [])
             n = len(sq)
@@ -76,16 +87,22 @@ def cell_table(phi_between_A=None):
     return T, ee
 
 
-def fit_updated():
+def fit_updated(a_sq=None):
+    """the GLMs refit on the new sums, with A_SQ = a_sq (default A_SQ_MAIN)"""
     T, ee = cell_table()
-    cal = S.Calibration.fit(T, ee)
+    keep = S.A_SQ
+    S.A_SQ = A_SQ_MAIN if a_sq is None else a_sq
+    try:
+        cal = S.Calibration.fit(T, ee)
+    finally:
+        S.A_SQ = keep
     return cal, T, ee
 
 
 def glm_report():
     cal0 = S.Calibration()
     cal, T, ee = fit_updated()
-    out = {"effects": list(S.EFFECTS)}
+    out = {"effects": list(S.EFFECTS), "A_SQ": A_SQ_MAIN}
     for key in ("sq", "S", "P"):
         out[key] = {"prior": [float(v) for v in cal0.beta[key]], "prior_sd": [float(math.sqrt(v)) for v in np.diag(cal0.cov[key])],
                     "post": [float(v) for v in cal.beta[key]], "post_sd": [float(math.sqrt(v)) for v in np.diag(cal.cov[key])]}
@@ -104,13 +121,22 @@ def glm_report():
     out["cell_sd_prior_sq"] = np.std([x[0] for x in d0], axis=0).tolist()
     out["table_rows_with_data"] = int((T[:, 0] > 0).sum())
     out["calib_post"] = cal.to_json()
-    with open(os.path.join(CT, "analysis", "glm_update.json"), "w") as f:
+    # sensitivity of the squares GLM to A_SQ
+    out["A_SQ_sensitivity"] = {}
+    for a in (15.0, 6.0, 4.7):
+        c_ = fit_updated(a)[0]
+        out["A_SQ_sensitivity"][str(a)] = {e: [float(c_.beta["sq"][i]), float(math.sqrt(c_.cov["sq"][i, i]))]
+                                          for i, e in enumerate(S.EFFECTS)}
+    with open(os.path.join(ctpaths.OUT, "glm_update.json"), "w") as f:
         json.dump(out, f)
     print("effects:", S.EFFECTS)
     for key in ("sq", "S", "P"):
         print(key)
         for e, a, sa, b, sb in zip(S.EFFECTS, out[key]["prior"], out[key]["prior_sd"], out[key]["post"], out[key]["post_sd"]):
             print(f"  {e:12s} prior {a:+.3f} ({sa:.3f})  post {b:+.3f} ({sb:.3f})")
+    print("squares GLM by A_SQ:")
+    for a, v in out["A_SQ_sensitivity"].items():
+        print(f"  A_SQ {a}: " + ", ".join(f"{e} {m:+.3f} ({sd:.3f})" for e, (m, sd) in v.items()))
     return out
 
 
@@ -171,7 +197,8 @@ def corrected_charge(sc, u, fp, fd):
 def run(variant, hours_tot=10 * 8766.0, frac=0.1, seed=1):
     args = make_args(os.path.join(CT, "state"), hours_tot, frac, seed)
     sch = S.SchedulerV2(args, quiet=True)
-    cal = S.Calibration() if variant == "shipped" else fit_updated()[0]
+    cal = (S.Calibration() if variant == "shipped" else
+           fit_updated(15.0)[0] if variant == "updated_a15" else fit_updated()[0])
     sch.calib = cal
     sch.tm = am.time_prior(S.ENGINE)
     sch.tmd = am.time_prior(S.ENGINE, mode="dfirst")
@@ -229,7 +256,7 @@ def run(variant, hours_tot=10 * 8766.0, frac=0.1, seed=1):
         idx = order[i:j]
         cell[idx] = sc.eval_modes(int(a[idx[0]]), Ss[idx])[8]
         i = j
-    np.savez_compressed(os.path.join(CT, "analysis", f"fc_{variant}.npz"), magic=vals[:, 0], h=vals[:, 1],
+    np.savez_compressed(os.path.join(ctpaths.OUT, f"fc_{variant}.npz"), magic=vals[:, 0], h=vals[:, 1],
                         cell=cell, frac=frac, E_at=np.array(sorted(E_at.items())))
     print(f"{variant}: done, {len(acc)} sums, {time.time() - t0:.0f} s")
 

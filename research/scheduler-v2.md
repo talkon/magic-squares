@@ -36,7 +36,18 @@ diagonal-first where that is cheaper ("d-first units" below).
   than on 10%). (*) v1 at 100 CPU-years is the earlier time law's number.
   On all existing data the learned calibration gives 0.122 at 1 CPU-year
   (band 0.09-0.22), which matches the shipped prior.
-* The quoted figure is the **discounted** one, about **0.1 in 1 CPU-year and
+* **Update (calibration search in the target region,
+  [calibration-target.md](calibration-target.md)).** The GLMs are refit on
+  321 pre-registered sums at N' 3-45k (A_SQ 6) and the SP coupling is taken
+  from 7 SP pairs. The forecast becomes **0.126 at 1 CPU-year (90% band
+  0.052-0.31) and 0.28 at 10 (0.12-0.73)**. No selection discount applies:
+  there is no winner's curse within band, so it is a band term of ln sd
+  0.12. **Quote about 0.13 and 0.28.** The class-factor part of the band
+  shrank from ln sd 0.56-0.59 to 0.10-0.12. Most of what is left is the
+  SP coupling (f_rho^2 ln sd 0.47), and the 90% band is x6 wide. The
+  shipped band's x8 had an SP term of only 0.2; with an honest one it would
+  have been x16. The text below is from before this update.
+* The quoted figure was the **discounted** one, about **0.1 in 1 CPU-year and
   0.2 in 10**. Units that v2 itself ranks highest came in at 0.7-0.9 of their
   predicted magic density on held-out data. This is a winner's curse, mostly
   through squares and P traversals (below).
@@ -190,11 +201,39 @@ Held-out evidence (not used for any constant when it was measured):
   traversals 0.92, P traversals 1.03. The implied magic-density factor is
   0.72 pooled (unit bootstrap 0.53-1.01), or 0.85 design-weighted.
 * **Time**: see above (held-out 1.03-1.10 with the new law).
+* **Calibration search in the target region** (321 pre-registered sums,
+  [calibration-target.md](calibration-target.md)). The sums were drawn in
+  proportion to predicted magic from the 10 CPU-year plan at N' 3-12k and
+  from the pool at 12-45k, and predictions.json was frozen before any run.
+  Results:
+  * **Squares.** 3-6k: 1.035 (boot over sums [0.98, 1.09], design-weighted
+    1.03). 6-12k: 1.28 [1.16, 1.39], i.e. ~1.03 against the model without
+    its x0.8 at 6-12k. 12-45k: 0.85 [0.50, 1.43], an effective 15 squares,
+    uninformative on SQ12.
+  * **Traversals per square.** S 0.939 at 3-6k (dispersion-adjusted p 5e-5)
+    and 0.95 at 3-12k. P 1.02 at 3-6k and 1.04 at 3-12k.
+  * **SP pairs.** 7 / 5.46 (1.28 [0.60, 2.41]). SP+S, SP+P and magic were
+    all 0, against 0.07, 0.02 and 3e-5.
+  * **Between-sum sd of squares obs/pred.** 0.41-0.46, against the 0.26
+    behind A_SQ 15.
+  * **Selection.** Within 3-6k the top density quartile (54% of E) is 0.96
+    [0.82, 1.11] on squares x (S P)^2 against the stratum-adjusted model,
+    and the slope is +0.02 +- 0.03.
+  * **Time.** The plain law is 0.97 at 3-6k. The anchored truth over-charges
+    these sums 1.5x. The ratio law is 0.95 (sd 0.11) over 14 d-first sums.
+  * **Refit.** The GLM refit with A_SQ 6 puts the 6-12k squares effect at
+    -0.08 +- 0.09 (x0.93) instead of -0.22. The earlier live units (0.78 at
+    >= 6k) and these sums (1.03) differ by ~2 sd, so the correction is
+    reduced, not dropped.
 
 So the squares model holds on held-out data within about +-10% on average.
-What v2 selects comes in 5-15% low on squares and somewhat low on P(magic)
+What v2 selects came in 5-15% low on squares and somewhat low on P(magic)
 (0.7-1.05). The **selection discount of 0.8** that `forecast` prints is the
-middle of that range.
+middle of that range. The calibration search above finds no such effect
+within band once the 6-12k squares correction is refit. Its update
+therefore drops the discount and carries selection as a band term instead.
+`forecast` still prints the x0.8 (SELECTION_DISCOUNT in scheduler.py is
+unchanged).
 
 ## Caveats and open points
 

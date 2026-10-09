@@ -371,6 +371,13 @@ total and P(exists) do: 35% of the total lies beyond the largest N measured (45k
 
   The 68% band in §1 uses these sigmas.
 
+* **Update ([calibration-target.md](calibration-target.md) §5).** A pre-registered search of 321 sums
+  at N' 3-45k measures the squares level (to ±4%) and the S/P rates (to ±10% on (f_S f_P)^2) at
+  3-12k. It finds 7 SP pairs against 5.46, which leaves kappa at ±0.27 (κ-only prior). Model form,
+  the pair factor and sampling are unchanged. On the same components the quadrature sum goes from
+  0.52 to 0.45, so sigma at X <= 4,000 becomes ~0.57 (x/÷1.8) instead of 0.7 with the same
+  round-up. The widening at X >= 2x10^4 is not reduced: that search has 7 sums at 12-45k.
+
 ### 4.2 Finite or infinite
 
 **The coincidence bound needs distinct (generic) entries.** Without distinctness the expected count

@@ -1,0 +1,5 @@
+  time: 0.1 CPU-years: E = 0.04292 (13 s)
+  time: 1 CPU-years: E = 0.1184 (44 s)
+  time: 3 CPU-years: E = 0.1784 (91 s)
+  time: 10 CPU-years: E = 0.2686 (237 s)
+time: done, 5883012 sums, 248 s
