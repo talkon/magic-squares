@@ -1,0 +1,585 @@
+From 5448105c880111c532b0d83839be0a7842321f71 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 01:39:47 +0000
+Subject: [PATCH] research: c2/partner - star cover, partner sets by depth,
+ d-pair with a 12-number top root
+
+dpair2 (research driver): sampled cost of the both-diagonals search on
+V_{d1,d2} with the rarest of the 12 numbers of d1 and d2 as the top label
+(roots only through it), against the plain root, and an exactness check
+(--check K: random disjoint traversal pairs of every square of a sum must
+find it; 400 tests on 11 bench sums, all found, square counts equal to the
+plain root). research/wip/c2-partner: star-cover cost shares (star.py),
+partner candidate sets by depth (partner.py), the d-pair ladder and the
+cost per expected magic square.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ research/wip/c2-partner/cost_per_magic.txt |  13 +
+ research/wip/c2-partner/dpair_all.txt      |  12 +
+ research/wip/c2-partner/partner.py         |  92 +++++++
+ research/wip/c2-partner/partner_all.txt    |   5 +
+ research/wip/c2-partner/star.py            |  57 ++++
+ research/wip/c2-partner/star_all.txt       |  24 ++
+ src/c/CMakeLists.txt                       |   3 +-
+ src/c/dpair2.c                             | 288 +++++++++++++++++++++
+ 8 files changed, 493 insertions(+), 1 deletion(-)
+ create mode 100644 research/wip/c2-partner/cost_per_magic.txt
+ create mode 100644 research/wip/c2-partner/dpair_all.txt
+ create mode 100644 research/wip/c2-partner/partner.py
+ create mode 100644 research/wip/c2-partner/partner_all.txt
+ create mode 100644 research/wip/c2-partner/star.py
+ create mode 100644 research/wip/c2-partner/star_all.txt
+ create mode 100644 src/c/dpair2.c
+
+diff --git a/research/wip/c2-partner/cost_per_magic.txt b/research/wip/c2-partner/cost_per_magic.txt
+new file mode 100644
+index 0000000..cc4d0c9
+--- /dev/null
++++ b/research/wip/c2-partner/cost_per_magic.txt
+@@ -0,0 +1,13 @@
++tag N Emagic/sum P(partner|pair) dfirst-CPU-s cost/magic(CPU-yr) star-cover(CPU-yr) dpair-search-only/dfirst dpair-as-built/dfirst
++a1950 5896 6.62e-07 8.2e-06 116 5.55 4.99 1.55 19.8
++b988 6671 4.04e-07 5.9e-06 152 11.9 10.8 1.48 20.5
++a2000 7593 7.80e-07 6.1e-06 251 10.2 9.26 1.45 18.2
++a2100 11306 8.15e-07 3.9e-06 1019 39.6 36.3 1.16 13.1
++b1200 11698 1.06e-07 2.6e-06 870 260 241 1.17 16.0
++a2200 15199 8.73e-07 2.7e-06 3432 125 114 1.09 8.9
++c2174 16424 5.81e-07 2.5e-06 4056 221 207 1.05 9.1
++c3648 20538 7.48e-08 1.4e-06 5407 2.29e+03 2.13e+03 0.99 12.5
++c2700 20896 2.36e-08 9.4e-07 4457 5.98e+03 5.51e+03 1.14 15.8
++a2400 22993 5.38e-07 1.6e-06 11785 694 650 0.92 7.9
++a2500 26585 4.02e-07 1.3e-06 23366 1.84e+03 1.71e+03 0.72 6.0
++a2650 31743 2.53e-07 1.0e-06 39917 5e+03 4.68e+03 0.77 5.9
+diff --git a/research/wip/c2-partner/dpair_all.txt b/research/wip/c2-partner/dpair_all.txt
+new file mode 100644
+index 0000000..4705bff
+--- /dev/null
++++ b/research/wip/c2-partner/dpair_all.txt
+@@ -0,0 +1,12 @@
++a1950 S 1950 N 5896 red 5896 L 153: pairs 1.279e+07 avg|V| 291.7 avg min-class 15.2 pruned(min<2) 0.041 | V build 691.9 s | top root: search+setup 1603 s (setup 1381, search timer 179.5) nodes 5.353e+08 squares 0 | calls 5880 cpu used 1.0 s
++b988 S 988 N 6671 red 6671 L 159: pairs 1.68e+07 avg|V| 289.6 avg min-class 16.0 pruned(min<2) 0.033 | V build 938.2 s | top root: search+setup 2178 s (setup 1889, search timer 224.7) nodes 6.564e+08 squares 0 | calls 5920 cpu used 1.1 s
++a2000 S 2000 N 7593 red 7593 L 168: pairs 2.181e+07 avg|V| 323.0 avg min-class 16.7 pruned(min<2) 0.032 | V build 1447 s | top root: search+setup 3113 s (setup 2664, search timer 363.8) nodes 1.036e+09 squares 0 | calls 6080 cpu used 1.3 s
++a2100 S 2100 N 11306 red 11306 L 192: pairs 5.029e+07 avg|V| 383.3 avg min-class 21.3 pruned(min<2) 0.024 | V build 4550 s | top root: search+setup 8827 s (setup 7450, search timer 1183) nodes 3.065e+09 squares 0 | calls 6040 cpu used 1.6 s
++b1200 S 1200 N 11698 red 11697 L 200: pairs 5.491e+07 avg|V| 353.7 avg min-class 19.4 pruned(min<2) 0.028 | V build 4611 s | top root: search+setup 9336 s (setup 8119, search timer 1022) nodes 2.108e+09 squares 0 | calls 6000 cpu used 1.5 s
++a2200 S 2200 N 15199 red 15199 L 211: pairs 9.312e+07 avg|V| 435.9 avg min-class 24.5 pruned(min<2) 0.020 | V build 1.072e+04 s | top root: search+setup 1.996e+04 s (setup 1.586e+04, search timer 3732) nodes 6.619e+09 squares 0 | calls 6080 cpu used 2.0 s
++c2174 S 2174 N 16424 red 16424 L 220: pairs 1.099e+08 avg|V| 431.7 avg min-class 24.9 pruned(min<2) 0.027 | V build 1.33e+04 s | top root: search+setup 2.357e+04 s (setup 1.892e+04, search timer 4253) nodes 7.31e+09 squares 0 | calls 6000 cpu used 2.0 s
++c3648 S 3648 N 20538 red 20538 L 252: pairs 1.76e+08 avg|V| 441.2 avg min-class 24.0 pruned(min<2) 0.016 | V build 2.552e+04 s | top root: search+setup 4.229e+04 s (setup 3.625e+04, search timer 5358) nodes 7.067e+09 squares 0 | calls 5160 cpu used 2.0 s
++c2700 S 2700 N 20896 red 20896 L 259: pairs 1.818e+08 avg|V| 447.5 avg min-class 22.9 pruned(min<2) 0.028 | V build 2.743e+04 s | top root: search+setup 4.311e+04 s (setup 3.727e+04, search timer 5072) nodes 6.53e+09 squares 0 | calls 5240 cpu used 2.0 s
++a2400 S 2400 N 22993 red 22992 L 246: pairs 2.216e+08 avg|V| 490.6 avg min-class 27.7 pruned(min<2) 0.014 | V build 3.57e+04 s | top root: search+setup 5.707e+04 s (setup 4.548e+04, search timer 1.08e+04) nodes 1.598e+10 squares 0 | calls 5120 cpu used 2.1 s
++a2500 S 2500 N 26585 red 26585 L 260: pairs 2.985e+08 avg|V| 526.9 avg min-class 31.3 pruned(min<2) 0.014 | V build 5.536e+04 s | top root: search+setup 8.594e+04 s (setup 6.775e+04, search timer 1.694e+04) nodes 2.326e+10 squares 0 | calls 4280 cpu used 2.0 s
++a2650 S 2650 N 31743 red 31743 L 279: pairs 4.324e+08 avg|V| 540.7 avg min-class 32.5 pruned(min<2) 0.014 | V build 9.339e+04 s | top root: search+setup 1.411e+05 s (setup 1.085e+05, search timer 3.074e+04) nodes 2.895e+10 squares 0 | calls 4240 cpu used 2.3 s
+diff --git a/research/wip/c2-partner/partner.py b/research/wip/c2-partner/partner.py
+new file mode 100644
+index 0000000..b5ea384
+--- /dev/null
++++ b/research/wip/c2-partner/partner.py
+@@ -0,0 +1,92 @@
++# Partner candidates D2 at V_d-like nodes: d2 in the list, disjoint from d, meeting every placed
++# vector once; "inv" also requires a fixed-point-free involution iota on d's numbers with d2 on the
++# cells (a, iota(a)) of the placed rows/cols (box structure of a magic square).
++# usage: partner.py tag nsamples
++import sys, itertools, numpy as np
++tag = sys.argv[1]; ns = int(sys.argv[2])
++rng = np.random.default_rng(11)
++V = np.loadtxt(f'vec/{tag}.txt', dtype=np.int64); N = len(V)
++vals, inv = np.unique(V, return_inverse=True); inv = inv.reshape(V.shape); L = len(vals)
++sets = [frozenset(r) for r in inv]
++def meet(v):
++    m = np.zeros(L, bool); m[list(v)] = True
++    return m[inv].sum(1)
++# fixed-point-free involutions on 6 points
++def fpfi(pts):
++    if not pts: yield {}; return
++    a = pts[0]
++    for i in range(1, len(pts)):
++        b = pts[i]; rest = pts[1:i] + pts[i+1:]
++        for m in fpfi(rest):
++            mm = dict(m); mm[a] = b; mm[b] = a; yield mm
++INV = list(fpfi(list(range(6))))
++assert len(INV) == 15
++stats = {k: [] for k in ['d', 'r1', '11', '12', '22', '22inv', '23', '23inv', '33', '33inv']}
++def pick(mask):
++    idx = np.nonzero(mask)[0]
++    return None if len(idx) == 0 else int(rng.choice(idx))
++def invcheck(d, rows, cols, cand):
++    # rows/cols: lists of vector sets; dnum: index in d of the number each meets
++    dl = list(d)
++    rn = [dl.index(next(iter(r & d))) for r in rows]
++    cn = [dl.index(next(iter(c & d))) for c in cols]
++    y = [[next(iter(r & c)) for c in cols] for r in rows]
++    keep = 0
++    for i2 in cand:
++        s = sets[i2]
++        hr = [next(iter(s & r)) for r in rows]; hc = [next(iter(s & c)) for c in cols]
++        ok_any = False
++        for io in INV:
++            ok = True
++            for i, r in enumerate(rows):
++                tgt = io[rn[i]]
++                j = cn.index(tgt) if tgt in cn else -1
++                if j >= 0:
++                    if hr[i] != y[i][j]: ok = False; break
++                elif hr[i] in y[i]: ok = False; break
++            if ok:
++                for j, c in enumerate(cols):
++                    tgt = io[cn[j]]
++                    i = rn.index(tgt) if tgt in rn else -1
++                    if i >= 0:
++                        if hc[j] != y[i][j]: ok = False; break
++                    elif hc[j] in [y[k][j] for k in range(len(rows))]: ok = False; break
++            if ok: ok_any = True; break
++        keep += ok_any
++    return keep
++for it in range(ns):
++    di = int(rng.integers(N)); d = sets[di]
++    md = meet(d); Vd = md == 1; D2 = md == 0
++    cls = [(Vd & (inv == a).any(1)).sum() for a in d]
++    T = list(d)[int(np.argmin(cls))]
++    stats['d'].append(D2.sum())
++    hasT = (inv == T).any(1)
++    r1 = pick(Vd & hasT)
++    if r1 is None: continue
++    m1 = meet(sets[r1]); D2 = D2 & (m1 == 1); stats['r1'].append(D2.sum())
++    c1 = pick(Vd & (m1 == 1) & ~hasT)
++    if c1 is None: continue
++    mc1 = meet(sets[c1]); D2 = D2 & (mc1 == 1); stats['11'].append(D2.sum())
++    c2 = pick(Vd & (m1 == 1) & ~hasT & (mc1 == 0))
++    if c2 is None: continue
++    mc2 = meet(sets[c2]); D2 = D2 & (mc2 == 1); stats['12'].append(D2.sum())
++    dn = lambda v: next(iter(sets[v] & d))
++    used_c = {dn(c1), dn(c2)}
++    r2 = pick(Vd & (m1 == 0) & (mc1 == 1) & (mc2 == 1) & ~hasT)
++    if r2 is None: continue
++    mr2 = meet(sets[r2]); D2 = D2 & (mr2 == 1); stats['22'].append(D2.sum())
++    cand = np.nonzero(D2)[0]
++    stats['22inv'].append(invcheck(d, [sets[r1], sets[r2]], [sets[c1], sets[c2]], cand))
++    c3 = pick(Vd & (m1 == 1) & (mr2 == 1) & (mc1 == 0) & (mc2 == 0) & ~hasT)
++    if c3 is None: continue
++    mc3 = meet(sets[c3]); D2 = D2 & (mc3 == 1); stats['23'].append(D2.sum())
++    stats['23inv'].append(invcheck(d, [sets[r1], sets[r2]], [sets[c1], sets[c2], sets[c3]], np.nonzero(D2)[0]))
++    r3 = pick(Vd & (m1 == 0) & (mr2 == 0) & (mc1 == 1) & (mc2 == 1) & (mc3 == 1) & ~hasT)
++    if r3 is None: continue
++    mr3 = meet(sets[r3]); D2 = D2 & (mr3 == 1); stats['33'].append(D2.sum())
++    stats['33inv'].append(invcheck(d, [sets[r1], sets[r2], sets[r3]], [sets[c1], sets[c2], sets[c3]], np.nonzero(D2)[0]))
++out = [f'{tag} N {N}']
++for k, v in stats.items():
++    v = np.array(v)
++    if len(v): out.append(f'{k}: n {len(v)} mean {v.mean():.1f} med {np.median(v):.0f} P0 {(v==0).mean():.3f}')
++print(' | '.join(out))
+diff --git a/research/wip/c2-partner/partner_all.txt b/research/wip/c2-partner/partner_all.txt
+new file mode 100644
+index 0000000..de1c312
+--- /dev/null
++++ b/research/wip/c2-partner/partner_all.txt
+@@ -0,0 +1,5 @@
++a1950 N 5896 | d: n 300 mean 4320.2 med 4314 P0 0.000 | r1: n 300 mean 1003.1 med 1004 P0 0.000 | 11: n 300 mean 286.8 med 282 P0 0.000 | 12: n 300 mean 63.8 med 63 P0 0.000 | 22: n 300 mean 16.5 med 16 P0 0.000 | 22inv: n 300 mean 11.1 med 10 P0 0.003 | 23: n 299 mean 3.8 med 3 P0 0.040 | 23inv: n 299 mean 2.6 med 2 P0 0.097 | 33: n 295 mean 1.1 med 1 P0 0.356 | 33inv: n 295 mean 0.4 med 0 P0 0.708
++a2000 N 7593 | d: n 300 mean 5748.4 med 5736 P0 0.000 | r1: n 300 mean 1230.8 med 1238 P0 0.000 | 11: n 300 mean 356.6 med 356 P0 0.000 | 12: n 300 mean 72.3 med 71 P0 0.000 | 22: n 300 mean 17.5 med 17 P0 0.000 | 22inv: n 300 mean 11.7 med 10 P0 0.000 | 23: n 299 mean 3.7 med 3 P0 0.027 | 23inv: n 299 mean 2.5 med 2 P0 0.094 | 33: n 294 mean 1.1 med 1 P0 0.330 | 33inv: n 294 mean 0.4 med 0 P0 0.714
++a2400 N 22993 | d: n 300 mean 19082.0 med 19022 P0 0.000 | r1: n 300 mean 2859.0 med 2856 P0 0.000 | 11: n 300 mean 753.6 med 766 P0 0.000 | 12: n 300 mean 112.3 med 114 P0 0.000 | 22: n 300 mean 23.7 med 23 P0 0.000 | 22inv: n 300 mean 12.4 med 10 P0 0.000 | 23: n 300 mean 3.9 med 4 P0 0.027 | 23inv: n 300 mean 2.7 med 2 P0 0.077 | 33: n 298 mean 1.0 med 1 P0 0.409 | 33inv: n 298 mean 0.3 med 0 P0 0.738
++a2650 N 31743 | d: n 300 mean 26976.9 med 26965 P0 0.000 | r1: n 300 mean 3587.2 med 3566 P0 0.000 | 11: n 300 mean 928.9 med 949 P0 0.000 | 12: n 300 mean 126.2 med 124 P0 0.000 | 22: n 300 mean 25.4 med 24 P0 0.000 | 22inv: n 300 mean 13.0 med 10 P0 0.000 | 23: n 299 mean 3.7 med 3 P0 0.030 | 23inv: n 299 mean 2.4 med 2 P0 0.120 | 33: n 292 mean 1.0 med 1 P0 0.418 | 33inv: n 292 mean 0.3 med 0 P0 0.781
++c3648 N 20538 | d: n 300 mean 17014.7 med 16989 P0 0.000 | r1: n 300 mean 2593.9 med 2618 P0 0.000 | 11: n 300 mean 695.4 med 696 P0 0.000 | 12: n 300 mean 103.1 med 104 P0 0.000 | 22: n 300 mean 20.4 med 20 P0 0.000 | 22inv: n 300 mean 10.5 med 8 P0 0.000 | 23: n 300 mean 3.0 med 3 P0 0.063 | 23inv: n 300 mean 1.9 med 2 P0 0.190 | 33: n 293 mean 0.7 med 0 P0 0.536 | 33inv: n 293 mean 0.2 med 0 P0 0.809
+diff --git a/research/wip/c2-partner/star.py b/research/wip/c2-partner/star.py
+new file mode 100644
+index 0000000..bf5120b
+--- /dev/null
++++ b/research/wip/c2-partner/star.py
+@@ -0,0 +1,57 @@
++# Star exclusion: share of the d-first cost held by the d that contain a number x.
++# usage: star.py tag  (reads vec/<tag>.txt and ../profile/runs/dprof.<tag>.dp)
++import sys, numpy as np
++tag = sys.argv[1]
++V = np.loadtxt(f'vec/{tag}.txt', dtype=np.int64); N = len(V)
++vals, inv = np.unique(V, return_inverse=True); inv = inv.reshape(V.shape); L = len(vals)
++B = np.zeros((N, L), np.float32); B[np.arange(N)[:, None], inv] = 1
++freq = B.sum(0) / N
++vd = np.zeros(N, np.int64); R = np.zeros(N, np.int64); C6 = np.zeros((N, 6), np.int64)
++for c0 in range(0, N, 1000):
++    c1 = min(N, c0 + 1000)
++    cnt = B @ B[c0:c1].T              # N x chunk: |v & d|
++    m = (cnt == 1).astype(np.float32)
++    vd[c0:c1] = m.sum(0)
++    cls = m.T @ B                     # chunk x L: class sizes
++    for j in range(c1 - c0):
++        cs = cls[j, inv[c0 + j]]
++        C6[c0 + j] = np.sort(cs); R[c0 + j] = cs.min()
++np.savez(f'vd_{tag}.npz', vd=vd, R=R, C6=C6, inv=inv, vals=vals)
++# measured per-d lines
++meas = []
++for l in open(f'../profile/runs/dprof.{tag}.dp'):
++    p = l.split()
++    if p[0] != 'D': continue
++    k = p.index('C'); cs = tuple(int(t) for t in p[k+1:k+7])
++    meas.append((int(p[2]), cs, int(p[4]), float(p[10])))
++key = {}
++for i in range(N): key.setdefault((int(vd[i]),) + tuple(int(t) for t in C6[i]), []).append(i)
++mi = []; mm = []
++for (v, cs, r, cyc) in meas:
++    c = key.get((v,) + cs, [])
++    if len(c) == 1: mi.append(c[0]); mm.append((c[0], v, r, cyc))
++print('matched uniquely', len(mi), 'of', len(meas))
++meas = np.array(mm, float); mi = np.array(mi)
++ok = (vd[mi] == meas[:, 1]).mean(), (R[mi] == meas[:, 2]).mean()
++X = np.c_[np.log(meas[:, 1]), np.log(meas[:, 2]), np.ones(len(meas))]
++coef, *_ = np.linalg.lstsq(X, np.log(meas[:, 3]), rcond=None)
++pred = np.exp(coef[0] * np.log(vd) + coef[1] * np.log(np.maximum(R, 1)) + coef[2])
++tot = pred.sum()
++share = (B.T @ pred) / tot           # per number: predicted cost share of its star
++cshare = freq                        # count share
++order = np.argsort(-share)
++mcyc = meas[:, 3]; mtot = mcyc.sum()
++print(f'{tag} N {N} L {L} match vd {ok[0]:.3f} R {ok[1]:.3f} fit a {coef[0]:.2f} b {coef[1]:.2f}; max freq {freq.max():.3f}')
++for x in order[:5]:
++    inx = B[mi, x] > 0
++    print(f'  x={vals[x]:5d} freq {freq[x]:.3f} pred cost share {share[x]:.3f}  (sampled d: {inx.sum():3d} of {len(mi)}, measured share {mcyc[inx].sum()/mtot:.3f}, pred share on sample {pred[mi][inx].sum()/pred[mi].sum():.3f})')
++# best 2-of-3 family among top-12 numbers by share
++top = order[:12]; best = (0, None)
++for a in range(12):
++    for b in range(a + 1, 12):
++        for c in range(b + 1, 12):
++            xs = [top[a], top[b], top[c]]
++            k = B[:, xs].sum(1) >= 2
++            s = pred[k].sum() / tot
++            if s > best[0]: best = (s, [vals[t] for t in xs])
++print(f'  best 2-of-3 family share {best[0]:.3f} {best[1]}')
+diff --git a/research/wip/c2-partner/star_all.txt b/research/wip/c2-partner/star_all.txt
+new file mode 100644
+index 0000000..bdd74fc
+--- /dev/null
++++ b/research/wip/c2-partner/star_all.txt
+@@ -0,0 +1,24 @@
++a1950 N 5896 L 153 match vd 1.000 R 1.000 fit a 5.40 b 1.50; max freq 0.090
++  x=  315 freq 0.090 pred cost share 0.102  (sampled d:  14 of 148, measured share 0.102, pred share on sample 0.091)
++b988 N 6671 L 159 match vd 1.000 R 1.000 fit a 5.46 b 1.45; max freq 0.077
++  x=   48 freq 0.077 pred cost share 0.093  (sampled d:  10 of 148, measured share 0.090, pred share on sample 0.081)
++a2000 N 7593 L 168 match vd 1.000 R 1.000 fit a 5.11 b 1.51; max freq 0.083
++  x=  280 freq 0.083 pred cost share 0.092  (sampled d:   9 of 152, measured share 0.068, pred share on sample 0.070)
++a2100 N 11306 L 192 match vd 1.000 R 1.000 fit a 5.70 b 1.47; max freq 0.067
++  x=  560 freq 0.056 pred cost share 0.083  (sampled d:   9 of 151, measured share 0.089, pred share on sample 0.097)
++b1200 N 11698 L 200 match vd 1.000 R 1.000 fit a 5.51 b 1.22; max freq 0.061
++  x=   24 freq 0.060 pred cost share 0.075  (sampled d:   9 of 127, measured share 0.073, pred share on sample 0.073)
++a2200 N 15199 L 211 match vd 1.000 R 1.000 fit a 5.52 b 1.42; max freq 0.066
++  x=  240 freq 0.066 pred cost share 0.085  (sampled d:   6 of 152, measured share 0.036, pred share on sample 0.035)
++c2174 N 16424 L 220 match vd 1.000 R 1.000 fit a 5.17 b 1.51; max freq 0.057
++  x=  660 freq 0.039 pred cost share 0.064  (sampled d:   5 of 150, measured share 0.057, pred share on sample 0.055)
++c3648 N 20538 L 252 match vd 1.000 R 1.000 fit a 5.61 b 1.35; max freq 0.057
++  x=  840 freq 0.050 pred cost share 0.069  (sampled d:   3 of 129, measured share 0.041, pred share on sample 0.039)
++c2700 N 20896 L 259 match vd 1.000 R 1.000 fit a 5.18 b 1.38; max freq 0.060
++  x=  210 freq 0.053 pred cost share 0.080  (sampled d:   8 of 131, measured share 0.075, pred share on sample 0.082)
++a2400 N 22993 L 246 match vd 1.000 R 1.000 fit a 5.59 b 1.21; max freq 0.050
++  x=  420 freq 0.050 pred cost share 0.064  (sampled d:  10 of 112, measured share 0.107, pred share on sample 0.103)
++a2500 N 26585 L 260 match vd 1.000 R 1.000 fit a 5.87 b 1.25; max freq 0.050
++  x=  120 freq 0.048 pred cost share 0.070  (sampled d:   4 of 107, measured share 0.068, pred share on sample 0.070)
++a2650 N 31743 L 279 match vd 1.000 R 1.000 fit a 6.12 b 1.35; max freq 0.044
++  x=  840 freq 0.036 pred cost share 0.064  (sampled d:   3 of 106, measured share 0.036, pred share on sample 0.047)
+diff --git a/src/c/CMakeLists.txt b/src/c/CMakeLists.txt
+index e8722f6..8effd7f 100644
+--- a/src/c/CMakeLists.txt
++++ b/src/c/CMakeLists.txt
+@@ -4,7 +4,8 @@ add_executable(enumerate enumerate_main.c $<TARGET_OBJECTS:magic_core>)
+ add_executable(msearch msearch.c $<TARGET_OBJECTS:magic_core>)
+ add_executable(bench bench.c $<TARGET_OBJECTS:magic_core>)
+ add_executable(dsearch dsearch.c $<TARGET_OBJECTS:magic_core>)
+-foreach(t enumerate msearch bench dsearch)
++add_executable(dpair2 dpair2.c $<TARGET_OBJECTS:magic_core>)
++foreach(t enumerate msearch bench dsearch dpair2)
+   target_link_libraries(${t} m)
+ endforeach()
+ 
+diff --git a/src/c/dpair2.c b/src/c/dpair2.c
+new file mode 100644
+index 0000000..bd302d7
+--- /dev/null
++++ b/src/c/dpair2.c
+@@ -0,0 +1,288 @@
++/*
++ * dpair2 (research driver, c2/partner): sampled cost of the "both diagonals
++ * first" search with a 12-number top-label root. For d1 = off, off + k, ...
++ * and m random d2 > d1 disjoint from d1, the semi-magic search on
++ *   V_{d1,d2} = { v : |v & d1| = |v & d2| = 1 }.
++ * Every square of V_{d1,d2} contains all 12 numbers of d1 and d2 (its rows
++ * meet each once and are disjoint), so the rarest of the 12 in V_{d1,d2}
++ * gets the top label and only the rows through it are roots (as d-first's
++ * top root with 6 numbers). Also prunes a pair outright when one of the 12
++ * numbers is in fewer than 2 vectors of V_{d1,d2} (a square needs a row and
++ * a col through it).
++ *
++ * usage: dpair2 --sum S [--stride k] [--offset o] [--m m] [--plain] e1 e2 ...
++ *        dpair2 --sum S --check K e1 e2 ...   (exactness: for every square
++ *        of the sum, K random pairs of disjoint traversals t1, t2 must find
++ *        it in V_{t1,t2} with the top root)
++ */
++#include <getopt.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include "arrange.h"
++#include "enumerate.h"
++#include "square.h"
++
++static double cpu_time(void) {
++  struct timespec t;
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
++}
++#define HB 16
++static uint64_t hkey[1 << HB];
++static int hval[1 << HB];
++static int hid(uint64_t x, int *L) {
++  uint32_t h = (uint32_t)((x * 0x9E3779B97F4A7C15ull) >> (64 - HB));
++  while (hval[h] && hkey[h] != x)
++    h = (h + 1) & ((1 << HB) - 1);
++  if (!hval[h]) {
++    hkey[h] = x;
++    hval[h] = ++*L;
++  }
++  return hval[h] - 1;
++}
++static inline int meet(const uint64_t *a, const uint64_t *b) {
++  int k = 0;
++  for (int w = 0; w < 8; w++)
++    k += __builtin_popcountll(a[w] & b[w]);
++  return k;
++}
++static void tobits(const uint64_t *v, int n, uint64_t *b, int *L) {
++  memset(b, 0, 8 * sizeof(uint64_t));
++  for (int i = 0; i < n; i++) {
++    int x = hid(v[i], L);
++    b[x / 64] |= 1ull << (x % 64);
++  }
++}
++
++typedef struct {
++  uint64_t count, target;
++  int hit;
++} cbctx_t;
++static int cb(const square_t *sq, void *vctx) {
++  cbctx_t *c = vctx;
++  c->count++;
++  if (c->target && square_hash(sq) == c->target)
++    c->hit++;
++  return 0;
++}
++
++/* V_{t1,t2} from red (bitsets rb) into sub; class counts of the 12 numbers;
++ * returns the smallest count, and top[] = the 12 numbers rarest first */
++static int build(const vec_list_t *red, const uint64_t *rb, const uint64_t *t1,
++                 const uint64_t *t2, const uint64_t *b1, const uint64_t *b2,
++                 int n, vec_list_t *sub, uint64_t *top) {
++  sub->count = 0;
++  uint64_t num[2 * SQ_MAX_N];
++  size_t cnt[2 * SQ_MAX_N] = {0};
++  for (int i = 0; i < n; i++) {
++    num[i] = t1[i];
++    num[n + i] = t2[i];
++  }
++  for (size_t v = 0; v < red->count; v++)
++    if (meet(b1, rb + v * 8) == 1 && meet(b2, rb + v * 8) == 1) {
++      const uint64_t *e = vec_list_get(red, v);
++      vec_list_push(sub, e);
++      for (int p = 0; p < n; p++)
++        for (int q = 0; q < 2 * n; q++)
++          cnt[q] += e[p] == num[q];
++    }
++  int ord[2 * SQ_MAX_N];
++  for (int q = 0; q < 2 * n; q++) {
++    int b = q;
++    for (; b > 0 && cnt[ord[b - 1]] > cnt[q]; b--)
++      ord[b] = ord[b - 1];
++    ord[b] = q;
++  }
++  for (int q = 0; q < 2 * n; q++)
++    top[q] = num[ord[q]];
++  return (int)cnt[ord[0]];
++}
++
++static int collect_cb(const square_t *sq, void *vctx) {
++  square_t **a = vctx;
++  static size_t cap = 0, cnt = 0;
++  if (cnt + 2 > cap) {
++    cap = cap ? 2 * cap : 64;
++    *a = realloc(*a, cap * sizeof(square_t));
++  }
++  (*a)[cnt++] = *sq;
++  (*a)[cnt].n = 0; /* terminator */
++  return 0;
++}
++
++int main(int argc, char *argv[]) {
++  search_opts_t opts;
++  search_opts_default(&opts);
++  static struct option lo[] = {{"sum", 1, 0, 's'},   {"stride", 1, 0, 'k'},
++                               {"offset", 1, 0, 'o'}, {"m", 1, 0, 'm'},
++                               {"plain", 0, 0, 'p'},  {"check", 1, 0, 'c'}, {"top6", 0, 0, '6'},
++                               {0, 0, 0, 0}};
++  int opt, plain = 0, check = 0, top6 = 0;
++  uint64_t S = 0;
++  size_t stride = 1, off = 0, m = 10;
++  while ((opt = getopt_long(argc, argv, "s:k:o:m:pc:6", lo, NULL)) != -1) {
++    if (opt == 's') S = strtoull(optarg, NULL, 10);
++    else if (opt == 'k') stride = strtoull(optarg, NULL, 10);
++    else if (opt == 'o') off = strtoull(optarg, NULL, 10);
++    else if (opt == 'm') m = strtoull(optarg, NULL, 10);
++    else if (opt == 'p') plain = 1;
++    else if (opt == 'c') check = atoi(optarg);
++    else if (opt == '6') top6 = 1;
++    else return 2;
++  }
++  prime_exps_t p;
++  if (!S || optind >= argc || pexp_parse(&p, argc - optind, argv + optind))
++    return 2;
++  const int n = 6;
++  vec_list_t all, red, sub;
++  vec_list_init(&all, n);
++  vec_list_init(&red, n);
++  vec_list_init(&sub, n);
++  enum_vectors(&p, n, S, S, &all);
++  reduce_vectors(&all, 0, all.count, &red, 0);
++  int L = 0;
++  uint64_t *ab = calloc(all.count * 8, sizeof(uint64_t));
++  uint64_t *rb = calloc(red.count * 8, sizeof(uint64_t));
++  for (size_t v = 0; v < all.count; v++)
++    tobits(vec_list_get(&all, v), n, ab + v * 8, &L);
++  for (size_t v = 0; v < red.count; v++)
++    tobits(vec_list_get(&red, v), n, rb + v * 8, &L);
++  srand(12345 + (unsigned)off);
++  uint64_t top[2 * SQ_MAX_N];
++
++  if (check) {
++    square_t *sqs = NULL;
++    search_stats_t st0 = search_vectors(&red, 0, red.count, &opts, collect_cb, &sqs);
++    size_t nsq = st0.squares, tests = 0, found = 0, pfound = 0, extra = 0;
++    for (size_t s = 0; s < nsq; s++) {
++      const square_t *sq = &sqs[s];
++      grid_t g;
++      square_to_grid(sq, &g);
++      uint64_t h = square_hash(sq);
++      for (int k = 0; k < check; k++) {
++        int sg[SQ_MAX_N], tu[SQ_MAX_N];
++        for (int i = 0; i < n; i++) sg[i] = i;
++        for (int i = n - 1; i > 0; i--) {
++          int j = rand() % (i + 1), t = sg[i];
++          sg[i] = sg[j];
++          sg[j] = t;
++        }
++        int ok;
++        do { /* a derangement relative to sg */
++          for (int i = 0; i < n; i++) tu[i] = i;
++          for (int i = n - 1; i > 0; i--) {
++            int j = rand() % (i + 1), t = tu[i];
++            tu[i] = tu[j];
++            tu[j] = t;
++          }
++          ok = 1;
++          for (int i = 0; i < n; i++) ok &= tu[i] != sg[i];
++        } while (!ok);
++        uint64_t t1[SQ_MAX_N], t2[SQ_MAX_N], b1[8], b2[8];
++        for (int i = 0; i < n; i++) {
++          t1[i] = g.g[i][sg[i]];
++          t2[i] = g.g[i][tu[i]];
++        }
++        tobits(t1, n, b1, &L);
++        tobits(t2, n, b2, &L);
++        int mn = build(&red, rb, t1, t2, b1, b2, n, &sub, top);
++        tests++;
++        if (mn < 2) continue; /* cannot happen for a square of V */
++        search_opts_t o = opts;
++        o.top_numbers = top;
++        o.n_top = 2 * n;
++        o.top_root_only = 1;
++        cbctx_t c = {0, h, 0};
++        search_vectors(&sub, 0, sub.count, &o, cb, &c);
++        found += c.hit > 0;
++        cbctx_t c2 = {0, h, 0};
++        search_vectors(&sub, 0, sub.count, &opts, cb, &c2);
++        pfound += c2.hit > 0;
++        extra += c.count != c2.count;
++      }
++    }
++    printf("check S %lu: %zu squares, %zu tests, top root found %zu, plain root found %zu, "
++           "square-count mismatches %zu\n",
++           (unsigned long)S, nsq, tests, found, pfound, extra);
++    return found == tests && pfound == tests && extra == 0 ? 0 : 1;
++  }
++
++  size_t *D = malloc(all.count * sizeof(size_t));
++  double pairs = 0, est[2] = {0, 0}, estn[2] = {0, 0}, estsetup[2] = {0, 0}, estsw[2] = {0, 0};
++  double estbuild = 0, sumV = 0, sumR = 0, ncalls = 0, nskip = 0;
++  uint64_t sq_top = 0, sq_plain = 0;
++  double c0 = cpu_time();
++  for (size_t d1 = off; d1 < all.count; d1 += stride) {
++    size_t nd = 0;
++    for (size_t d2 = d1 + 1; d2 < all.count; d2++)
++      if (meet(ab + d1 * 8, ab + d2 * 8) == 0)
++        D[nd++] = d2;
++    pairs += (double)nd;
++    if (!nd)
++      continue;
++    double t[2] = {0, 0}, nn[2] = {0, 0}, su[2] = {0, 0}, sw[2] = {0, 0}, tb = 0;
++    for (size_t j = 0; j < m; j++) {
++      size_t d2 = D[(size_t)rand() % nd];
++      double c1 = cpu_time();
++      int mn = build(&red, rb, vec_list_get(&all, d1), vec_list_get(&all, d2),
++                     ab + d1 * 8, ab + d2 * 8, n, &sub, top);
++      double c2 = cpu_time();
++      tb += c2 - c1;
++      ncalls++;
++      sumV += (double)sub.count;
++      sumR += mn;
++      if (mn < 2) {
++        nskip++;
++        continue;
++      }
++      for (int mode = 0; mode < 1 + plain; mode++) {
++        search_opts_t o = opts;
++        uint64_t t6[SQ_MAX_N];
++        if (mode == 0) {
++          o.top_numbers = top;
++          o.n_top = 2 * n;
++          o.top_root_only = 1;
++          if (top6) { /* d1's numbers only, rarest first (V_{d1}-style root) */
++            const uint64_t *e1 = vec_list_get(&all, d1);
++            int k6 = 0;
++            for (int q = 0; q < 2 * n; q++)
++              for (int i = 0; i < n; i++)
++                if (top[q] == e1[i]) t6[k6++] = top[q];
++            o.top_numbers = t6;
++            o.n_top = n;
++          }
++        }
++        cbctx_t c = {0, 0, 0};
++        double c3 = cpu_time();
++        search_stats_t st = search_vectors(&sub, 0, sub.count, &o, cb, &c);
++        t[mode] += cpu_time() - c3;
++        nn[mode] += (double)st.nodes;
++        su[mode] += st.setup_seconds;
++        sw[mode] += st.seconds;
++        if (mode == 0) sq_top += c.count; else sq_plain += c.count;
++      }
++    }
++    for (int mode = 0; mode < 2; mode++) {
++      est[mode] += (double)nd * t[mode] / (double)m;
++      estn[mode] += (double)nd * nn[mode] / (double)m;
++      estsetup[mode] += (double)nd * su[mode] / (double)m;
++      estsw[mode] += (double)nd * sw[mode] / (double)m;
++    }
++    estbuild += (double)nd * tb / (double)m;
++  }
++  printf("S %lu N %zu red %zu L %d: pairs %.4g avg|V| %.1f avg min-class %.1f "
++         "pruned(min<2) %.3f | V build %.4g s | top root: search+setup %.4g s "
++         "(setup %.4g, search timer %.4g) nodes %.4g squares %lu",
++         (unsigned long)S, all.count, red.count, L, pairs * stride, sumV / ncalls,
++         sumR / ncalls, nskip / ncalls, estbuild * stride, est[0] * stride,
++         estsetup[0] * stride, estsw[0] * stride, estn[0] * stride, (unsigned long)sq_top);
++  if (plain)
++    printf(" | plain root: %.4g s (setup %.4g, search timer %.4g) nodes %.4g squares %lu",
++           est[1] * stride, estsetup[1] * stride, estsw[1] * stride, estn[1] * stride,
++           (unsigned long)sq_plain);
++  printf(" | calls %.0f cpu used %.1f s\n", ncalls, cpu_time() - c0);
++  return 0;
++}
+-- 
+2.43.0
+

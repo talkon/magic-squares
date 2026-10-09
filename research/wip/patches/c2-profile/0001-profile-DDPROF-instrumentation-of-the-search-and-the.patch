@@ -1,0 +1,611 @@
+From cd9faaccdf2373e1a69dd4ba87d4a3149b281f40 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 00:45:11 +0000
+Subject: [PATCH] profile: -DDPROF instrumentation of the search and the
+ d-first loop (compiled out by default)
+
+Per-layer children made / searched, TSC cycles creating them (without
+their subtrees) and selecting the children, list lengths, the vectors
+placed in searched nodes, and the support filter's kills (count, dead
+cell, a top label, a cell of the new vector, passes); dfirst.c writes one
+line per d (env DPROF_LOG, DPROF_VEC, DPROF_MINW). CMake: MAGIC_DEFS for
+instrumentation build directories. Default builds unchanged (bench
+quick 1,770,779 nodes).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ CMakeLists.txt       |   5 ++
+ src/c/arrange.c      | 101 +++++++++++++++++++++++++++++++++++++
+ src/c/arrange.h      |  39 +++++++++++++++
+ src/c/arrange_core.h | 116 ++++++++++++++++++++++++++++++++++++++++++-
+ src/c/dfirst.c       |  91 +++++++++++++++++++++++++++++++++
+ 5 files changed, 350 insertions(+), 2 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 464a606..be0f2b2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,6 +20,11 @@ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+   string(APPEND CMAKE_C_FLAGS_DEBUG " --param=asan-use-after-return=0")
+ endif()
+ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
++# instrumentation builds for measurements, in their own build directory,
++# e.g. cmake -DMAGIC_DEFS="DPROF;CHILD_PROF" (empty by default)
++if (MAGIC_DEFS)
++  add_compile_definitions(${MAGIC_DEFS})
++endif()
+ 
+ enable_testing()
+ 
+diff --git a/src/c/arrange.c b/src/c/arrange.c
+index 33fdc95..f21fffc 100644
+--- a/src/c/arrange.c
++++ b/src/c/arrange.c
+@@ -252,6 +252,15 @@ typedef struct {
+     double t, t2, q, q2, nodes;
+   } r1s[8];
+   uint32_t *r1_list, r1_nlist;
++#ifdef DPROF
++  /* with dprof_vec: bitset -> vector index (open addressing, index + 1),
++   * the deepest searched node of each vector, and the vectors placed on
++   * the current path, by depth */
++  uint32_t *dp_ht;
++  int dp_hbits;
++  uint8_t *dp_maxd;
++  uint32_t dp_ids[MAXD];
++#endif
+ } sstate_t;
+ 
+ static inline bool bit_get(const uint64_t *row, uint32_t u) {
+@@ -505,6 +514,66 @@ static void report_bits(sstate_t *s, int W) {
+ }
+ #endif
+ 
++#ifdef DPROF
++#include <x86intrin.h>
++dprof_t dprof;
++int dprof_vec;
++/* the last SUPPORT call: 1 killed by count, 2 by a dead cell (mask), the
++ * axis it died on, passes run */
++int dp_sw, dp_sax, dp_srounds;
++uint64_t dp_sdead[CARRY_WORDS];
++static void __attribute__((destructor)) dp_print(void) {
++  for (int l = 0; l < DP_NL; l++)
++    if (dprof.sk_calls[l])
++      fprintf(stderr,
++              "dprof support (%d,%d): calls %lu rounds/call %.2f killed by "
++              "count %lu, by a dead cell %lu (a top label %lu, top labels "
++              "only %lu, a cell of the new vector %lu), on the axis o %lu\n",
++              l / 9, l % 9, (unsigned long)dprof.sk_calls[l],
++              (double)dprof.sk_rounds[l] / dprof.sk_calls[l],
++              (unsigned long)dprof.sk_cnt[l], (unsigned long)dprof.sk_fc[l],
++              (unsigned long)dprof.sk_top[l],
++              (unsigned long)dprof.sk_toponly[l],
++              (unsigned long)dprof.sk_new[l],
++              (unsigned long)dprof.sk_axis_o[l]);
++}
++static inline uint32_t dp_hash(const uint64_t *m, int W_, int bits) {
++  uint64_t h = 0x9E3779B97F4A7C15ull;
++  for (int w = 0; w < W_; w++)
++    if (m[w])
++      h ^= (m[w] + (uint64_t)w * 0x632BE59BD9B4E019ull) * 0xBF58476D1CE4E5B9ull;
++  h ^= h >> 29;
++  h *= 0x94D049BB133111EBull;
++  return (uint32_t)(h >> (64 - bits));
++}
++/* the index of the vector with bitset m (W_ words, the others 0) */
++static uint32_t dp_lookup(const sstate_t *s, const uint64_t *m, int W_) {
++  const uint32_t mask = (1u << s->dp_hbits) - 1;
++  for (uint32_t h = dp_hash(m, W_, s->dp_hbits);; h = (h + 1) & mask) {
++    const uint32_t e = s->dp_ht[h];
++    if (!e)
++      return UINT32_MAX;
++    const uint64_t *b = s->bits + (uint64_t)(e - 1) * s->bw;
++    int eq = 1;
++    for (int w = 0; w < s->bw; w++)
++      eq &= b[w] == (w < W_ ? m[w] : 0);
++    if (eq)
++      return e - 1;
++  }
++}
++/* a searched node (or a square) at depth dd: mark its vectors */
++static inline void dp_mark(sstate_t *s, int dd, const uint64_t *m, int W_) {
++  if (!s->dp_ht)
++    return;
++  s->dp_ids[dd] = dp_lookup(s, m, W_);
++  for (int k = 1; k <= dd; k++) {
++    const uint32_t v = s->dp_ids[k];
++    if (v != UINT32_MAX && s->dp_maxd[v] < dd)
++      s->dp_maxd[v] = (uint8_t)dd;
++  }
++}
++#endif
++
+ #ifdef PROFILE
+ /* per depth: children created, children pruned before being searched, and
+  * for the searched ones, children generated and candidates on each axis */
+@@ -903,6 +972,9 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
+   if (count < (size_t)(2 * n) || n > SQ_MAX_N)
+     return st;
+   double t0 = wall_time();
++#ifdef DPROF
++  const uint64_t dp_t0 = __rdtsc();
++#endif
+ 
+   sstate_t s;
+   memset(&s, 0, sizeof(s));
+@@ -1175,9 +1247,38 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
+   if (carry)
+     for (int a = 0; a < 2; a++)
+       s.ptmask[a] = malloc(s.cap / 8 + 1);
++#ifdef DPROF
++  if (dprof_vec) {
++    s.dp_hbits = 4;
++    while (((size_t)1 << s.dp_hbits) < 2 * count + 16)
++      s.dp_hbits++;
++    s.dp_ht = calloc((size_t)1 << s.dp_hbits, sizeof(uint32_t));
++    s.dp_maxd = calloc(count + 1, 1);
++    const uint32_t hm = (1u << s.dp_hbits) - 1;
++    for (size_t v = 0; v < count; v++) {
++      uint32_t h = dp_hash(s.bits + v * W_, W_, s.dp_hbits);
++      while (s.dp_ht[h])
++        h = (h + 1) & hm;
++      s.dp_ht[h] = (uint32_t)v + 1;
++    }
++  }
++  dprof.setup += __rdtsc() - dp_t0;
++  dprof.roots += s.root_limit < s.N ? s.root_limit : s.N;
++  dprof.nvec += count;
++  dprof.searches++;
++#endif
+   double t1 = wall_time();
+ 
+   search_root(&s, W_, carry);
++#ifdef DPROF
++  if (s.dp_ht) {
++    for (size_t v = 0; v < count; v++)
++      for (int k = 1; k <= s.dp_maxd[v] && k < DP_MAXD; k++)
++        dprof.vused[k]++;
++    free(s.dp_ht);
++    free(s.dp_maxd);
++  }
++#endif
+ 
+   free(s.r1_list);
+   st.nodes = s.nodes;
+diff --git a/src/c/arrange.h b/src/c/arrange.h
+index 6c9009a..f396c6d 100644
+--- a/src/c/arrange.h
++++ b/src/c/arrange.h
+@@ -109,6 +109,45 @@ typedef struct {
+ 
+ void search_opts_default(search_opts_t *o);
+ 
++#ifdef DPROF
++/*
++ * Instrumentation for the profile of the search (build with -DDPROF; never
++ * in the default build): cumulative counters, which callers snapshot and
++ * difference (dfirst.c writes one line per d). Layers are 9 r + c of the
++ * node or child (r rows, c cols placed). Carried path only.
++ */
++#define DP_NL 81
++#define DP_MAXD 18
++typedef struct {
++  uint64_t made[DP_NL];   /* children created, by the child's layer */
++  uint64_t live[DP_NL];   /* of them searched (survived their filters) */
++  uint64_t mk[DP_NL];     /* TSC cycles creating them (TRY_CHILD up to the
++                             call of SEARCH_REC, i.e. without the subtree) */
++  uint64_t sel[DP_NL];    /* TSC cycles of MRV + selection of the children
++                             at the searched nodes of the layer */
++  uint64_t kids[DP_NL];   /* children selected at the searched nodes */
++  uint64_t in[DP_NL][2];  /* parent list lengths o, b, summed per child */
++  uint64_t out[DP_NL][2]; /* lengths after filter o, b (children that got
++                             that far) */
++  uint64_t nout[DP_NL][2];/* children that got that far */
++  uint64_t lst[DP_NL][2]; /* row / col list lengths of the searched nodes */
++  uint64_t setup, root, total; /* TSC cycles: setup of search_vectors, the
++                                  depth-0 list fills, the root loops */
++  uint64_t roots, nvec, searches;
++  /* the support filter's kills at the children, by layer: by count, by a
++   * dead cell, of those a dead cell that is a top label (one of d's
++   * numbers in a V_d search), a cell of the new vector, only top labels;
++   * the support rounds run (passes over one axis) */
++  uint64_t sk_cnt[DP_NL], sk_fc[DP_NL], sk_top[DP_NL], sk_new[DP_NL],
++      sk_toponly[DP_NL], sk_rounds[DP_NL], sk_calls[DP_NL], sk_axis_o[DP_NL];
++  uint64_t vused[DP_MAXD]; /* with dprof_vec: vectors placed in some
++                              searched node with >= k vectors placed
++                              (vused[12]: in a square) */
++} dprof_t;
++extern dprof_t dprof;
++extern int dprof_vec;
++#endif
++
+ /* will a search of `labels` distinct numbers with opts carry its bitsets
+  * in the candidate lists (1), or use the N x N intersection matrices (0)?
+  * (see CARRY_MAX_W in arrange.c) */
+diff --git a/src/c/arrange_core.h b/src/c/arrange_core.h
+index 1d38ab6..2da4d96 100644
+--- a/src/c/arrange_core.h
++++ b/src/c/arrange_core.h
+@@ -666,8 +666,15 @@ static int SUPPORT(sstate_t *s, int d, int a, int union_only) {
+ #define UNION_OF(g, w) (g)[w]
+ #else
+ #define UNION_OF(g, w) COVERED(g, w)
++#endif
++#ifdef DPROF
++  dp_sw = 0;
++  dp_srounds = 0;
+ #endif
+   while (quiet < 2) {
++#ifdef DPROF
++    dp_srounds++;
++#endif
+     const uint64_t *C = s->cells[d][1 - a];
+ #ifdef CARRY
+     const uint64_t *G = s->uni[d][1 - a];
+@@ -692,15 +699,27 @@ static int SUPPORT(sstate_t *s, int d, int a, int union_only) {
+           KEEP_COUNT(s, s->valid[d][a], s->nvalid[d][a], bad, g, union_only);
+ #endif
+       s->nvalid[d][a] = k;
+-      if (s->np[a] + (int)k < n)
++      if (s->np[a] + (int)k < n) {
++#ifdef DPROF
++        dp_sw = 1;
++        dp_sax = a;
++#endif
+         return 1;
++      }
+       /* forward checking: the unmatched cells of the other axis */
+       const uint64_t *Ca = s->cells[d][a];
+       uint64_t dead = 0;
+       for (int w = 0; w < W; w++)
+         dead |= C[w] & ~Ca[w] & ~UNION_OF(g, w);
+-      if (dead)
++      if (dead) {
++#ifdef DPROF
++        dp_sw = 2;
++        dp_sax = a;
++        for (int w = 0; w < W && w < CARRY_WORDS; w++)
++          dp_sdead[w] = C[w] & ~Ca[w] & ~UNION_OF(g, w);
++#endif
+         return 1;
++      }
+     }
+     a = 1 - a;
+   }
+@@ -1097,6 +1116,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+                                             const uint64_t *m, uint32_t v,
+                                             uint32_t min_v) {
+   const int n = s->n;
++#if defined(DPROF) && defined(CARRY)
++  const uint64_t dpt0 = __rdtsc();
++  int dp_srch = 0;
++#endif
+   s->nodes++;
+   if (s->opts.node_limit && s->nodes > s->opts.node_limit) {
+     s->stop = 2;
+@@ -1113,7 +1136,15 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+   for (int w = 0; w < W; w++)
+     s->placedw[b][s->np[b]][w] = m[w];
+   s->np[b]++;
++#ifdef DPROF
++  const int dpl = 9 * s->np[ROW] + s->np[COL];
++#endif
+   if (s->np[ROW] == n && s->np[COL] == n) {
++#ifdef DPROF
++    dp_mark(s, d + 1, m, W);
++    dprof.made[dpl]++;
++    dprof.mk[dpl] += __rdtsc() - dpt0;
++#endif
+     report_bits(s, W);
+     s->np[b]--;
+     return;
+@@ -1153,6 +1184,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+   cp_in[pl][1] += s->nvalid[d][b] - min_v;
+ #else
+ #define CP_WHY(k)
++#endif
++#ifdef DPROF
++  dprof.in[dpl][0] += s->nvalid[d][o] - min_v;
++  dprof.in[dpl][1] += s->nvalid[d][b] - min_v;
+ #endif
+   CP_START();
+   /* the pretest (opts.pretest_min): from that many vectors placed, nearly
+@@ -1172,6 +1207,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+         FILTER_COUNT(s, s->vw[d][o] + min_v, s->nvalid[d][o] - min_v, m, 1,
+                      NULL, s->ptmask[0], uo);
+     uint64_t pdead = s->np[o] + (int)pko < n;
++#ifdef DPROF
++    dprof.out[dpl][0] += pko;
++    dprof.nout[dpl][0]++;
++#endif
+     for (int w = 0; w < W; w++)
+       pdead |= ncell_b[w] & ~ncell_o[w] & ~uo[w];
+     if (!pdead) {
+@@ -1181,6 +1220,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+       pkb = FILTER_COUNT(s, s->vw[d][b] + min_v, s->nvalid[d][b] - min_v, m,
+                          0, sup ? pex : NULL, s->ptmask[1], ub);
+       pdead = s->np[b] + (int)pkb < n;
++#ifdef DPROF
++      dprof.out[dpl][1] += pkb;
++      dprof.nout[dpl][1]++;
++#endif
+       for (int w = 0; w < W; w++)
+         pdead |= ncell_o[w] & ~ncell_b[w] & ~ub[w];
+     }
+@@ -1199,6 +1242,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+       cp_die[pl][why]++;
+       cp_pt_kill[pl]++;
+ #endif
++#ifdef DPROF
++      dprof.made[dpl]++;
++      dprof.mk[dpl] += __rdtsc() - dpt0;
++#endif
+ #ifdef PROFILE
+       /* (as at the end of TRY_CHILD: a child created and pruned) */
+       prof_created[d + 1]++;
+@@ -1223,6 +1270,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+   CP_PHASE(pl, CP_FO);
+ #ifdef CHILD_PROF
+   cp_out[pl][0] += ko;
++#endif
++#ifdef DPROF
++  dprof.out[dpl][0] += ko;
++  dprof.nout[dpl][0]++;
+ #endif
+   s->nvalid[d + 1][o] = ko;
+   if (s->np[o] + (int)ko < n)
+@@ -1243,6 +1294,10 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+     CP_PHASE(pl, CP_FB);
+ #ifdef CHILD_PROF
+     cp_out[pl][1] += kb;
++#endif
++#ifdef DPROF
++    dprof.out[dpl][1] += kb;
++    dprof.nout[dpl][1]++;
+ #endif
+     s->nvalid[d + 1][b] = kb;
+     if (s->np[b] + (int)kb < n)
+@@ -1283,6 +1338,31 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+     if (!dead && sup) {
+       CP_RESET();
+       dead = SUPPORT(s, d + 1, o, 1);
++#ifdef DPROF
++      dprof.sk_calls[dpl]++;
++      dprof.sk_rounds[dpl] += dp_srounds;
++      if (dead) {
++        dprof.sk_axis_o[dpl] += dp_sax == o;
++        if (dp_sw == 1) {
++          dprof.sk_cnt[dpl]++;
++        } else {
++          int top = 0, nw = 0, other = 0;
++          for (int w = 0; w < W; w++) {
++            uint64_t t = 0;
++            for (int x = 64 * w; x < 64 * w + 64; x++)
++              if (x + 6 >= (int)s->L && x < (int)s->L)
++                t |= (uint64_t)1 << (x - 64 * w);
++            top |= (dp_sdead[w] & t) != 0;
++            other |= (dp_sdead[w] & ~t) != 0;
++            nw |= (dp_sdead[w] & m[w]) != 0;
++          }
++          dprof.sk_fc[dpl]++;
++          dprof.sk_top[dpl] += top;
++          dprof.sk_new[dpl] += nw;
++          dprof.sk_toponly[dpl] += top && !other;
++        }
++      }
++#endif
+       CP_PHASE(pl, CP_SUP);
+       CP_WHY(CD_SUP);
+     }
+@@ -1320,12 +1400,25 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
+                     s->cnt[d + 1][b]);
+         CP_PHASE(pl, CP_COUNT);
+       }
++#ifdef DPROF
++      dprof.mk[dpl] += __rdtsc() - dpt0;
++      dprof.live[dpl]++;
++      dprof.lst[dpl][ROW] += s->nvalid[d + 1][ROW];
++      dprof.lst[dpl][COL] += s->nvalid[d + 1][COL];
++      dp_mark(s, d + 1, m, W);
++      dp_srch = 1;
++#endif
+       SEARCH_REC(s, d + 1);
+     }
+   }
+ #ifdef CHILD_PROF
+   cp_die[pl][why]++;
+ #endif
++#ifdef DPROF
++  if (!dp_srch)
++    dprof.mk[dpl] += __rdtsc() - dpt0;
++  dprof.made[dpl]++;
++#endif
+ #undef CP_WHY
+ #else
+   /* deep children are mostly pruned by the support filter, which needs only
+@@ -1403,6 +1496,9 @@ static void SEARCH_REC(sstate_t *s, int d) {
+   const int pl = 9 * s->np[ROW] + s->np[COL];
+   CP_START();
+ #endif
++#if defined(DPROF) && defined(CARRY)
++  const uint64_t dpt0 = __rdtsc();
++#endif
+ #ifndef CARRY
+   if (d >= LAZY_DEPTH && s->opts.support && s->opts.forward_check &&
+       s->opts.mrv) {
+@@ -1538,6 +1634,13 @@ static void SEARCH_REC(sstate_t *s, int d) {
+   PAD_LIST(s, s->vw[d][ROW], s->nvalid[d][ROW]);
+   PAD_LIST(s, s->vw[d][COL], s->nvalid[d][COL]);
+   CP_PHASE(pl, CP_SEL);
++#ifdef DPROF
++  {
++    const int dpl = 9 * s->np[ROW] + s->np[COL];
++    dprof.sel[dpl] += __rdtsc() - dpt0;
++    dprof.kids[dpl] += nk;
++  }
++#endif
+   for (uint32_t i = 0; i < nk && !s->stop; i++) {
+     uint64_t m[W];
+     for (int w = 0; w < W; w++)
+@@ -1575,6 +1678,9 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
+   const uint32_t first = s->r1_ns ? r1_next(s, i0, &h) : i0;
+   if (first >= i1)
+     return;
++#if defined(DPROF) && defined(CARRY)
++  const uint64_t dpr0 = __rdtsc();
++#endif
+   for (int a = 0; a < 2; a++) {
+ #ifdef CARRY
+     for (uint32_t i = i0; i < count; i++)
+@@ -1591,6 +1697,9 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
+   }
+ #if defined(CHILD_PROF) && defined(CARRY)
+   const uint64_t cp_t0 = __rdtsc();
++#endif
++#if defined(DPROF) && defined(CARRY)
++  dprof.root += __rdtsc() - dpr0;
+ #endif
+   if (!s->r1_ns) {
+     for (uint32_t r1 = i0; r1 < i1 && !s->stop; r1++)
+@@ -1608,6 +1717,9 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
+ #if defined(CHILD_PROF) && defined(CARRY)
+   cp_total += __rdtsc() - cp_t0;
+ #endif
++#if defined(DPROF) && defined(CARRY)
++  dprof.total += __rdtsc() - dpr0;
++#endif
+ }
+ 
+ #undef SEARCH_REC
+diff --git a/src/c/dfirst.c b/src/c/dfirst.c
+index 3013f78..8ffc331 100644
+--- a/src/c/dfirst.c
++++ b/src/c/dfirst.c
+@@ -12,6 +12,62 @@
+ 
+ #include "square.h"
+ 
++#ifdef DPROF
++/* the profile's per-d lines (-DDPROF; env DPROF_LOG names the file,
++ * DPROF_VEC=1 marks the vectors of the searched nodes) */
++#include <x86intrin.h>
++static FILE *dp_log;
++static int dp_init;
++static void dp_open(void) {
++  if (dp_init)
++    return;
++  dp_init = 1;
++  const char *f = getenv("DPROF_LOG");
++  if (f)
++    dp_log = fopen(f, "a");
++  const char *v = getenv("DPROF_VEC");
++  dprof_vec = v && atoi(v) > 0;
++}
++static void dp_write(size_t i, size_t vd, int labels, uint64_t nodes,
++                     uint64_t pairs, uint64_t vd_cyc, const size_t *cls,
++                     int n, const dprof_t *a, const dprof_t *b, double cpu) {
++  if (!dp_log)
++    return;
++  fprintf(dp_log, "D %zu %zu %d %lu %lu %lu %lu %lu %lu %lu %lu %.6f C", i, vd,
++          labels, (unsigned long)(b->roots - a->roots),
++          (unsigned long)nodes, (unsigned long)pairs, (unsigned long)vd_cyc,
++          (unsigned long)(b->setup - a->setup),
++          (unsigned long)(b->root - a->root),
++          (unsigned long)(b->total - a->total),
++          (unsigned long)(b->searches - a->searches), cpu);
++  for (int q = 0; q < n; q++)
++    fprintf(dp_log, " %zu", cls[q]);
++  fprintf(dp_log, " U");
++  for (int k = 1; k < DP_MAXD; k++)
++    fprintf(dp_log, " %lu", (unsigned long)(b->vused[k] - a->vused[k]));
++  for (int l = 0; l < DP_NL; l++) {
++    const uint64_t made = b->made[l] - a->made[l];
++    if (!made)
++      continue;
++    fprintf(dp_log, " L%d:%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
++            l, (unsigned long)made, (unsigned long)(b->live[l] - a->live[l]),
++            (unsigned long)(b->mk[l] - a->mk[l]),
++            (unsigned long)(b->sel[l] - a->sel[l]),
++            (unsigned long)(b->kids[l] - a->kids[l]),
++            (unsigned long)(b->in[l][0] - a->in[l][0]),
++            (unsigned long)(b->in[l][1] - a->in[l][1]),
++            (unsigned long)(b->out[l][0] - a->out[l][0]),
++            (unsigned long)(b->nout[l][0] - a->nout[l][0]),
++            (unsigned long)(b->out[l][1] - a->out[l][1]),
++            (unsigned long)(b->nout[l][1] - a->nout[l][1]),
++            (unsigned long)(b->lst[l][0] - a->lst[l][0]),
++            (unsigned long)(b->lst[l][1] - a->lst[l][1]));
++  }
++  fprintf(dp_log, "\n");
++  fflush(dp_log);
++}
++#endif
++
+ static double wall_time(void) {
+   struct timeval t;
+   gettimeofday(&t, NULL);
+@@ -418,10 +474,37 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
+   vec_list_t sub;
+   vec_list_init(&sub, n);
+   const double c0 = thread_cpu();
++#ifdef DPROF
++  dp_open();
++#endif
+   for (size_t i = lo + off % stride; i < hi; i += stride) {
+     const double ci = thread_cpu(), w0 = wall_time();
++#ifdef DPROF
++    static dprof_t dpa;
++    dpa = dprof;
++    const uint64_t dpv0 = __rdtsc();
++#endif
+     sub.count = 0;
+     dfirst_vd(df, i, &sub);
++#ifdef DPROF
++    const uint64_t dp_vd_cyc = __rdtsc() - dpv0;
++    size_t dcls[SQ_MAX_N] = {0};
++    {
++      const uint64_t *dd = vec_list_get(df->diags, df->dstart + i);
++      for (size_t v = 0; v < sub.count; v++) {
++        const uint64_t *e = vec_list_get(&sub, v);
++        for (int p = 0; p < n; p++)
++          for (int q = 0; q < n; q++)
++            dcls[q] += e[p] == dd[q];
++      }
++      for (int a = 1; a < n; a++) /* ascending */
++        for (int b = a; b > 0 && dcls[b - 1] > dcls[b]; b--) {
++          const size_t t = dcls[b];
++          dcls[b] = dcls[b - 1];
++          dcls[b - 1] = t;
++        }
++    }
++#endif
+     const double w1 = wall_time();
+     st.nd++;
+     st.vd_total += sub.count;
+@@ -431,6 +514,10 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
+     search_stats_t ss;
+     memset(&ss, 0, sizeof(ss));
+     search_opts_t o = *opts;
++#ifdef DPROF
++    if (getenv("DPROF_MINW")) /* forced bitset width, for measurements */
++      o.min_words = atoi(getenv("DPROF_MINW"));
++#endif
+     uint64_t top[SQ_MAX_N];
+     /* the top-label root, where it pays (see dfirst_set_top_root): every
+      * V_d of the sum, or else this V_d by its own labels */
+@@ -467,6 +554,10 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
+     st.search_seconds += ss.seconds;
+     st.truncated |= ss.truncated;
+     const double cd = thread_cpu() - ci;
++#ifdef DPROF
++    dp_write(i, sub.count, ss.num_labels, ss.nodes, ic.pairs, dp_vd_cyc, dcls,
++             n, &dpa, &dprof, cd);
++#endif
+     st.d_cpu += cd;
+     st.d_cpu2 += cd * cd;
+     st.d_pairs2 += (double)ic.pairs * (double)ic.pairs;
+-- 
+2.43.0
+

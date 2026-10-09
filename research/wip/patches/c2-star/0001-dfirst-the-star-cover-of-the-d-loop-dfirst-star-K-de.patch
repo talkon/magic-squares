@@ -1,0 +1,1504 @@
+From 3e7519aedbc0d96e1c51461ce703f079a112e413 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 9 Oct 2026 03:42:22 +0000
+Subject: [PATCH] dfirst: the star cover of the d loop (--dfirst-star K,
+ default 4)
+
+The two diagonals of a magic square of even order share no number, so
+for any x* one of them lacks it: the d-first loop may skip the d that
+contain x* ("star d") and still find (and flag) every magic square.
+msearch picks x* from the whole unreduced list (argmax of the summed
+|V_d|^5.5 R^1.4 over the d containing it; 0.04-0.55 s per sum) and
+searches every K-th star d (by rank), estimating their pairs K x.
+
+- dfirst.c: dfirst_star_choose, dfirst_set_star, dfirst_star_count, the
+  filter and its counts in dfirst_search, a star column in the d log
+- msearch: --dfirst-star K (default 4 for even n, off for odd n; -1:
+  skip all), --dfirst-star-only; dsum star fields, est_* weighted, two
+  strata for se_*
+- fuzz_arrange --dfirst: x* against brute force, the filter (K = -1,
+  1-5, only, stride splits) against the filtered brute pairs, and planted
+  magic pairs with x forced onto one diagonal
+- scheduler: complete sums' pairs by est_pairs once per sum
+  (dsum_est_pairs), SUMMARY_VERSION 4; test_dfirst_star
+- measured star share s = 0.094 / 0.073 / 0.067 / 0.061 at N = 7.6k /
+  11.7k / 20.5k / 23k (predicted within 2-4%): K = 4 takes 1.048-1.076x
+  less CPU per sum (research/ideas.md, "The star cover of the d loop")
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GSaYLGdzq6d82nBLeSZFgB
+---
+ research/ideas.md         | 208 +++++++++++++++++++++++++++++++++++++
+ scripts/scheduler.py      |  53 +++++++++-
+ scripts/test_scheduler.py | 165 +++++++++++++++++++++++++++++
+ src/c/CMakeLists.txt      |   7 +-
+ src/c/README.md           |  22 +++-
+ src/c/dfirst.c            | 160 +++++++++++++++++++++++++++-
+ src/c/dfirst.h            |  67 +++++++++++-
+ src/c/fuzz_arrange.c      | 213 ++++++++++++++++++++++++++++++++++++--
+ src/c/msearch.c           | 187 ++++++++++++++++++++++++++++++---
+ 9 files changed, 1047 insertions(+), 35 deletions(-)
+
+diff --git a/research/ideas.md b/research/ideas.md
+index 84988f6..d054fc6 100644
+--- a/research/ideas.md
++++ b/research/ideas.md
+@@ -2006,3 +2006,211 @@ no-GFNI build default, mode 7 and `--dfirst`. The d-first runs checked
+ equal to fdb77fc's, also with `--no-r1-width`, `--pretest-min 0` and
+ `--min-words 6`. Mode 4 (large sparse families, limited by its brute-force
+ oracle) was not rerun.
++
++## The star cover of the d loop (October 2026, branch c2/star)
++
++The two diagonals of an n x n square of even order have no cell in common.
++A magic square's n^2 numbers are distinct, so its two diagonals (both SP
++traversals) have no number in common either. So for any number x, at most
++one of them contains x, and the d-first loop finds the square from the
++other one.
++
++* The loop may skip every "star d", the d of the sum that contain a
++  chosen x*. Every magic square is still found, once instead of twice when
++  x* is on one of its diagonals.
++* The square is still flagged: the partner test runs against the whole
++  diagonal set, star d included.
++* Only (square, SP traversal) pairs are lost. A systematic sample of the
++  star d (every K-th, by rank in the unreduced list) estimates them.
++* Not for odd n: the two diagonals share their center cell, which may be
++  x*.
++
++**Implementation** (src/c/dfirst.c, msearch):
++
++* `dfirst_star_choose` picks x* from the whole unreduced list, so every
++  `--d-range` unit and `--d-stride` sample of a sum agrees.
++  * For every d, one pass over the postings of d's numbers gives |V_d| and
++    the class sizes (R = the rarest class). No V_d is built.
++  * x* = argmax over x of the sum, over the d containing x, of
++    |V_d|^5.5 R^1.4, the per-d cost law of
++    research/wip/complexity-profile.md. Ties go to the smaller x.
++  * The CPU time is 0.036 s at N = 5.9k and 0.55 s at 31.7k: 0.03% and
++    0.001% of the sum's d-first CPU. A d-range unit pays it again, which
++    is still negligible. The fallback to the most frequent number was not
++    needed.
++* `dfirst_set_star(x, K, only)` sets the filter. With K >= 1 only the star
++  d of rank % K == 0 are searched; with K = -1 none are.
++* msearch options:
++  * `--dfirst-star K` defaults to 4 for even n and to off for odd n.
++    `--dfirst-star 0` gives be625d8's output. A nonzero K with odd n is
++    refused.
++  * `--dfirst-star-only` searches only the star d, for measurements. The
++    sum is then not complete.
++* The dsum record gets `star_x`, `star_k`, `nd_star`, `nd_star_skipped`,
++  `nd_star_searched`, `pairs_star`, `nodes_star`, `cpu_star`,
++  `pred_star_share`, `star_freq_rank`, `pred_share_top_freq` and
++  `star_time`.
++* The estimates (`est_pairs`, `est_nodes`, `est_time`) weigh a searched
++  star d K x the d-stride weight.
++  * With K = -1 they cover the d without x* only, and the schedulers do not
++    count them.
++  * `se_*` come from two strata (star d and the others), each a simple
++    random sample of its d in the range.
++* `complete` still means that every magic square of the sum was found.
++* Scheduler (both models): a complete sum's pairs count through
++  `est_pairs`, once per sum (`scheduler.dsum_est_pairs`: totals
++  `dfirst_pairs`, `dfirst_est_pairs`, `dfirst_est_sums`,
++  `dfirst_star_sums`; SUMMARY_VERSION 4). A magic square is counted once,
++  whether it came once or twice.
++
++**Correctness.**
++
++* (a) 39 small sums with N = 452-3,626 (cx/dfirst's gate-(b) list: 15 SP
++  pairs, 2 of them on a star d) were each run with K = 0, 1, 4 and -1.
++  * The K = 4 and K = -1 runs' "dsquare" records are byte-identical to the
++    K = 0 run's records, filtered to the d without x* plus (K = 4) the star
++    d of rank % 4 == 0. Star membership and ranks come from the K = 1 run's
++    d log.
++  * K = 1 equals K = 0: the same pairs, nodes and estimates.
++  * The counts (nd + nd_star_skipped = N, nd_star_searched = ceil(nd_star
++    / 4)) and est_pairs = pairs + 3 x pairs_star hold.
++  * The default equals K = 4.
++* (b) Magic exactness.
++  * `fuzz_arrange --dfirst` now checks, per check:
++    * x* against brute force (|V_d| and R recounted; the same weights
++      summed in the same order; ties to the smaller number);
++    * the filter with K = -1, a random K in 1-5, `only`, and a d-stride 3
++      split, against the brute-force pairs filtered the same way, with the
++      partner flags and the counts;
++    * with x forced onto one diagonal of the planted magic pair (and not
++      the other) and K = -1, the planted square must come exactly once,
++      from the other diagonal, flagged.
++  * 2,500 fresh seeds gave 0 fails. They covered: default modes 600;
++    `--n 6` 300 (402 planted 6x6 magic pairs); `--n 4` 200; `--n 8` 100;
++    mode 1 300; mode 7 200; the matrices build 300 plus mode 7 100;
++    portable 200; no-GFNI 200.
++  * Totals: 24,062 star runs, 737,723 kept pairs checked (198,642
++    brute-force pairs, 111,404 flagged), and 4,062 planted magic squares
++    with x* on one diagonal, all found and flagged.
++  * Mode 5 (hubs) was stopped after 34 CPU-min inside its brute-force
++    oracle. A rerun with `--budget 5000000` passed: 25 seeds ran (5 skipped
++    by the oracle budget), with 48 planted squares.
++  * Eight mutants of dfirst.c were each caught (14-120 fails in 60 seeds):
++    the last number of d not tested, the rank offset, the exponent, ties
++    to the larger number, the class count, `only` inverted, the skip
++    counts, and the partner test made to ignore star d.
++  * On real sums (a driver in the scratchpad, c2/star/real/star_real.c),
++    222 magic pairs were planted in the box configuration: 3 per semi-magic
++    square of 7 sums, N = 1.5-3k, the pairs added to the unreduced list.
++    Two checks:
++    * x* chosen on the augmented list (on a planted diagonal 66 times), K
++      = -1, every planted square found and flagged;
++    * x forced onto each planted diagonal: 444 checks, each found once from
++      the other diagonal, flagged.
++  * No result file holds a known magic square (none is known), so the
++    "known magic squares" half of the gate is vacuous.
++* (c) `--dfirst-star 0` is byte-identical to be625d8 on the 39 sums, except
++  for the timing fields. Gates (a) and (c) were rerun on the final binary,
++  with K = 4 as the default. arrange.c is untouched: bench quick / full /
++  prod give 1,770,779 / 14,958,507 / 50,375,738 nodes, all ok.
++* (d) `test_scheduler.py` `test_dfirst_star` runs synthetic star records
++  through both schedulers.
++  * A complete K = 4 sum: est_pairs, not pairs or K x pairs_star again.
++  * A duplicate unit of it (K = 0), counted once.
++  * A K = -1 sum: covered, its pairs found, no estimate.
++  * A star-only part: not covered.
++  * Magic squares that came once and twice: counted once each.
++  * Fits unchanged, and incremental reads equal to a full read.
++  * On msearch output: three `--d-range` units of a sum choose the same x*,
++    and their counts, pairs and est_pairs add up to the whole sum's. K = 1
++    equals K = 0, the default is K = 4, and odd n has no star cover.
++* `ctest -R fast_` passes (48 tests). The new tests are
++  `fast_msearch_dfirst_star` and five new refusals in
++  `fast_msearch_bad_args`. dfirst.c and msearch.c compile with `-Wall
++  -Wextra -Werror -std=c17 -pedantic-errors`.
++* The independent x* check (scratchpad c2/star/gates/xstar.py: numpy from
++  bin/enumerate's
++  unreduced and reduced lists) agrees exactly at S = 849 and on a1950,
++  a2000, b1200, c3648 and a2400: x*, its share, its star d and its
++  frequency rank.
++
++**Measured share.** s is the star d's share of the d loop's CPU.
++
++* Method: per-d CPU from the d log, min of 2 alternating replicates, one
++  heavy process at a time, ~10 CPU-min.
++* The star d: all of them at 7.6k and 11.7k (`--dfirst-star 1
++  --dfirst-star-only`), and 40-41 at 20-23k (K = 23 or 25).
++* The other d: a d-stride sample of ~150 d.
++* s = A / (A + B), with A the star d's CPU and B the other d's CPU
++  estimated from the stride sample. The SE is by the delta method; A / T
++  (T from the stride sample alone) agrees within 0.001.
++
++| sum | N | x* (freq rank) | star d (share of d) | star d / mean d cost | predicted s | measured s | error | 1/(1 - 0.75 s) |
++| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
++| 13 7 4 3 1 1 / 2000 | 7,593 | 280 (1) | 627 (8.3%) | 1.14 | 0.0958 | 0.094 +- 0.005 | -2.0% | 1.076 |
++| 12 6 3 2 1 1 / 1200 | 11,698 | 24 (4) | 707 (6.0%) | 1.20 | 0.0748 | 0.073 +- 0.004 | -2.0% | 1.058 |
++| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 840 (8) | 1,018 (5.0%) | 1.36 | 0.0686 | 0.067 +- 0.005 | -2.1% | 1.053 |
++| 13 7 4 3 1 1 / 2400 | 22,993 | 720 (31) | 919 (4.0%) | 1.51 | 0.0632 | 0.061 +- 0.005 | -3.9% | 1.048 |
++
++* Every success criterion is met:
++  * s >= 0.06 at 7-12k and >= 0.05 at 20-23k;
++  * the prediction is within 2-4% (bar 30%), slightly high everywhere;
++  * the choice of x* takes <= 0.03% of the CPU.
++* **K = 4 is now the d-first default.** It searches a quarter of the star
++  d, so the CPU per sum, and with it the CPU per expected magic square,
++  falls by 1/(1 - 0.75 s): **1.076x at 7.6k, 1.058x at 11.7k, 1.053x at
++  20.5k and 1.048x at 23k**.
++  * K = -1 would give 1/(1 - s): 1.065-1.10x, but no estimate of the star
++    d's pairs.
++* The predicted share on all 12 sums of the round-2 profile is 0.104 at
++  5.9k, 0.093-0.096 at 6.7-7.6k, 0.075-0.085 at 11-15k, 0.066-0.082 at
++  16-21k and 0.062-0.068 at 23-32k.
++  * It goes as ~0.110 (N/4000)^-0.28. With the measured 2-4% bias, K = 4
++    saves 1.08x at 5.9k down to 1.048x at 31.7k.
++  * So the gain is a constant factor, not a change of the N exponent. It
++    shrinks slowly (+0.015 on the exponent of the time per sum), because
++    x*'s share of the d falls (~N^-0.46) faster than its d's cost ratio
++    rises (1.14 -> 1.51).
++* The chosen x* is the most frequent number on 5 of the 12 sums, and of
++  rank 4-31 on the others.
++  * Choosing by cost gains up to 24% of share over the most frequent
++    number (c3648: 0.069 against 0.056; a2650: 0.062 against 0.054). It
++    gains nothing at a2400 (0.0632 against 0.0629, the most frequent
++    number being 420).
++* The pairs lose a little precision. A star d's pairs count K x, so the
++  variance of est_pairs grows by about (K - 1) x the star d's share of the
++  pairs (~1.2x at K = 4). Magic squares are unaffected.
++
++**Limits (negative results).**
++
++* The star is about the most an exact skip rule of this kind can take.
++  * A skipped family of d is safe if no two of its members can be the two
++    diagonals of a magic square. Without knowing the squares, that means
++    pairwise intersecting families.
++  * The other intersecting families, such as the d holding 2 of 3 fixed
++    numbers or Hilton-Milner families, are much smaller than a star. 2 of
++    3 numbers holds ~3 f^2 of the d, against f ~ 0.04-0.09 for a star.
++    (By estimate, not measured.)
++  * So the cover tops out at the largest star share, 6-10%.
++* Two stars cannot be combined: a magic square with x1 on one diagonal and
++  x2 on the other would be lost.
++
++**For the integration** with the scheduler that launches d-first units
++(e0ace54, after be625d8):
++
++* Its d-first time law takes a part's share of the sum from
++  `[d_lo, d_lo + nd)`. With the star cover nd counts only the d searched,
++  so use `d_hi`.
++* Its loop CPU is then the star-reduced cost. Either learn the law "as
++  run" (every unit at K = 4; the old K = 0 records are 5-8% high), or
++  scale K = 0 records by (1 - 0.75 pred_star_share), which those records
++  lack (~0.07 at 20k).
++* `dfirst_args` should pass `--dfirst-star 4` explicitly, so that a unit's
++  cost does not depend on the binary's default.
++
++CPU used: ~1.5 CPU-hours in all.
++
++* Fuzz: ~55 min, of which mode 5 took 34.
++* Gates: ~15 min.
++* Measurements: ~10 min.
++* x* checks: ~5 min.
+diff --git a/scripts/scheduler.py b/scripts/scheduler.py
+index dea7cc6..f0e42c0 100644
+--- a/scripts/scheduler.py
++++ b/scripts/scheduler.py
+@@ -1131,8 +1131,14 @@ def report(results, pinfo, model, top=20):
+           f"{len(sq)} semi-magic squares ({3600 * len(sq) / max(cpu, 1):.0f}/CPU-hour)")
+     if results.dsums:
+         dcpu = sum(r.get("cpu", r["time"]) for v in results.dsums.values() for r in v)
++        # the pairs of the sums searched in full (their first complete
++        # record), estimated over every d (dsum_est_pairs)
++        full = [next((r for r in v if r.get("complete")), None) for v in results.dsums.values()]
++        est = [dsum_est_pairs(r) for r in full if r is not None]
+         print(f"d-first (not in the fits): {len(results.dsums)} sums, {dcpu / 3600:.2f} "
+-              f"CPU-hours, {len(results.dmagic)} magic squares")
++              f"CPU-hours, {len(results.dmagic)} magic squares, "
++              f"{sum(e for e in est if e is not None):.1f} (square, SP traversal) pairs "
++              f"estimated over {sum(e is not None for e in est)} sums searched in full")
+         for q in sorted(results.dmagic.values(), key=lambda q: (q["S"], q["hash"])):
+             print(f"  MAGIC (d-first) P={p_str(q['P']):18} S={q['S']:5}  {q.get('grid')}")
+     types = {}
+@@ -1880,8 +1886,22 @@ SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
+ # the format of the summary (bump it when update_file / _ingest read the
+ # records differently, so that an old summary is rebuilt): 2 = d-first
+ # sums (msearch --diag-first); 3 = distinct d-first sums, notable squares
+-# deduplicated, the CPU of sampled records
+-SUMMARY_VERSION = 3
++# deduplicated, the CPU of sampled records; 4 = the d-first pairs and
++# their estimates (the star cover)
++SUMMARY_VERSION = 4
++
++
++def dsum_est_pairs(r):
++    """the estimated (square, SP traversal) pairs over all the d of a "dsum"
++    record's range (est_pairs; a record without it: pairs), or None where
++    the record estimates only some of them: with the star cover (msearch
++    --dfirst-star K, star_k = K) the star d are searched every K-th and
++    their pairs weighed K x in est_pairs, but with K = -1 none is searched
++    (est_pairs covers the other d only) and with --dfirst-star-only only
++    they are"""
++    if r.get("star_only") or r.get("star_k", 0) < 0:
++        return None
++    return float(r.get("est_pairs", r.get("pairs", 0)))
+ 
+ 
+ def sum_cpu(r):
+@@ -1931,6 +1951,12 @@ class Summary:
+                        # the distinct magic squares found
+                        "dfirst_sums": 0, "dfirst_partial": 0, "dfirst_cpu": 0.0,
+                        "dfirst_magic": 0,
++                       # of the sums searched in full: the (square, SP
++                       # traversal) pairs found, their estimate over every
++                       # d (the star cover samples the d through x*) and
++                       # the sums it covers, the sums with the star cover
++                       "dfirst_pairs": 0, "dfirst_est_pairs": 0.0, "dfirst_est_sums": 0,
++                       "dfirst_star_sums": 0,
+                        # CPU seconds of the sampled records ("csum": r1
+                        # sampling, --calib-r1-stride), in no fit
+                        "sampled_cpu": 0.0}
+@@ -2249,9 +2275,13 @@ class Summary:
+         traversal fits) and of the time law, until the model is taught to
+         use them; their CPU time is counted apart, and their magic squares
+         (a "dsquare" with magic or partner, twice each) join the notable
+-        squares once."""
++        squares once. With the star cover (msearch --dfirst-star K) a sum
++        searched in full has every magic square (found once or twice) but
++        only every K-th d through x*: its pairs count by est_pairs, once
++        per sum (dsum_est_pairs)."""
+         ps = self.perP.setdefault(p_str(P, "_"), {"o": [0, 0, 0, 0], "cpu": 0.0, "nsums": 0,
+                                                   "cells": {}})
++        T = self.totals
+         for r in rs:
+             if r["type"] == "dsum":
+                 if r.get("complete"):
+@@ -2259,7 +2289,14 @@ class Summary:
+                     done = ps.setdefault("dfirst_S", [])
+                     if r["S"] not in done:
+                         done.append(r["S"])
+-                        self.totals["dfirst_sums"] += 1
++                        T["dfirst_sums"] += 1
++                        T["dfirst_pairs"] = T.get("dfirst_pairs", 0) + int(r.get("pairs", 0))
++                        e = dsum_est_pairs(r)
++                        if e is not None:
++                            T["dfirst_est_pairs"] = T.get("dfirst_est_pairs", 0.0) + e
++                            T["dfirst_est_sums"] = T.get("dfirst_est_sums", 0) + 1
++                        if r.get("star_k"):
++                            T["dfirst_star_sums"] = T.get("dfirst_star_sums", 0) + 1
+                 else:
+                     self.totals["dfirst_partial"] += 1
+                 self.totals["dfirst_cpu"] += r.get("cpu", r.get("time", 0.0))
+@@ -2990,6 +3027,12 @@ def report_v2(sch, top=20, out=None):
+         pr(f"d-first (not in the fits): {T['dfirst_sums']} sums searched in full, "
+            f"{T['dfirst_partial']} parts, {T['dfirst_cpu'] / 3600:.2f} CPU-hours, "
+            f"{T['dfirst_magic']} magic squares")
++        if T.get("dfirst_sums"):
++            pr(f"  (square, SP traversal) pairs of the sums searched in full: "
++               f"{T.get('dfirst_pairs', 0)} found, {T.get('dfirst_est_pairs', 0.0):.1f} "
++               f"estimated over every d of {T.get('dfirst_est_sums', 0)} sums"
++               + (f" ({T['dfirst_star_sums']} with the star cover)"
++                  if T.get("dfirst_star_sums") else ""))
+     if T.get("sampled_cpu"):
+         pr(f"sampled records (r1-sampled or calibration, not in the fits): "
+            f"{T['sampled_cpu'] / 3600:.2f} CPU-hours")
+diff --git a/scripts/test_scheduler.py b/scripts/test_scheduler.py
+index 600c85f..addf046 100644
+--- a/scripts/test_scheduler.py
++++ b/scripts/test_scheduler.py
+@@ -866,6 +866,170 @@ def test_dfirst_summary():
+     print("d-first summary ok")
+ 
+ 
++def test_dfirst_star():
++    """the star cover (msearch --dfirst-star K): a d-first sum searched in
++    full with it has every magic square, found once when x* is on one of
++    its diagonals, and its (square, SP traversal) pairs estimated as those
++    of the d without x* plus K x those of the searched star d (est_pairs).
++    Both schedulers count a sum once, take its pairs from est_pairs (not
++    pairs, not pairs_star x K again), leave out the records that do not
++    estimate every d (K = -1, --dfirst-star-only), count a magic square
++    once whether it came once or twice, and keep the fits on the plain sums
++    only; msearch's units of one sum agree on x* and add up, and K = 4 is
++    its default for even n (none for odd n)"""
++    P = (12, 6, 3, 2, 1, 1)
++    key = "12_6_3_2_1_1"
++    sums = [(S, S % 3) for S in range(880, 886)]
++    grid = [[1] * 6] * 6
++
++    def dsum(S, pairs, est, k, complete=1, **kw):
++        r = {"type": "dsum", "mode": "dfirst", "n": 6, "P": list(P), "S": S, "nvecs": 6000,
++             "nvecs_raw": 6100, "labels": 160, "d_lo": 0, "d_hi": 6100, "d_stride": 1,
++             "nodes": 10 ** 7, "pairs": pairs, "est_pairs": est, "time": 50.0, "cpu": 51.0,
++             "truncated": 0, "complete": complete, "engine": 3}
++        if k:
++            r.update({"star_x": 420, "star_k": k, "star_only": 0, "nd_star": 500,
++                      "nd_star_skipped": 375 if k > 0 else 500,
++                      "nd_star_searched": 125 if k > 0 else 0, "pairs_star": 0,
++                      "cpu_star": 3.0, "pred_star_share": 0.08, "star_time": 0.01})
++        r.update(kw)
++        return r
++
++    def dsq(S, h, d, partner):
++        return {"type": "dsquare", "n": 6, "P": list(P), "S": S, "d": d, "set_count": 2,
++                "s_count": 9, "p_count": 9, "sp_count": 2, "best_score": 14 if partner else 7,
++                "magic": int(partner), "partner": int(partner), "hash": h, "grid": grid}
++    extra = [
++        # 886, K = 4: a magic square found once (x* on its other diagonal),
++        # 2 pairs on d without x*, 1 on a searched star d: est 2 + 4 x 1
++        dsq(886, "00000000000000ab", 3, 1), dsq(886, "0000000000000001", 9, 0),
++        dsq(886, "0000000000000002", 11, 0),
++        {"type": "dchunk", "n": 6, "P": list(P), "S": 886, "d_lo": 0, "d_hi": 6100,
++         "d_stride": 1, "nd": 5725, "nodes": 10 ** 7, "pairs": 3, "partners": 1, "time": 50.0,
++         "star_k": 4, "star_only": 0, "nd_star_skipped": 375, "pairs_star": 1},
++        dsum(886, 3, 6.0, 4, pairs_star=1),
++        # 886 searched again (K = 0, all d): counted once, the first record
++        dsq(886, "00000000000000ab", 3, 1), dsq(886, "00000000000000ab", 40, 1),
++        dsum(886, 6, 6.0, 0),
++        # 887, K = -1: covered, its magic squares all found, but est_pairs
++        # covers the d without x* only
++        dsum(887, 2, 2.0, -1),
++        # 888: the star d only (a measurement): a part, no estimate
++        dsum(888, 1, 4.0, 4, complete=0, star_only=1, nd_other_skipped=5600),
++        # 889, K = 4: a magic square found twice (x* on neither diagonal)
++        dsq(889, "00000000000000cd", 5, 1), dsq(889, "00000000000000cd", 77, 1),
++        dsum(889, 2, 2.0, 4),
++        {"type": "done", "n": 6, "P": list(P), "min_sum": 880, "last_sum": 889,
++         "complete": 1, "time": 60.0, "mode": "dfirst", "diag_first_min_n": 5000},
++    ]
++    with tempfile.TemporaryDirectory() as state:
++        units = os.path.join(state, "units")
++        os.makedirs(units)
++        store = scheduler.ProfileStore(state, None, 6)
++        ref_path = os.path.join(state, "ref.jsonl")
++        write_unit(ref_path, P, sums, done=(880, 885))
++        ref = scheduler.Summary(state, 6)
++        ref.update_file(ref_path, store)
++        text = write_unit(os.path.join(state, "plain.jsonl"), P, sums)
++        full = text + "".join(json.dumps(r) + "\n" for r in extra)
++        path = os.path.join(units, "u.jsonl")
++        # two incremental reads, cut inside the records of 886
++        cut = full.index('"S": 887')
++        cut = full.rindex("\n", 0, full.rindex("\n", 0, cut)) + 1
++        with open(path, "w") as f:
++            f.write(full[:cut])
++        inc = scheduler.Summary(state, 6)
++        inc.update(units, store)
++        with open(path, "w") as f:
++            f.write(full)
++        inc.update(units, store)
++        whole = scheduler.Summary(state, 6)
++        whole.update(units, store)
++        assert summary_state(whole) == summary_state(inc)
++        for s in (inc, whole):
++            T = s.totals
++            assert s.cover[key] == [[880, 887], [889, 889]], s.cover
++            assert (T["dfirst_sums"], T["dfirst_partial"]) == (3, 1), T
++            # pairs: 886's first record (3) + 887 (2) + 889 (2); the
++            # estimate: 886 (6) + 889 (2), not 887 (K = -1)
++            assert T["dfirst_pairs"] == 7, T
++            assert abs(T["dfirst_est_pairs"] - 8.0) < 1e-12 and T["dfirst_est_sums"] == 2, T
++            assert T["dfirst_star_sums"] == 3, T
++            assert T["dfirst_magic"] == 2, T
++            assert sorted(q["hash"] for q in s.notable) == ["00000000000000ab",
++                                                            "00000000000000cd"]
++            assert s.time == ref.time and s.perP[key]["cells"] == ref.perP[key]["cells"]
++            assert T["sums"] == len(sums) and T["cpu"] == ref.totals["cpu"]
++        sch = SimpleNamespace(summary=inc, calib=scheduler.Calibration(), dir=state, n=6,
++                              time_models={}, tm=scheduler._am().TimeModel(engine=2))
++        import io
++        buf = io.StringIO()
++        scheduler.report_v2(sch, out=buf)
++        assert ("7 found, 8.0 estimated over every d of 2 sums (3 with the star cover)"
++                in buf.getvalue()), buf.getvalue()
++        # v1 agrees
++        res = scheduler.Results(6)
++        res.add_file(path)
++        assert sorted(res.dmagic) == ["00000000000000ab", "00000000000000cd"]
++        assert {S for _, S in res.dsums} == {886, 887, 888, 889}
++        import contextlib
++
++        class PI:
++            def smin(self, P):
++                return 880
++        assert res.frontier(P, PI()) == 888, res.covered
++        buf = io.StringIO()
++        with contextlib.redirect_stdout(buf):
++            scheduler.report(res, PI(), None)
++        assert ("2 magic squares, 8.0 (square, SP traversal) pairs estimated over 2 sums"
++                in buf.getvalue()), buf.getvalue()
++    assert scheduler.dsum_est_pairs({"pairs": 2}) == 2.0
++    assert scheduler.dsum_est_pairs({"pairs": 2, "est_pairs": 5.0, "star_k": 4}) == 5.0
++    assert scheduler.dsum_est_pairs({"pairs": 2, "est_pairs": 2.0, "star_k": -1}) is None
++    # msearch: --d-range units of one sum choose the same x*, and their star
++    # d, pairs and estimates add up to those of the whole sum; K = 1 is the
++    # full search (the same pairs, nodes and estimate as without the star
++    # cover); odd n is refused
++    msearch = os.path.join(os.path.dirname(HERE), "bin", "msearch")
++    with tempfile.TemporaryDirectory() as d:
++        def ms(*a):
++            out = subprocess.run([msearch, "--diag-first", "--diag-first-min-n", "0", *a,
++                                  "--sums", "849", "16", "5", "4", "2"],
++                                 check=True, capture_output=True, text=True).stdout
++            return [json.loads(l) for l in out.splitlines()]
++        dsum_of = lambda recs: [r for r in recs if r["type"] == "dsum"][0]  # noqa: E731
++        whole = dsum_of(ms("--dfirst-star", "4"))
++        parts = [dsum_of(ms("--dfirst-star", "4", "--d-range", rg))
++                 for rg in ("0:500", "500:1100", "1100:")]
++        assert whole["complete"] == 1 and not any(r["complete"] for r in parts)
++        assert {r["star_x"] for r in parts} == {whole["star_x"]} and whole["star_k"] == 4
++        for f in ("nd", "nd_star", "nd_star_skipped", "nd_star_searched", "pairs",
++                  "pairs_star", "nodes", "nodes_star"):
++            assert sum(r[f] for r in parts) == whole[f], f
++        assert abs(sum(r["est_pairs"] for r in parts) - whole["est_pairs"]) < 1e-9
++        assert whole["est_pairs"] == whole["pairs"] - whole["pairs_star"] + 4 * whole["pairs_star"]
++        assert whole["nd_star_searched"] == -(-whole["nd_star"] // 4)
++        assert whole["nd"] + whole["nd_star_skipped"] == whole["nvecs_raw"]
++        assert 0 < whole["pred_star_share"] < 1 and whole["star_time"] >= 0
++        off, k1 = ms("--dfirst-star", "0"), ms("--dfirst-star", "1")
++        # (the default is K = 4)
++        assert dsum_of(ms())["star_k"] == 4 and dsum_of(ms())["est_pairs"] == whole["est_pairs"]
++        assert [r for r in off if r["type"] == "dsquare"] == [r for r in k1 if r["type"] == "dsquare"]
++        for f in ("nd", "nodes", "pairs", "est_pairs", "complete"):
++            assert dsum_of(off)[f] == dsum_of(k1)[f], f
++        assert "star_k" not in dsum_of(off)
++        bad = subprocess.run([msearch, "--vec-size", "5", "--diag-first", "--dfirst-star", "4",
++                              "--sums", "849", "16", "5", "4", "2"], capture_output=True)
++        assert bad.returncode == 2
++        # odd n: no star cover by default (the diagonals share the center)
++        odd = subprocess.run([msearch, "--vec-size", "5", "--diag-first", "--diag-first-min-n",
++                              "0", "--sums", "320", "10", "4", "3", "2"],
++                             check=True, capture_output=True, text=True).stdout
++        ds5 = [json.loads(l) for l in odd.splitlines() if '"dsum"' in l]
++        assert ds5 and "star_k" not in ds5[0], ds5
++    print("d-first star cover ok")
++
++
+ def test_no_enumerate():
+     """A9: the analytic paths never call bin/enumerate (or any subprocess
+     other than msearch)"""
+@@ -985,6 +1149,7 @@ if __name__ == "__main__":
+     test_time_model()
+     test_summary()
+     test_dfirst_summary()
++    test_dfirst_star()
+     test_no_enumerate()
+     test_commands_v2()
+     test_commands()
+diff --git a/src/c/CMakeLists.txt b/src/c/CMakeLists.txt
+index e8722f6..afc7132 100644
+--- a/src/c/CMakeLists.txt
++++ b/src/c/CMakeLists.txt
+@@ -149,12 +149,17 @@ add_test(NAME fast_fuzz_dfirst_matrices COMMAND fuzz_arrange_matrices --dfirst 5
+ # P = 2^16 3^5 5^4 7^2, S = 849 (as bin/dsearch does)
+ add_test(NAME fast_msearch_dfirst_849 COMMAND sh -c
+   "$<TARGET_FILE:msearch> --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2 | grep -c '\"type\":\"dsquare\"' | grep -qx 1")
++# the star cover (--dfirst-star K, by default 4): the pair of S = 849 is
++# on a d without x*, so it is found with K = -1 too; K = 1 searches every d
++# (the nodes of the run without the star cover)
++add_test(NAME fast_msearch_dfirst_star COMMAND sh -c
++  "m='$<TARGET_FILE:msearch> --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2'; n0=$($m --dfirst-star 0 | grep dsum | grep -o '\"nodes\":[0-9]*'); n1=$($m --dfirst-star 1 | grep dsum | grep -o '\"nodes\":[0-9]*'); [ -n \"$n0\" ] && [ \"$n0\" = \"$n1\" ] && $m --dfirst-star -1 | grep -c '\"type\":\"dsquare\"' | grep -qx 1 && $m | grep dsum | grep -q '\"star_x\":48,\"star_k\":4,'")
+ # msearch ignores bench's SAMPLE_* environment (a leftover export must not
+ # turn scheduler units into sampled runs), and rejects malformed options
+ add_test(NAME fast_msearch_no_sample_env COMMAND sh -c
+   "SAMPLE_STRIDE=3 SAMPLE_LOG=/dev/null $<TARGET_FILE:msearch> --sums 327 10 4 3 2 | grep -c '\"type\":\"square\"' | grep -qx 1")
+ add_test(NAME fast_msearch_bad_args COMMAND sh -c
+-  "m=$<TARGET_FILE:msearch>; for a in '--diag-first --d-range 5:3' '--diag-first --d-range x' '--d-stride 3' '--calib-r1-stride 2' '--r1-strata 1,2,3,4,5,6,7,8,9' '--min-sum 3x' '--diag-first --diag-first-min-n abc' '--diag-first --d-log /nonexistent/x'; do $m $a --sums 327 10 4 3 2 > /dev/null 2>&1; [ $? -eq 2 ] || { echo \"accepted: $a\"; exit 1; }; done")
++  "m=$<TARGET_FILE:msearch>; for a in '--diag-first --d-range 5:3' '--diag-first --d-range x' '--d-stride 3' '--calib-r1-stride 2' '--r1-strata 1,2,3,4,5,6,7,8,9' '--min-sum 3x' '--diag-first --diag-first-min-n abc' '--diag-first --d-log /nonexistent/x' '--dfirst-star 4' '--diag-first --dfirst-star -2' '--diag-first --dfirst-star 4x' '--vec-size 5 --diag-first --dfirst-star 4' '--diag-first --dfirst-star -1 --dfirst-star-only'; do $m $a --sums 327 10 4 3 2 > /dev/null 2>&1; [ $? -eq 2 ] || { echo \"accepted: $a\"; exit 1; }; done")
+ # saturated byte counters at the node below r1 (every unmatched cell in
+ # >= 255 candidates, so the cell is chosen among the saturated counts; the
+ # oracle is too slow there, so the variants are compared with each other,
+diff --git a/src/c/README.md b/src/c/README.md
+index 7e328cd..f4009c3 100644
+--- a/src/c/README.md
++++ b/src/c/README.md
+@@ -56,7 +56,7 @@ row and col once) that fit on the two diagonals together. For every vector
+ d of the sum (the unreduced list), the semi-magic search on
+ V_d = {v : |v & d| = 1} finds the squares with d as a traversal, so the loop
+ over d finds every (square, SP traversal) pair once, and every magic square
+-twice (src/c/dfirst.c; research/ideas.md, "Diagonal-first search in
++twice (once or twice with the star cover below; src/c/dfirst.c; research/ideas.md, "Diagonal-first search in
+ msearch"). V_d comes from a number -> vector posting index (O(sum of the
+ posting lengths) per d). Every square of V_d contains all of d, so d's
+ numbers get the top labels and only the first rows through the rarest of
+@@ -96,6 +96,26 @@ does not launch d-first units itself.
+ "csum" record with `est_squares`, `se_squares`, the traversal totals, and
+ "csquare" records) for the models of semi-magic squares per sum.
+ 
++`--dfirst-star K` (even n only; default 4, and 0 = off for odd n) is the
++star cover (research/ideas.md, "The star cover of the d loop"): the two
++diagonals of a magic square of even order have no number in common, so for
++any number x one of them lacks x and finds the square. msearch picks x*
++from the sum's whole unreduced list (the same in every `--d-range` unit and
++`--d-stride` sample: the number whose d hold the most predicted cost, sum
++over the d containing it of |V_d|^5.5 R^1.4, R the rarest class of V_d;
++0.04-0.55 s at N = 5.9-31.7k) and searches only every K-th of the "star d"
++containing it (by rank in the list; K = -1: none; K = 0: all, the output of
++be625d8). The star d hold 6-10% of the d loop's CPU at N = 7.6-23k, so K = 4
++takes 1.05-1.08x less CPU per sum (per expected magic square). Every magic
++square is still found and flagged (the partner test uses every d), once
++instead of twice when x* is on one of its diagonals; the pairs of the star
++d are estimated (`est_pairs` = the others' pairs + K x the searched star
++d's), and the dsum record gets `star_x`, `star_k`, `nd_star`,
++`nd_star_skipped`, `nd_star_searched`, `pairs_star`, `cpu_star`,
++`pred_star_share`, `star_freq_rank`, `star_time` (see msearch.c). The
++schedulers count such a complete sum as searched and its pairs by
++`est_pairs`. `--dfirst-star-only` searches only the star d (measurements).
++
+ ### r1 sampling (measurements)
+ 
+ `--r1-stride k [--r1-offset o]`, or `--r1-strata k1,k2,k3,k4` (equal index
+diff --git a/src/c/dfirst.c b/src/c/dfirst.c
+index 3013f78..7abccf7 100644
+--- a/src/c/dfirst.c
++++ b/src/c/dfirst.c
+@@ -5,6 +5,7 @@
+ #define _POSIX_C_SOURCE 200809L
+ #include "dfirst.h"
+ 
++#include <math.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/time.h>
+@@ -68,7 +69,13 @@ struct dfirst_s {
+   int top_root; /* see dfirst_set_top_root */
+   /* per-d scratch of vd_labels: a stamp per number id */
+   uint32_t *lstamp, lcur;
++  /* the star filter (dfirst_set_star): on, k, only, and the rank of each
++   * diagonal among the star d (STAR_NONE: not a star d) */
++  int star_on, star_k, star_only;
++  uint64_t star_x;
++  uint32_t *star_rank;
+ };
++#define STAR_NONE UINT32_MAX
+ 
+ void dfirst_set_top_root(dfirst_t *df, int on) { df->top_root = on; }
+ 
+@@ -226,6 +233,7 @@ void dfirst_free(dfirst_t *df) {
+   free(df->dsorted);
+   free(df->sidx);
+   free(df->lstamp);
++  free(df->star_rank);
+   free(df);
+ }
+ 
+@@ -288,6 +296,127 @@ size_t dfirst_vd(dfirst_t *df, size_t i, vec_list_t *out) {
+   return k;
+ }
+ 
++/* ------------------------------------------------------------ star cover */
++
++dfirst_star_t dfirst_star_choose(dfirst_t *df) {
++  dfirst_star_t out;
++  memset(&out, 0, sizeof(out));
++  const double c0 = thread_cpu();
++  const int n = df->n;
++  const uint32_t L = df->L;
++  /* per number id: the summed weights of the d through it, and their
++   * number */
++  double *score = calloc(L + 1, sizeof(double));
++  uint64_t *dcnt = calloc(L + 1, sizeof(uint64_t));
++  uint64_t *val = calloc(L + 1, sizeof(uint64_t));
++  for (uint32_t h = 0; h < (1u << df->hbits); h++)
++    if (df->hval[h])
++      val[df->hval[h] - 1] = df->hkey[h];
++  double total = 0;
++  for (size_t i = 0; i < df->dcount; i++) {
++    const uint64_t *d = vec_list_get(df->diags, df->dstart + i);
++    int64_t id[SQ_MAX_N];
++    int missing = 0;
++    size_t nt = 0;
++    /* the hit counters along d's postings (as dfirst_vd) */
++    for (int p = 0; p < n; p++) {
++      id[p] = num_id(df, d[p]);
++      if (id[p] < 0) {
++        missing = 1;
++        continue;
++      }
++      dcnt[id[p]]++;
++      for (uint32_t k = df->first[id[p]]; k < df->first[id[p] + 1]; k++) {
++        const uint32_t v = df->post[k];
++        if (df->hit[v]++ == 0)
++          df->touched[nt++] = v;
++      }
++    }
++    /* the classes of V_d: the vectors through d[p] that meet d once */
++    uint64_t vd = 0, R = UINT64_MAX;
++    for (int p = 0; p < n && !missing; p++) {
++      uint64_t c = 0;
++      for (uint32_t k = df->first[id[p]]; k < df->first[id[p] + 1]; k++)
++        c += df->hit[df->post[k]] == 1;
++      vd += c;
++      if (c < R)
++        R = c;
++    }
++    for (size_t t = 0; t < nt; t++)
++      df->hit[df->touched[t]] = 0;
++    /* a number of d in no vector: V_d holds no square (its search has no
++     * root), weight 0 */
++    if (missing || R == 0)
++      continue;
++    const double w = pow((double)vd, 5.5) * pow((double)R, 1.4);
++    total += w;
++    for (int p = 0; p < n; p++)
++      score[id[p]] += w;
++  }
++  int64_t best = -1, top = -1;
++  for (uint32_t x = 0; x < L; x++) {
++    if (best < 0 || score[x] > score[best] ||
++        (score[x] == score[best] && val[x] < val[best]))
++      best = x;
++    if (top < 0 || dcnt[x] > dcnt[top] ||
++        (dcnt[x] == dcnt[top] && val[x] < val[top]))
++      top = x;
++  }
++  if (best >= 0) {
++    out.x = val[best];
++    out.nstar = dcnt[best];
++    out.share = total > 0 ? score[best] / total : 0.0;
++    out.freq_rank = 1;
++    for (uint32_t x = 0; x < L; x++)
++      out.freq_rank += x != (uint32_t)best &&
++                       (dcnt[x] > dcnt[best] ||
++                        (dcnt[x] == dcnt[best] && val[x] < val[best]));
++    out.top_freq = val[top];
++    out.top_freq_share = total > 0 ? score[top] / total : 0.0;
++  }
++  free(score);
++  free(dcnt);
++  free(val);
++  out.seconds = thread_cpu() - c0;
++  return out;
++}
++
++void dfirst_set_star(dfirst_t *df, uint64_t x, int k, int only) {
++  const int n = df->n;
++  if (k < -1)
++    k = -1;
++  if (only && k == 0)
++    k = 1;
++  df->star_on = k != 0;
++  df->star_k = k;
++  df->star_only = only && k != 0;
++  df->star_x = x;
++  free(df->star_rank);
++  df->star_rank = NULL;
++  if (!df->star_on)
++    return;
++  df->star_rank = malloc((df->dcount + 1) * sizeof(uint32_t));
++  uint32_t r = 0;
++  for (size_t i = 0; i < df->dcount; i++) {
++    const uint64_t *d = vec_list_get(df->diags, df->dstart + i);
++    int has = 0;
++    for (int p = 0; p < n; p++)
++      has |= d[p] == x;
++    df->star_rank[i] = has ? r++ : STAR_NONE;
++  }
++}
++
++uint64_t dfirst_star_count(const dfirst_t *df, size_t lo, size_t hi) {
++  if (!df->star_on)
++    return 0;
++  if (hi > df->dcount)
++    hi = df->dcount;
++  uint64_t c = 0;
++  for (size_t i = lo; i < hi; i++)
++    c += df->star_rank[i] != STAR_NONE;
++  return c;
++}
++
+ /* the top-label root pays with the carried bitsets and with the matrices
+  * of up to 4 words (0.64x and 0.68x the CPU of the plain root at 159
+  * labels), not with the matrices of 8 words (257-512 labels without
+@@ -419,6 +548,21 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
+   vec_list_init(&sub, n);
+   const double c0 = thread_cpu();
+   for (size_t i = lo + off % stride; i < hi; i += stride) {
++    /* the star filter: a star d of a skipped rank, or (only) a d without
++     * the star number, is not searched */
++    int star = 0;
++    if (df->star_on) {
++      const uint32_t rk = df->star_rank[i];
++      star = rk != STAR_NONE;
++      if (star ? df->star_k < 0 || rk % (uint32_t)df->star_k != 0
++               : df->star_only) {
++        if (star)
++          st.nd_star_skipped++;
++        else
++          st.nd_other_skipped++;
++        continue;
++      }
++    }
+     const double ci = thread_cpu(), w0 = wall_time();
+     sub.count = 0;
+     dfirst_vd(df, i, &sub);
+@@ -470,10 +614,22 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
+     st.d_cpu += cd;
+     st.d_cpu2 += cd * cd;
+     st.d_pairs2 += (double)ic.pairs * (double)ic.pairs;
+-    if (dlog)
+-      fprintf(dlog, "%zu %zu %d %lu %lu %.6f %.6f %.6f %.6f\n", i, sub.count,
++    if (star) {
++      st.nd_star++;
++      st.nodes_star += ss.nodes;
++      st.pairs_star += ic.pairs;
++      st.d_cpu_star += cd;
++      st.d_cpu2_star += cd * cd;
++      st.d_pairs2_star += (double)ic.pairs * (double)ic.pairs;
++    }
++    if (dlog) {
++      fprintf(dlog, "%zu %zu %d %lu %lu %.6f %.6f %.6f %.6f", i, sub.count,
+               ss.num_labels, (unsigned long)ss.nodes, (unsigned long)ic.pairs,
+               w1 - w0, ss.setup_seconds, ss.seconds, cd);
++      if (df->star_on)
++        fprintf(dlog, " %d", star);
++      fputc('\n', dlog);
++    }
+     if (ic.stopped) {
+       st.stopped = 1;
+       break;
+diff --git a/src/c/dfirst.h b/src/c/dfirst.h
+index 59b51a3..84a6d31 100644
+--- a/src/c/dfirst.h
++++ b/src/c/dfirst.h
+@@ -17,7 +17,8 @@
+  * need not survive the reduction), these are the (square, SP traversal)
+  * pairs, and a magic square is a square with two of them that fit on the
+  * two diagonals together, so it is found (at least) twice, once per
+- * diagonal (see research/ideas.md, "Diagonal-first search").
++ * diagonal (see research/ideas.md, "Diagonal-first search"; at least
++ * once with the star filter below).
+  *
+  * V_d is built from a number -> vector posting index over the search's
+  * vectors: a hit counter per vector is bumped along the postings of d's
+@@ -57,6 +58,15 @@ typedef struct {
+                                      pairs (for standard errors) */
+   int truncated;      /* some V_d search hit opts->node_limit */
+   int stopped;        /* the callback asked to stop */
++  /* the star filter (dfirst_set_star; all 0 without it): the d of the
++   * sample that it skipped (star d not of a searched rank, and with only
++   * the d without the star number), and of the d searched (counted in nd,
++   * nodes, pairs, d_cpu.. above too) the star d, with their nodes, pairs
++   * and the sums over them of the per-d CPU, its squares and the squares
++   * of the pairs */
++  uint64_t nd_star_skipped, nd_other_skipped, nd_star;
++  uint64_t nodes_star, pairs_star;
++  double d_cpu_star, d_cpu2_star, d_pairs2_star;
+ } dfirst_stats_t;
+ 
+ /*
+@@ -93,12 +103,61 @@ uint32_t dfirst_num_labels(const dfirst_t *df);
+ /* is the n-set t (any order) in the diagonal set? */
+ int dfirst_in_set(const dfirst_t *df, const uint64_t *t);
+ 
++/*
++ * The star cover (research/ideas.md, "The star cover of the d loop"). The
++ * two diagonals of a magic square of even order n have no cell in common,
++ * so (its n^2 numbers being distinct) no number in common: whatever the
++ * number x, at most one of them contains x, and the square is found from
++ * the other one. So the d-first loop still finds every magic square (once
++ * instead of twice when one diagonal contains x), and flags it (the
++ * partner test runs against the whole diagonal set), without the "star
++ * d", the diagonals that contain x. They lose only (square, d) pairs,
++ * which a sample of them (every k-th) estimates. Not for odd n: the two
++ * diagonals share the center cell.
++ *
++ * dfirst_star_choose picks x = x*, the number whose star d hold the most
++ * predicted cost: x* = argmax_x sum over the d containing x of
++ * |V_d|^5.5 R_d^1.4 (R_d: the rarest class of V_d, i.e. the fewest vectors
++ * of V_d through one number of d, which the top-label root searches; the
++ * per-d cost law of research/wip/complexity-profile.md), ties to the
++ * smaller x, over the whole diagonal set (so every --d-range unit and
++ * --d-stride sample of a sum agrees). One pass over the postings of every
++ * d (no V_d is built).
++ */
++typedef struct {
++  uint64_t x;          /* x* (0 if no number of the set is in vecs) */
++  double share;        /* predicted cost share of its star d:
++                          sum over them of the weights / sum over all d */
++  uint64_t nstar;      /* d of the set that contain x */
++  int freq_rank;       /* x's rank (1 = most) by the number of d of the
++                          set containing it, ties counted ahead */
++  uint64_t top_freq;   /* the number in the most d (ties: smaller) */
++  double top_freq_share; /* its predicted cost share */
++  double seconds;      /* thread CPU of the choice */
++} dfirst_star_t;
++dfirst_star_t dfirst_star_choose(dfirst_t *df);
++
++/*
++ * The star filter of dfirst_search, with x the star number: the star d
++ * are ranked by their index in the diagonal set (0, 1, ..); k >= 1:
++ * search only the star d of rank % k == 0 (k = 1: all of them); k = -1:
++ * none; k = 0: no filter (only = 0). With only, the d without x are not
++ * searched (a measurement of the star d's cost; k = 0 is then k = 1). The
++ * d that the filter skips are counted in nd_star_skipped /
++ * nd_other_skipped, not searched, not logged.
++ */
++void dfirst_set_star(dfirst_t *df, uint64_t x, int k, int only);
++/* the star d with index in [lo, hi) of the diagonal set (0 without a star
++ * filter) */
++uint64_t dfirst_star_count(const dfirst_t *df, size_t lo, size_t hi);
++
+ /*
+  * Search V_d for the diagonals i = lo + off, lo + off + stride, ... < hi
+  * (stride 1, off 0: all of [lo, hi); stride > 1 with a random off: an
+- * unbiased sample, stride x the totals estimates the full loop). If dlog is
+- * set, one line per d: "i |V_d| labels nodes pairs vd_s setup_s search_s
+- * cpu_s".
++ * unbiased sample, stride x the totals estimates the full loop), except the
++ * d that the star filter skips. If dlog is set, one line per d searched:
++ * "i |V_d| labels nodes pairs vd_s setup_s search_s cpu_s", plus " star"
++ * (1 for a star d, else 0) with a star filter.
+  */
+ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
+                              size_t off, const search_opts_t *opts,
+diff --git a/src/c/fuzz_arrange.c b/src/c/fuzz_arrange.c
+index 43403ed..d6aa35b 100644
+--- a/src/c/fuzz_arrange.c
++++ b/src/c/fuzz_arrange.c
+@@ -29,6 +29,7 @@
+  */
+ /* clock_gettime and the CPU-time clocks also under a strict -std=c17 */
+ #define _POSIX_C_SOURCE 200809L
++#include <math.h>
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -1127,18 +1128,106 @@ static int d_cb(const dsquare_t *ds, void *ctx) {
+   dp_push(&d_found, &dp);
+   return 0;
+ }
+-static bool same_dpairs(void) {
++static bool same_dpairs_as(const dplist_t *exp) {
+   canon_len = 2 * n * n;
+   if (d_found.k)
+     qsort(d_found.a, d_found.k, sizeof(dpair_t), cmp_dpair);
+-  if (d_found.k != d_brute.k)
++  if (d_found.k != exp->k)
+     return false;
+   for (int i = 0; i < d_found.k; i++)
+-    if (cmp_dpair(&d_found.a[i], &d_brute.a[i]))
++    if (cmp_dpair(&d_found.a[i], &exp->a[i]))
+       return false;
+   return true;
+ }
++static bool same_dpairs(void) { return same_dpairs_as(&d_brute); }
++
++/* the star cover (dfirst_set_star) against brute force: x* recomputed
++ * from the family and the diagonal list (|V_d| and the rarest class of
++ * every d, in list order, the same weights summed in the same order, so
++ * the same doubles), and the pairs the filter must keep */
++static uint64_t brute_star(const vec_list_t *l, const vec_list_t *dl,
++                           double *share, uint64_t other, double *rel) {
++  /* the numbers of the family, ascending */
++  uint64_t *num = malloc((l->count * n + 1) * 8);
++  size_t nn = 0;
++  for (size_t v = 0; v < l->count; v++)
++    for (int p = 0; p < n; p++)
++      num[nn++] = vec_list_get(l, v)[p];
++  qsort(num, nn, 8, cmp_u64);
++  size_t k = 0;
++  for (size_t i = 0; i < nn; i++)
++    if (!k || num[k - 1] != num[i])
++      num[k++] = num[i];
++  nn = k;
++  double *score = calloc(nn + 1, sizeof(double)), total = 0;
++  for (size_t i = 0; i < dl->count; i++) {
++    const uint64_t *d = vec_list_get(dl, i);
++    uint64_t c[MAXN] = {0}, vd = 0, R = UINT64_MAX;
++    for (size_t v = 0; v < l->count; v++) {
++      const uint64_t *e = vec_list_get(l, v);
++      if (meet(e, d) != 1)
++        continue;
++      vd++;
++      for (int p = 0; p < n; p++)
++        for (int q = 0; q < n; q++)
++          c[p] += e[q] == d[p];
++    }
++    for (int p = 0; p < n; p++)
++      R = c[p] < R ? c[p] : R;
++    if (R == 0)
++      continue;
++    const double w = pow((double)vd, 5.5) * pow((double)R, 1.4);
++    total += w;
++    for (int p = 0; p < n; p++) {
++      const uint64_t *f = bsearch(&d[p], num, nn, 8, cmp_u64);
++      score[f - num] += w; /* (in a vector of V_d: in the family) */
++    }
++  }
++  size_t best = 0; /* ties: the smaller number, i.e. the first */
++  for (size_t i = 1; i < nn; i++)
++    if (score[i] > score[best])
++      best = i;
++  const uint64_t x = nn ? num[best] : 0;
++  *share = nn && total > 0 ? score[best] / total : 0.0;
++  /* how far below the best another number's score is (relative; 0: a
++   * tie), as the two may differ by rounding (contracted multiply-adds) */
++  const uint64_t *fo = nn ? bsearch(&other, num, nn, 8, cmp_u64) : NULL;
++  *rel = !fo ? 1.0 : score[best] > 0 ? (score[best] - score[fo - num]) / score[best] : 0.0;
++  free(num);
++  free(score);
++  return x;
++}
++static bool memchr_u64(const uint64_t *t, uint64_t x) {
++  for (int i = 0; i < n; i++)
++    if (t[i] == x)
++      return true;
++  return false;
++}
++static int *d_rank; /* per dset tuple: its rank among the star d, or -1 */
++static void star_ranks(const vec_list_t *dl, const int *ord, uint64_t x) {
++  free(d_rank);
++  d_rank = malloc((ndset + 1) * sizeof(int));
++  int r = 0;
++  for (size_t i = 0; i < dl->count; i++) {
++    const uint64_t *d = vec_list_get(dl, i);
++    int has = 0;
++    for (int p = 0; p < n; p++)
++      has |= d[p] == x;
++    d_rank[ord[i]] = has ? r++ : -1;
++  }
++}
++/* the brute pairs that the filter (k, only) keeps */
++static void star_expect(dplist_t *out, int k, bool only) {
++  out->k = 0;
++  for (int i = 0; i < d_brute.k; i++) {
++    const uint64_t *f = bsearch(d_brute.a[i].d, dset, ndset, n * 8, cmp_tuple);
++    const int r = d_rank[(f - dset) / n];
++    if (r < 0 ? !only : k >= 1 && r % k == 0)
++      dp_push(out, &d_brute.a[i]);
++  }
++}
+ static uint64_t d_pairs_total, d_partner_total, d_planted;
++static uint64_t star_runs, star_kept_pairs, star_planted;
+ /* returns the number of failures */
+ static int dfirst_check(uint64_t seed, const vec_list_t *l,
+                         const search_opts_t *o, const char *vname,
+@@ -1223,7 +1312,6 @@ static int dfirst_check(uint64_t seed, const vec_list_t *l,
+       t[j] = dset[(size_t)ord[i] * n + n - 1 - j];
+     vec_list_push(&dl, t);
+   }
+-  free(ord);
+   brute_pairs();
+   int fails = 0;
+   dfirst_t *df = dfirst_new(l, 0, l->count, &dl, 0, dl.count);
+@@ -1255,15 +1343,119 @@ static int dfirst_check(uint64_t seed, const vec_list_t *l,
+       dfirst_search(df, 0, dl.count, 3, off, o, d_cb, NULL, NULL);
+     split_ok = same_dpairs() && !d_invalid;
+   }
++  /* the star cover: x* as dfirst_star_choose picks it (checked against
++   * brute force), then the filter with K = -1, a random K >= 1 (with and
++   * without only, and a d-stride 3 split), and x forced onto one planted
++   * diagonal (not the other: for odd n they share the center) with
++   * K = -1, where the planted square must come once, from the other
++   * diagonal, flagged */
++  bool star_ok = true;
++  const char *star_what = "";
++  {
++    static dplist_t exp;
++    double bshare, rel;
++    const dfirst_star_t sx = dfirst_star_choose(df);
++    const uint64_t bx = brute_star(l, &dl, &bshare, sx.x, &rel);
++    /* the same number (or one whose score is within rounding of it, but
++     * not an exact tie, which goes to the smaller number), and its share */
++    if ((sx.x != bx && (rel > 1e-12 || rel == 0.0)) ||
++        (sx.x == bx && fabs(sx.share - bshare) > 1e-12 * bshare)) {
++      star_ok = false;
++      star_what = "choice";
++    }
++    struct {
++      uint64_t x;
++      int k, only, stride;
++    } runs[5];
++    const int k1 = rint_(1, 5), k2 = rint_(1, 4), k3 = rint_(1, 4);
++    runs[0].x = runs[1].x = runs[2].x = runs[3].x = sx.x;
++    runs[0].k = -1, runs[0].only = 0, runs[0].stride = 1;
++    runs[1].k = k1, runs[1].only = 0, runs[1].stride = 1;
++    runs[2].k = k2, runs[2].only = 1, runs[2].stride = 1;
++    runs[3].k = k3, runs[3].only = 0, runs[3].stride = 3;
++    runs[4].x = 0, runs[4].k = -1, runs[4].only = 0, runs[4].stride = 1;
++    int nruns = 4, pt_star = -1;
++    if (planted >= 0) {
++      /* x on planted diagonal pt_star, not on the other */
++      pt_star = rint_(0, 1);
++      int p;
++      do
++        p = rint_(0, n - 1);
++      while (memchr_u64(pt[1 - pt_star], pt[pt_star][p]));
++      runs[4].x = pt[pt_star][p];
++      nruns = 5;
++    }
++    for (int r = 0; r < nruns && star_ok; r++) {
++      dfirst_set_star(df, runs[r].x, runs[r].k, runs[r].only);
++      star_ranks(&dl, ord, runs[r].x);
++      d_found.k = 0;
++      d_invalid = 0;
++      dfirst_stats_t s1;
++      memset(&s1, 0, sizeof(s1));
++      for (int off = 0; off < runs[r].stride; off++) {
++        dfirst_stats_t t1 = dfirst_search(df, 0, dl.count, runs[r].stride,
++                                          off, o, d_cb, NULL, NULL);
++        s1.nd += t1.nd;
++        s1.pairs += t1.pairs;
++        s1.pairs_star += t1.pairs_star;
++        s1.nd_star += t1.nd_star;
++        s1.nd_star_skipped += t1.nd_star_skipped;
++        s1.nd_other_skipped += t1.nd_other_skipped;
++      }
++      star_expect(&exp, runs[r].k, runs[r].only);
++      /* the counts: every index once, the star d's pairs */
++      uint64_t ps = 0, nstar = 0;
++      for (int i = 0; i < d_found.k; i++) {
++        const uint64_t *f =
++            bsearch(d_found.a[i].d, dset, ndset, n * 8, cmp_tuple);
++        ps += f && d_rank[(f - dset) / n] >= 0;
++      }
++      for (int j = 0; j < ndset; j++)
++        nstar += d_rank[j] >= 0;
++      const bool counts =
++          s1.nd + s1.nd_star_skipped + s1.nd_other_skipped == dl.count &&
++          s1.pairs == (uint64_t)d_found.k && s1.pairs_star == ps &&
++          s1.nd_star + s1.nd_star_skipped == (runs[r].k == 0 ? 0 : nstar) &&
++          dfirst_star_count(df, 0, dl.count) == nstar;
++      if (!same_dpairs_as(&exp) || d_invalid || !counts) {
++        star_ok = false;
++        star_what = r == 4 ? "planted run" : !counts ? "counts" : "pairs";
++        break;
++      }
++      star_runs++;
++      star_kept_pairs += exp.k;
++      if (r == 4) {
++        /* the planted square: once, from the other diagonal, flagged */
++        int seen = 0;
++        for (int i = 0; i < d_found.k; i++)
++          if (!cmp_canon(&d_found.a[i].sq, &oracle_out.a[planted]))
++            for (int t = 0; t < 2; t++) {
++              uint64_t x[MAXN];
++              memcpy(x, pt[t], n * 8);
++              qsort(x, n, 8, cmp_u64);
++              if (!memcmp(x, d_found.a[i].d, n * 8))
++                seen |= (d_found.a[i].partner ? 1 : 4) << t;
++            }
++        if (seen != 1 << (1 - pt_star)) {
++          star_ok = false;
++          star_what = "planted MISSING";
++        }
++        star_planted++;
++      }
++    }
++    dfirst_set_star(df, 0, 0, 0);
++  }
++  free(ord);
+   dfirst_free(df);
+   vec_list_free(&dl);
+-  if (!same || !planted_ok || !split_ok) {
++  if (!same || !planted_ok || !split_ok || !star_ok) {
+     fails++;
+     printf("DFIRST MISMATCH seed %lu n %d nv %d diags %d variant %s top_root "
+-           "%d: found %d brute %d invalid %d planted %s split %s\n",
++           "%d: found %d brute %d invalid %d planted %s split %s star %s%s\n",
+            (unsigned long)seed, n, nv, ndset, vname, top_root, d_found.k,
+            d_brute.k,
+-           d_invalid, planted_ok ? "ok" : "MISSING", split_ok ? "ok" : "BAD");
++           d_invalid, planted_ok ? "ok" : "MISSING", split_ok ? "ok" : "BAD",
++           star_ok ? "ok" : "BAD ", star_what);
+     char path[256];
+     snprintf(path, sizeof(path), "fail_%lu.txt", (unsigned long)seed);
+     dump(path, seed);
+@@ -1477,9 +1669,12 @@ int main(int argc, char **argv) {
+   if (cross)
+     printf("cross-checked %d\n", crossed);
+   if (dfirst)
+-    printf("dfirst: (square, d) pairs %lu, flagged %lu, planted pairs %lu\n",
++    printf("dfirst: (square, d) pairs %lu, flagged %lu, planted pairs %lu; "
++           "star runs %lu, pairs kept %lu, planted with x* on a diagonal "
++           "%lu\n",
+            (unsigned long)d_pairs_total, (unsigned long)d_partner_total,
+-           (unsigned long)d_planted);
++           (unsigned long)d_planted, (unsigned long)star_runs,
++           (unsigned long)star_kept_pairs, (unsigned long)star_planted);
+   printf("diff-only %d\n", diffonly);
+   printf("ran %d skipped %d fails %d squares %lu inst_with_squares %lu "
+          "W2 %d W3 %d W4 %d W8 %d W16+ %d\n",
+diff --git a/src/c/msearch.c b/src/c/msearch.c
+index 656f720..0078ec1 100644
+--- a/src/c/msearch.c
++++ b/src/c/msearch.c
+@@ -31,8 +31,9 @@
+  *                     vector d of the sum (unreduced), the semi-magic
+  *                     search on V_d = {v : |v & d| = 1} finds every
+  *                     (square, SP traversal) pair once, so every magic
+- *                     square (twice, once per diagonal); the other sums
+- *                     get the plain search
++ *                     square (twice, once per diagonal; once or twice with
++ *                     the star cover, --dfirst-star); the other sums get
++ *                     the plain search
+  *   --diag-first-min-n N0   default 5000, about where d-first and the
+  *                     plain search cost the same per sum (d-first / plain
+  *                     CPU: 1.25x at N = 4.1k, 0.65x at 6.7k, 0.57x at
+@@ -58,6 +59,20 @@
+  *   --calib-r1-stride k   for each d-first sum, also run the plain search
+  *                     on every k-th first row r1 (random offset), which
+  *                     estimates the sum's semi-magic squares and plain time
++ *   --dfirst-star K   the star cover (dfirst.h, dfirst_set_star; even n
++ *                     only): x*, the number whose d hold the most predicted
++ *                     cost, is chosen from the whole unreduced list, and of
++ *                     the d containing it ("star d", ranked by index) only
++ *                     every K-th is searched (rank % K == 0; K = -1: none;
++ *                     K = 0: no star cover). Default 4 for even n (1.05-
++ *                     1.08x less CPU per sum at N = 7.6-23k), 0 for odd n.
++ *                     Every magic square is still found (its other
++ *                     diagonal lacks x*) and flagged; the (square, d) pairs
++ *                     of the star d are estimated (K x those of the
++ *                     searched ones)
++ *   --dfirst-star-only   search only the star d that --dfirst-star K (>= 1;
++ *                     here by default 1) searches (a measurement of their
++ *                     cost; the sum is not complete)
+  *
+  * r1 sampling of the plain search (measurements; the squares and the sum
+  * record become "csquare" / "csum" records with estimates):
+@@ -105,7 +120,21 @@
+  * range; vd_time, setup_time, search_time: wall-clock sums over d), and
+  * complete says that every d of the sum was
+  * searched (not a --d-range part, a --d-stride sample, or a truncated
+- * run). With --diag-first the "done" record has "mode":"dfirst" (and
++ * run; with --dfirst-star K, every d without x*: every magic square was
++ * found, but the pairs of the star d are estimated). With the star cover
++ * (K != 0) the dsum record also has star_x (x*), star_k (K), star_only,
++ * nd_star (star d in [d_lo, d_hi)), nd_star_skipped, nd_star_searched (of
++ * the sampled d), pairs_star, nodes_star and cpu_star (of the star d
++ * searched), pred_star_share (the star d's predicted share of the d loop's
++ * CPU, over the whole list), star_freq_rank (x*'s rank by the number of d
++ * containing it), pred_share_top_freq (that of the most frequent number)
++ * and star_time (the process CPU of choosing x*, in time and cpu, not
++ * scaled in est_time); its est_pairs, est_nodes and est_time weigh a
++ * searched star d K x (d_stride x K; with K = -1 they cover the d without
++ * x* only, with --dfirst-star-only the star d only), and se_pairs /
++ * se_time are those of the two strata (star d and the others), each
++ * sampled at random. A dchunk record has star_k, nd_star_skipped and
++ * pairs_star then. With --diag-first the "done" record has "mode":"dfirst" (and
+  * diag_first_min_n): its range then also holds the d-first sums, which
+  * have no "sum" record but are not empty, and with --d-range lo:hi, lo > 0,
+  * the plain sums of the range get a "skip" record instead of a search
+@@ -385,21 +414,43 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+                            size_t d_stride, int64_t d_offset, uint64_t seed,
+                            size_t d_lo, size_t d_hi, size_t d_chunk,
+                            FILE *d_log, uint32_t calib_stride, int top_root,
++                           int star_k, int star_only,
+                            double enum_share, double reduce_time,
+                            double pre_cpu, double deadline) {
+   const double c0 = cpu_time();
+   dfirst_t *df = dfirst_new(red, 0, red->count, all, start_i, raw);
+   dfirst_set_top_root(df, top_root);
+   const double t_index = cpu_time() - c0;
++  /* the star cover: x* from the whole list (every unit of the sum agrees) */
++  const int star = star_k != 0 || star_only;
++  dfirst_star_t sx;
++  memset(&sx, 0, sizeof(sx));
++  double t_star = 0;
++  if (star) {
++    const double cs = cpu_time();
++    sx = dfirst_star_choose(df);
++    dfirst_set_star(df, sx.x, star_k, star_only);
++    if (star_only && star_k == 0)
++      star_k = 1;
++    t_star = cpu_time() - cs;
++  }
+   const uint64_t sd = splitmix(seed ^ (S * 0x9E3779B97F4A7C15ull));
+   const size_t off = d_offset >= 0 ? (size_t)d_offset % d_stride
+                                    : (size_t)(splitmix(sd + 101) % d_stride);
+   const size_t hi = d_hi < raw ? d_hi : raw, lo = d_lo < hi ? d_lo : hi;
+   ctx->S = S;
+   ctx->magic_pairs = 0;
+-  if (d_log)
+-    fprintf(d_log, "# S %lu N %zu Nred %zu stride %zu offset %zu\n",
++  if (d_log) {
++    fprintf(d_log, "# S %lu N %zu Nred %zu stride %zu offset %zu",
+             (unsigned long)S, raw, red->count, d_stride, off);
++    if (star)
++      fprintf(d_log,
++              " star_x %lu star_k %d star_only %d nd_star %lu pred_share %.6f "
++              "star_time %.6f",
++              (unsigned long)sx.x, star_k, star_only, (unsigned long)sx.nstar,
++              sx.share, t_star);
++    fputc('\n', d_log);
++  }
+   dfirst_stats_t tot;
+   memset(&tot, 0, sizeof(tot));
+   const size_t base = lo + off;
+@@ -428,14 +479,29 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+     tot.cpu_seconds += st.cpu_seconds;
+     tot.d_pairs2 += st.d_pairs2;
+     tot.truncated |= st.truncated;
++    tot.nd_star_skipped += st.nd_star_skipped;
++    tot.nd_other_skipped += st.nd_other_skipped;
++    tot.nd_star += st.nd_star;
++    tot.nodes_star += st.nodes_star;
++    tot.pairs_star += st.pairs_star;
++    tot.d_cpu_star += st.d_cpu_star;
++    tot.d_cpu2_star += st.d_cpu2_star;
++    tot.d_pairs2_star += st.d_pairs2_star;
+     fprintf(out,
+             "{\"type\":\"dchunk\",\"n\":%d,\"P\":[%s],\"S\":%lu,\"d_lo\":%zu,"
+             "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
+-            "\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,\"time\":%.6f}\n",
++            "\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,\"time\":%.6f",
+             n, pstr, (unsigned long)S, c, c2, d_stride, off,
+             (unsigned long)st.nd, (unsigned long)st.nodes,
+             (unsigned long)st.pairs, (unsigned long)st.partners,
+             cpu_time() - cc);
++    if (star)
++      fprintf(out,
++              ",\"star_k\":%d,\"star_only\":%d,\"nd_star_skipped\":%lu,"
++              "\"pairs_star\":%lu",
++              star_k, star_only, (unsigned long)st.nd_star_skipped,
++              (unsigned long)st.pairs_star);
++    fprintf(out, "}\n");
+     fflush(out);
+     /* --time-limit: also between the chunks of a d-first sum, which can
+      * take hours (the sum is then not complete) */
+@@ -448,8 +514,9 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+    * hence its magic squares, are all found (a d-range unit, a d sample,
+    * a truncated or stopped run is not complete) */
+   const int complete = lo == 0 && hi == raw && d_stride == 1 &&
+-                       !tot.truncated && !stopped;
++                       !tot.truncated && !stopped && !star_only;
+   const uint32_t labels = dfirst_num_labels(df);
++  const uint64_t nd_star_range = dfirst_star_count(df, lo, hi);
+   dfirst_free(df);
+   const double cpu = cpu_time() - c0;
+   /* estimates for the d in [lo, hi): stride x the sampled totals, and the
+@@ -457,7 +524,9 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+   const double k = (double)d_stride, m = (double)tot.nd;
+   const double Nd = (double)(hi - lo);
+   double se_time = 0, se_pairs = 0;
+-  if (m >= 2) {
++  double est_pairs = k * (double)tot.pairs, est_nodes = k * (double)tot.nodes;
++  double est_time = t_index + k * (cpu - t_index);
++  if (!star && m >= 2) {
+     const double f = Nd * Nd * (1 - m / Nd) / m / (m - 1);
+     const double ct = tot.d_cpu; /* the sum over d of the per-d CPU */
+     const double vt = f * (tot.d_cpu2 - ct * ct / m);
+@@ -465,6 +534,42 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+         f * (tot.d_pairs2 - (double)tot.pairs * (double)tot.pairs / m);
+     se_time = vt > 0 ? sqrt(vt) : 0;
+     se_pairs = vp > 0 ? sqrt(vp) : 0;
++  } else if (star) {
++    /* two strata, the d without x* (weight 1, 0 with --dfirst-star-only)
++     * and the star d (weight K, 0 with K = -1), each weighted by d_stride:
++     * est = d_stride (w_o x the others' totals + w_s x the star d's); the
++     * d loop's CPU (without the choice of x*) is split between them by
++     * their per-d CPU. Standard errors: each stratum a simple random
++     * sample of its d in [lo, hi) */
++    const double w_o = star_only ? 0.0 : 1.0;
++    const double w_s = star_k >= 1 ? (double)star_k : 0.0;
++    const double po = (double)(tot.pairs - tot.pairs_star),
++                 ps = (double)tot.pairs_star;
++    const double co = tot.d_cpu - tot.d_cpu_star, cs = tot.d_cpu_star;
++    est_pairs = k * (w_o * po + w_s * ps);
++    est_nodes = k * (w_o * (double)(tot.nodes - tot.nodes_star) +
++                     w_s * (double)tot.nodes_star);
++    const double loop = cpu - t_index - t_star;
++    est_time = t_index + t_star +
++               (co + cs > 0 ? k * loop * (w_o * co + w_s * cs) / (co + cs) : 0.0);
++    double vt = 0, vp = 0;
++    const struct {
++      double w, Nh, nh, sy, sy2, sp, sp2;
++    } h[2] = {{w_o, Nd - (double)nd_star_range, (double)(tot.nd - tot.nd_star),
++               co, tot.d_cpu2 - tot.d_cpu2_star, po,
++               tot.d_pairs2 - tot.d_pairs2_star},
++              {w_s, (double)nd_star_range, (double)tot.nd_star, cs,
++               tot.d_cpu2_star, ps, tot.d_pairs2_star}};
++    for (int j = 0; j < 2; j++) {
++      if (h[j].w == 0 || h[j].nh < 2 || h[j].Nh <= h[j].nh)
++        continue;
++      const double f =
++          h[j].Nh * h[j].Nh * (1 - h[j].nh / h[j].Nh) / h[j].nh / (h[j].nh - 1);
++      vt += f * (h[j].sy2 - h[j].sy * h[j].sy / h[j].nh);
++      vp += f * (h[j].sp2 - h[j].sp * h[j].sp / h[j].nh);
++    }
++    se_time = vt > 0 ? sqrt(vt) : 0;
++    se_pairs = vp > 0 ? sqrt(vp) : 0;
+   }
+   fprintf(out,
+           "{\"type\":\"dsum\",\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
+@@ -477,16 +582,31 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
+           "\"vd_time\":%.6f,\"setup_time\":%.6f,\"search_time\":%.6f,"
+           "\"est_time\":%.6g,\"se_time\":%.6g,\"enum_time\":%.6f,"
+           "\"reduce_time\":%.6f,\"cpu\":%.6f,\"truncated\":%d,"
+-          "\"complete\":%d,\"engine\":%d}\n",
++          "\"complete\":%d,\"engine\":%d",
+           n, pstr, (unsigned long)pexp_value(p), (unsigned long)S, red->count,
+           raw, labels, lo, hi, d_stride, off, (unsigned long)tot.nd,
+           tot.nd ? (double)tot.vd_total / (double)tot.nd : 0.0,
+           (unsigned long)tot.nodes, (unsigned long)tot.pairs,
+           (unsigned long)tot.partners, (unsigned long)ctx->magic_pairs,
+-          k * (double)tot.pairs, se_pairs, k * (double)tot.nodes, cpu, t_index,
++          est_pairs, se_pairs, est_nodes, cpu, t_index,
+           tot.vd_seconds, tot.setup_seconds, tot.search_seconds,
+-          t_index + k * (cpu - t_index), se_time, enum_share, reduce_time,
++          est_time, se_time, enum_share, reduce_time,
+           cpu + pre_cpu, tot.truncated, complete, ENGINE_VERSION);
++  if (star)
++    fprintf(out,
++            ",\"star_x\":%lu,\"star_k\":%d,\"star_only\":%d,\"nd_star\":%lu,"
++            "\"nd_star_skipped\":%lu,\"nd_star_searched\":%lu,"
++            "\"nd_other_skipped\":%lu,\"pairs_star\":%lu,\"nodes_star\":%lu,"
++            "\"cpu_star\":%.6f,\"pred_star_share\":%.6g,"
++            "\"star_freq_rank\":%d,\"nd_star_all\":%lu,"
++            "\"pred_share_top_freq\":%.6g,\"star_time\":%.6f",
++            (unsigned long)sx.x, star_k, star_only,
++            (unsigned long)nd_star_range, (unsigned long)tot.nd_star_skipped,
++            (unsigned long)tot.nd_star, (unsigned long)tot.nd_other_skipped,
++            (unsigned long)tot.pairs_star, (unsigned long)tot.nodes_star,
++            tot.d_cpu_star, sx.share, sx.freq_rank, (unsigned long)sx.nstar,
++            sx.top_freq_share, t_star);
++  fprintf(out, "}\n");
+   fflush(out);
+   uint64_t nodes = tot.nodes;
+   if (calib_stride > 0) {
+@@ -521,6 +641,9 @@ int main(int argc, char *argv[]) {
+   const char *d_log_file = NULL;
+   uint32_t calib_stride = 0;
+   int d_top_root = 1; /* see dfirst_set_top_root */
++  /* --dfirst-star K (default: 4 for even n, 0 for odd n), and
++   * --dfirst-star-only (default K then 1) */
++  int star_k = 0, star_k_set = 0, star_only = 0;
+   const char *dfirst_opt = NULL; /* a d-first option given (for the check) */
+   /* r1 sampling of the plain search */
+   uint32_t r1_stride = 0, r1_strata[8];
+@@ -546,6 +669,8 @@ int main(int argc, char *argv[]) {
+       {"r1-log", required_argument, 0, 1011},
+       {"sample-seed", required_argument, 0, 1012},
+       {"d-plain-root", no_argument, 0, 1013},
++      {"dfirst-star", required_argument, 0, 1014},
++      {"dfirst-star-only", no_argument, 0, 1015},
+       {"vec-size", required_argument, 0, 'n'},
+       {"min-sum", required_argument, 0, 'a'},
+       {"max-sum", required_argument, 0, 'b'},
+@@ -687,6 +812,26 @@ int main(int argc, char *argv[]) {
+       d_top_root = 0;
+       dfirst_opt = "d-plain-root";
+       break;
++    case 1014:
++      /* K >= 1, or -1 (skip every star d), or 0 (off) */
++      if (!strcmp(optarg, "-1"))
++        star_k = -1;
++      else {
++        const uint64_t v = arg_u64(optarg, "dfirst-star");
++        if (v > 1000000) {
++          fprintf(stderr, "msearch: bad value '%s' for --dfirst-star\n",
++                  optarg);
++          return 2;
++        }
++        star_k = (int)v;
++      }
++      star_k_set = 1;
++      dfirst_opt = "dfirst-star";
++      break;
++    case 1015:
++      star_only = 1;
++      dfirst_opt = "dfirst-star-only";
++      break;
+     default:
+       return 2;
+     }
+@@ -702,7 +847,8 @@ int main(int argc, char *argv[]) {
+             "[--no-cross] [--pretest-min K]\n"
+             "  [--diag-first [--diag-first-min-n N0] [--d-stride k] "
+             "[--d-offset o] [--d-range lo:hi] [--d-chunk C] [--d-log FILE] "
+-            "[--d-plain-root] [--calib-r1-stride k]]\n"
++            "[--d-plain-root] [--calib-r1-stride k] [--dfirst-star K] "
++            "[--dfirst-star-only]]\n"
+             "  [--r1-stride k] [--r1-offset o] [--r1-strata k1,k2,..] "
+             "[--r1-log FILE] [--sample-seed X]\n"
+             "  e1 e2 ...   (P = 2^e1 3^e2 5^e3 ...; see the header of "
+@@ -713,6 +859,20 @@ int main(int argc, char *argv[]) {
+     fprintf(stderr, "msearch: --%s needs --diag-first\n", dfirst_opt);
+     return 2;
+   }
++  /* the star cover needs disjoint diagonals: those of an odd square share
++   * their center, which may be x*; by default K = 4 (research/ideas.md,
++   * "The star cover of the d loop": 1.05-1.08x less CPU per sum at N =
++   * 7.6-23k), and 1 (every star d) for --dfirst-star-only */
++  if (!star_k_set)
++    star_k = star_only ? 1 : n % 2 ? 0 : 4;
++  if ((star_k != 0 || star_only) && n % 2) {
++    fprintf(stderr, "msearch: --dfirst-star needs an even --vec-size\n");
++    return 2;
++  }
++  if (star_only && star_k < 0) {
++    fprintf(stderr, "msearch: --dfirst-star-only needs --dfirst-star K >= 1\n");
++    return 2;
++  }
+ 
+   FILE *out = stdout;
+   if (out_file) {
+@@ -827,7 +987,8 @@ int main(int argc, char *argv[]) {
+         total_nodes += run_dfirst(out, &ctx, pstr, n, &p, S, &all, start_i,
+                                   raw, &red, &opts, d_stride, d_offset, seed,
+                                   d_range_lo, d_range_hi, d_chunk, d_log,
+-                                  calib_stride, d_top_root, enum_time * share,
++                                  calib_stride, d_top_root, star_k, star_only,
++                                  enum_time * share,
+                                   reduce_time, pre_cpu,
+                                   time_limit > 0 ? t_start + time_limit : 0);
+         if (total_node_limit && total_nodes >= total_node_limit)
+-- 
+2.43.0
+

@@ -21,3 +21,9 @@ records), one per line as `source-file<TAB>json`, deduplicated by line. The
 source path tells which run a record came from (e.g. collect/ = the 36 seed
 P, forecast/state/units/ = the scheduler's 40 units, existence/ = large-N
 and sampled runs; sampled runs only searched every k-th first row).
+
+Round 2 (complexity of the d-first search; patches against be625d8):
+c2-classsup (class-matching support in V_d, verified: 0.66x CPU at N >= 20k),
+c2-star (star cover of the d loop, verified: 1.045-1.065x), c2-classhall
+(pair rules: no-go, docs only), c2-profile and c2-vdclass (instrumentation),
+c2-partner (partner pruning: negative). Profile: complexity-dfirst-profile.md.
