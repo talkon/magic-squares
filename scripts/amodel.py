@@ -479,17 +479,30 @@ DFIRST_TIME_LAMBDA = (25.0, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6)
 # per-engine shifts of the d-first law after DFIRST_TIME_PRIOR's engine.
 # Engine 4 (the class support in the V_d searches, gated to the V_d of >= 137
 # labels, and the star cover with K = 4): ln(engine 4 / engine 3 d-first
-# CPU per sum) = c0 + c1 ln(N/4000), DFIRST_E4 = (-0.138 +- 0.029, -0.162 +-
-# 0.027), resid sd 0.073: paired on one binary (--no-class-support
-# --dfirst-star 0 against the defaults), the same d (d-stride samples at N
-# >= 4k), min of 2 alternating rounds, 12 sums at N = 3.1-31.7k
-# (research/ideas.md, "Integration of the round-2 d-first changes"). The
-# c2 verifiers' numbers give the same law: the class support's 0.924
-# (N/4000)^-0.180 (11 sums, 5.9-31.7k) times the star cover's 1 - 0.75 s,
-# s = 0.107 (N/4000)^-0.28 (measured 2-4% below its prediction): -0.161 -
-# 0.162 ln(N/4000). The same shift goes into the ratio
+# CPU per sum) = c0 + c1 ln(N'/4000), DFIRST_E4 = (-0.103 +- 0.023, -0.204
+# +- 0.020), resid sd 0.067: the perf verifier's pooled fit of 23 paired
+# sums inside the model grid (S <= S_grid max), N' 3.4-31.7k: its 13 (the
+# 189b49f binary against the integrated one, identical d samples, whole-sum
+# CPU = d_stride x the d loop + the fixed costs, min of 2 alternating) and
+# the integrator's 10 in-grid sums (one binary, --no-class-support
+# --dfirst-star 0 against the defaults). Alone, the verifier's 13 give
+# -0.105 (0.032) - 0.210 (0.028); the class support alone -0.022 - 0.215;
+# the integrator's first fit, -0.138 - 0.162, rested on two sums outside the
+# grid (10 6 3 2 1 at S 900 and 1360, 154-194 labels at N 3.1-3.6k, where
+# the class support starts at a smaller N than near S_min) and on run
+# times with the whole x* choice but 1/d_stride of the loop (research/
+# ideas.md, "Integration of the round-2 d-first changes"). Engine 4's law:
+# 3.112 + 3.372 ln(N'/4000) (sd 0.25 kept); measured on the verifier's 13
+# sums 3.181 (0.15) + 3.331 (0.13), rms 0.29 against this one. The slope
+# (engine 3's, shifted) fits the ladder (mostly 13 7 4 3 1 1), but the
+# calibration search's pool P at N' >= 12k came in at about 0.5x of it
+# (7 sums; calibration-target.md 3.6): the online refit learns only the
+# intercept (DFIRST_TIME_LAMBDA), so above 12k the planner charges pool P
+# about 2x (2% of E at 1-10 CPU-years; the "measured" forecast truth
+# corrects it there). The same shift goes into the ratio
 # (DFIRST_RATIO_ENGINE_SHIFT), the plain search being unchanged.
-DFIRST_E4 = (-0.138, -0.162)
+DFIRST_E4 = (-0.103, -0.204)
+DFIRST_E4_SD = (0.023, 0.020)
 DFIRST_ENGINE_SHIFT = {4: {"intercept": DFIRST_E4[0], "ln N'/4000": DFIRST_E4[1]}}
 # the CPU of the d loop is not uniform along d's index in the unreduced
 # list: mean CPU per d in the deciles of u = d / N relative to the sum's
@@ -517,7 +530,9 @@ DFIRST_COST_PROFILE = (0.71, 1.08, 1.08, 1.21, 1.16, 1.21, 1.15, 1.15, 0.86, 0.3
 # stream's unbiased plain estimate (est_time).
 DFIRST_RATIO_PRIOR = {"a": (-0.028, -0.566), "sd": 0.17, "level_sd": 0.1, "engine": 3}
 # per-engine shifts (a0, a1) of the ratio after DFIRST_RATIO_PRIOR's engine
-# (engine 4: the d-first law's shift, DFIRST_E4)
+# (engine 4: the d-first law's shift, DFIRST_E4: -0.131 - 0.770
+# ln(N'/4000), sd 0.17 kept, the auto switch at N' ~3.68k; measured on the
+# verifier's 13 sums -0.113 (0.072) - 0.805 (0.062), rms 0.152 against it)
 DFIRST_RATIO_ENGINE_SHIFT = {4: DFIRST_E4}
 
 # ln nodes = NODE_TH . [1, ln(N'/4000), ln(labels/150), max(0, ln(N'/8000))]
@@ -605,16 +620,19 @@ def dfirst_log_ratio(lNp, a0=None, engine=None):
     return (p0 if a0 is None else a0) + a1 * (np.asarray(lNp, float) - math.log(4000))
 
 
-def dfirst_ratio_level(st=None, engine=None, st_engine=None):
+def dfirst_ratio_level(st=None, engine=None, st_engine=None, prior=None):
     """the posterior mean of engine's ratio level a0 from pairs st = [n,
     sum x, sum y] (weighted; y = ln(d-first CPU / plain CPU), x =
     ln(N'/4000)) of engine st_engine (default engine), the slope held: a
-    normal prior at st_engine's a0 (dfirst_ratio_coefs) with sd level_sd,
-    residual sd sd; pairs of an older engine stand in for a newer one's
-    with the shift between their priors (as time_prior hands a time law
-    over)"""
+    normal prior at prior (default st_engine's a0, dfirst_ratio_coefs) with
+    sd level_sd, residual sd sd; pairs of an older engine stand in for a
+    newer one's with the shift between their priors (as time_prior hands a
+    time law over). To chain engines, pass as prior the level of the older
+    engine's pairs shifted to st_engine (scheduler.current_ratio_level)."""
     a0, a1 = dfirst_ratio_coefs(st_engine if st_engine is not None else engine)
     shift = dfirst_ratio_coefs(engine)[0] - a0
+    if prior is not None:
+        a0 = float(prior)
     if not st or st[0] <= 0:
         return a0 + shift
     n, sx, sy = float(st[0]), float(st[1]), float(st[2])

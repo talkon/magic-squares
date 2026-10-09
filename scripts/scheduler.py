@@ -46,7 +46,7 @@ below stops growing at N ~ 5.5k). On top of it:
     with a plain calibration stream of ~7% (--calib-r1-stride k, whose
     sampled squares enter the class and per-P factors, weighted, and
     whose plain-time estimate the plain law and the ratio) is below 1:
-    from N' ~ 3.5k on (engine 4; 4.3k with engine 3). The d-first time
+    from N' ~ 3.7k on (engine 4; 4.3k with engine 3). The d-first time
     law (amodel.DFIRST_TIME_PRIOR with the engine's shift, its
     level learned) prices them. A d-first sum longer than 1.5 units is
     split into units of d (--d-range lo:hi); the summary merges their
@@ -1396,7 +1396,12 @@ TRAV_BASE = (0.86, 0.64)
 # It was 15 (sd 0.26, the per-unit sd of earlier held-out units), with
 # which 15-18% of those sums fell outside their 90% interval. Squares within
 # one P are overdispersed too (per-sum Pearson chi2/df 2.5), so their counts
-# enter the posterior divided by PHI_SUM
+# enter the posterior divided by PHI_SUM. The measured 0.41 is the spread
+# beyond Poisson only (analyze.py's between_sd subtracts 1/E), so it also
+# holds the per-sum overdispersion that PHI_SUM models: for a one-sum P of
+# E ~30 squares the dispersion is 2.5 + 30/6 = 7.5 against the measured
+# Pearson 5.4 at 3-6k, a little wide. Taking PHI_SUM out, 0.41^2 - (PHI_SUM -
+# 1)/E gives A ~8-9; 6 is the write-up's refit choice (its glm.out), kept
 A_SQ, A_TRAV = 6.0, 30.0
 PHI_SUM = 2.5
 # selection: the forecast's E is no longer discounted (it was x0.8, from
@@ -1414,7 +1419,7 @@ EXPLORE_V2 = 0.0            # optimism: posterior mean + EXPLORE * sd
 # units"). --dfirst auto: a sum is searched d-first where the measured
 # d-first / plain ratio (amodel.DFIRST_RATIO_PRIOR, its level learned
 # online) with the calibration stream is below 1, (1 + CALIB_FRAC) r(N') <
-# 1, i.e. N' >= ~3.5k with engine 4 (~4.3k with engine 3), and its N' >=
+# 1, i.e. N' >= ~3.7k with engine 4 (~4.3k with engine 3), and its N' >=
 # --dfirst-min-n. The two time laws
 # only price the sums (their quotient is not label-free and the plain law
 # under-predicts at 5-8k: it put the switch at ~9-10k).
@@ -1509,27 +1514,45 @@ def _prior(intercept, sd0, sd, **effects):
 
 # priors of the three GLMs (log rate = intercept + effects): squares relative
 # to the analytic model x SQ12; S and P traversals per 720 e^{lpS}, e^{lpP}.
-# At the prior means m(c) below gives e^{2 (0.04 + 0.06)} = 1.22 at N' >= 3k
-# (the review's NTR 1.35, lowered by the live data), and the review factors
-# K7 (e^-0.16) and X01 (e^-0.08) on P(magic | square).
+# They are the posterior of the calibration search's GLM refit
+# (research/calibration-target.md section 5, forecast_update.py "glm" with
+# A_SQ 6, archive/results/glm.out and glm_update.json's calib_post; means
+# and sds per effect, the correlations dropped): 321 pre-registered sums at
+# N' 3-45k fitted on top of the earlier priors, which were: squares N' < 1k
+# -0.25 (0.74 on 146 P), x < 0.1 -0.10 (S_min, x < 0.05: 0.65), 6-12k -0.22
+# (held-out live units at 0.78, analytic.md 3.4's 0.78 at N 3.4-8.9k); S
+# ln 0.86 + 0.04 at N' >= 3k (the review's +0.09 lowered by the live units);
+# P ln 0.64 + 0.06 at N' >= 3k, the review factors K7 (e^-0.16) and X01
+# (e^-0.08) on P(magic | square) as k >= 7 -0.08 and x < 0.1 -0.04. The
+# search's raw ratios against those: squares 1.04 at 3-6k and 1.28 at 6-12k
+# (the x0.80 refits to x0.93), S traversals per square 0.939 [0.918, 0.960]
+# at 3-6k and 0.973 at 6-12k, P 1.02 and 1.08 (sections 3.1, 3.2). The
+# refit puts the S deficit mostly into k <= 5, ratio <= 1.1 and x < 0.1 and
+# the P excess into N' >= 3k; these main effects also act below 3k, where
+# nothing was measured. At the means m(c) below is e^{2 (0.024 + 0.109)} =
+# 1.30 x PAIR at N' 3-6k for k 6 and the middle ratio and x bands (it was
+# e^{2 (0.04 + 0.06)} = 1.22).
+# effects: intercept, N'>=3k, N'<1k, N' 6-12k, N' 12-24k, N'>=24k, k<=5,
+#          k>=7, k>=8, r<=1.1, r>1.1, x<0.1, x>=0.25 (EFFECTS)
 GLM_PRIORS = {
-    # squares: over-predicted below N' 1k (0.74 on 146 P), right at S_min
-    # (x < 0.05: 0.65); at N' 6-12k -0.08 (0.09), the calibration search's
-    # GLM refit with A_SQ 6 (calibration-target.md 3.1 and 5: its 25 sums
-    # there came in at 1.28 of the shipped -0.22 (0.15), x0.80, which had
-    # come from held-out live units at 0.78 and analytic.md 3.4's 0.78 at N
-    # 3.4-8.9k; the refit combines both)
+    "sq": ([-0.003, -0.002, -0.25, -0.078, 0.058, -0.061, -0.006, 0.033, 0.021, 0.060, -0.017,
+            -0.088, 0.060],
+           [0.196, 0.194, 0.150, 0.085, 0.190, 0.232, 0.073, 0.112, 0.237, 0.067, 0.117, 0.078,
+            0.079]),
+    "S": ([-0.159, 0.032, 0.0, -0.018, -0.054, 0.009, -0.041, -0.038, -0.004, -0.048, -0.008,
+           -0.067, 0.002],
+          [0.073, 0.073, 0.100, 0.050, 0.093, 0.099, 0.043, 0.062, 0.098, 0.039, 0.066, 0.050,
+           0.045]),
+    "P": ([-0.422, 0.085, 0.0, 0.042, 0.008, -0.002, -0.042, -0.072, -0.003, -0.006, 0.029,
+           -0.102, 0.018],
+          [0.075, 0.075, 0.100, 0.063, 0.098, 0.100, 0.054, 0.085, 0.100, 0.051, 0.084, 0.067,
+           0.056]),
+}
+# (the earlier priors, for the record: shipped until the round-2 integration)
+GLM_PRIORS_V2 = {
     "sq": _prior(0.0, 0.3, 0.25, **{"N'<1k": (-0.25, 0.15), "x<0.1": (-0.1, 0.15),
-                                    "N' 6-12k": (-0.08, 0.09)}),
-    # S traversals per square at N' >= 3k: the shipped +0.04 x the
-    # calibration search's 0.939 at 3-6k [0.918, 0.960] (calibration-target.md
-    # 3.2: 5,408 / 5,759, p 5e-5 with the measured overdispersion), i.e.
-    # 0.04 + ln 0.939 = -0.023; at 6-12k its 0.973 [0.89, 1.07] (eff. 342),
-    # 0.04 + ln 0.973 = +0.013, i.e. +0.036 on top of the N' >= 3k effect
-    # (the review's +0.09 at N' >= 3k had already not been borne out by the
-    # live units, 0.91 relative)
-    "S": _prior(math.log(TRAV_BASE[0]), 0.1, 0.1, **{"N'>=3k": (-0.023, 0.1),
-                                                     "N' 6-12k": (0.036, 0.1)}),
+                                    "N' 6-12k": (-0.22, 0.15)}),
+    "S": _prior(math.log(TRAV_BASE[0]), 0.1, 0.1, **{"N'>=3k": (0.04, 0.1)}),
     "P": _prior(math.log(TRAV_BASE[1]), 0.1, 0.1, **{"N'>=3k": (0.06, 0.1), "k>=7": (-0.08, 0.1),
                                                      "x<0.1": (-0.04, 0.1)}),
 }
@@ -1689,12 +1712,25 @@ def current_ratio_stats(ratio, engine=None, with_engine=False):
 
 def current_ratio_level(ratio, engine=None):
     """(the ratio's level a0 for engine, default the newest at least ENGINE,
-    and its pairs): the posterior of the newest engine's pairs, an older
-    engine's shifted to this one (amodel.dfirst_ratio_level)"""
-    engs = [int(e) for e in (ratio or {})]
+    and the pairs of the newest engine that has any): the engines' pairs
+    chained in increasing order, as fit_time_models chains the time laws:
+    each engine's level is the posterior of its own pairs under a prior at
+    the previous engine's level shifted to it (amodel.dfirst_ratio_coefs;
+    the oldest from its shipped prior), and the newest is shifted to
+    engine (amodel.dfirst_ratio_level)"""
+    am = _am()
+    engs = sorted(int(e) for e in (ratio or {}))
     engine = max([ENGINE] + engs) if engine is None else engine
-    st, st_engine = current_ratio_stats(ratio, engine, with_engine=True)
-    return _am().dfirst_ratio_level(st, engine, st_engine), st
+    level, prev = None, None
+    for e in engs:
+        if e > engine:
+            break
+        prior = None if prev is None else level + am.dfirst_ratio_coefs(e)[0] - am.dfirst_ratio_coefs(prev)[0]
+        level, prev = am.dfirst_ratio_level(ratio[str(e)], e, e, prior=prior), e
+    st = current_ratio_stats(ratio, engine)
+    if prev is None:
+        return am.dfirst_ratio_level(None, engine), st
+    return level + am.dfirst_ratio_coefs(engine)[0] - am.dfirst_ratio_coefs(prev)[0], st
 
 
 def _prior_engine(mode):
@@ -2108,8 +2144,9 @@ SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
 # 5 = parts weighted in the d-first law, the streams in the plain law and
 # the d-first / plain ratio pairs, the CPU of killed d-first units, SP-type
 # squares found d-first; 6 = the star cover: parts merged per (x*, K), the
-# d-first pairs and their estimates, the span of a part with skipped d
-SUMMARY_VERSION = 6
+# d-first pairs and their estimates, the span of a part with skipped d;
+# 7 = a d-first / plain ratio pair from the parts of one engine only
+SUMMARY_VERSION = 7
 
 
 def dsum_est_pairs(r):
@@ -2556,6 +2593,11 @@ class Summary:
                                w=frac)
                 e = dT.setdefault(str(r["S"]), [0.0, 0.0, float(a["lNp"][i]) - math.log(4000),
                                                 engine_of(r)])
+                # (one engine per ratio pair: parts of another engine than
+                # the sum's first part, e.g. older units of another coverage
+                # group, stay out of it)
+                if e[3] != engine_of(r):
+                    continue
                 e[0] += frac
                 e[1] += frac * math.log(t)
         if calibs:
@@ -2726,7 +2768,12 @@ class Summary:
         coverage. Each group also adds up the pairs of its chunks and their
         estimate over every d (dchunk_est_pairs), each chunk weighted by
         the share of its range not yet covered in the group (a duplicate
-        adds nothing), so a sum's estimate is that of one pass over its d."""
+        adds nothing), so a sum's estimate is that of one pass over its d:
+        exact for disjoint chunks and duplicates, the planner's units (it
+        plans only the gaps of a group); a chunk that partly overlaps the
+        group (a hand-made unit) adds its pairs by that share, as if they
+        were spread evenly along its d (a dchunk record has no per-d
+        pairs), so the sum's pairs and est_pairs are then approximate."""
         dc = self.dcov.get(key, {})
         done = []
         fin = set(ps.get("dfirst_S", ()))
@@ -4167,7 +4214,11 @@ def forecast_truth(args):
     """the truth a forecast charges its units under: --truth, by default
     "measured" for --shipped (the shipped laws, corrected by the
     calibration search's measured CPU) and "laws" otherwise (the laws as
-    learned from the state's records)"""
+    learned from the state's records; their factors would correct a learned
+    law twice where it has learned them. It has not learned them all: the
+    online refit moves only the d-first law's level and one plain offset at
+    N' >= 6k (amodel.DFIRST_TIME_LAMBDA, TIME_LAMBDA), so the measured
+    per-band shape above 12k, 0.16-0.62 of the laws, is in no learned law)"""
     t = getattr(args, "truth", None)
     if t:
         return t
@@ -4333,7 +4384,7 @@ def forecast_plain_only(sch, budget, frac, marks, E_at, curve, yr, truth="laws")
         print("with and without d-first (the same greedy with --dfirst off), charged at the "
               "scheduler's own laws: this cannot measure the gain (the plain law under-predicts "
               "the plain search 1.35x at N' 5-8k and over-predicts it 1.5-3x above 11k); see "
-              "--truth anchored:")
+              "--truth measured:")
     else:
         print(f"with and without d-first (the same greedy with --dfirst off), both charged under "
               f"the {truth!r} truth:")
@@ -4553,7 +4604,12 @@ def main():
                         "N' band; laws (the default otherwise) = its predicted time; anchored "
                         "= the d-first law for d-first sums and the d-first law / the measured "
                         "ratio r(N') for plain sums at N' >= 5k (the plain law at <= 3k, "
-                        "blended between; it overcharges the plain sums at 3-6k 1.5x)")
+                        "blended between; it overcharges the plain sums at 3-6k 1.5x). On a "
+                        "learned state (without --shipped) the laws learn only the d-first "
+                        "law's level and one plain offset at N' >= 6k, so under 'laws' they "
+                        "stay above the measured CPU at N' >= 12k (measured: 0.16-0.62 of the "
+                        "laws there, on 7 sums); 'measured' there corrects the shipped laws, "
+                        "not the learned ones")
     p.set_defaults(func=dispatch(cmd_forecast, v2_forecast))
 
     p = sub.add_parser("fit")

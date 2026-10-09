@@ -501,12 +501,16 @@ def test_fit_poisson_map():
     c_low = scheduler.cell_index(math.log(2000), 6, 0, 0.2)
     c_hi = scheduler.cell_index(math.log(4000), 7, 0, 0.05)
     c_sm = scheduler.cell_index(math.log(800), 6, 0, 0.05)
-    assert abs(math.exp(lm[c_low]) - am.PAIR) < 1e-9 and abs(lg[c_low]) < 1e-12
-    # N' 3-6k: e^{2 (-0.023 + 0.06)} (S x0.939 after the calibration
-    # search); k >= 7: e^{-0.16}; x < 0.1: e^{-0.08}
-    assert abs(math.exp(lm[c_hi]) / (am.PAIR * math.exp(2 * (-0.023 + 0.06)) * am.K7 * am.X01)
-               - 1) < 0.01
-    assert abs(lg[c_sm] - (-0.25 - 0.1)) < 1e-12
+    # the shipped priors: the calibration search's refit posterior
+    # (glm.out): c_low (N' 2k, k 6, middle bands): the intercepts
+    dS, dP = -0.159 - math.log(scheduler.TRAV_BASE[0]), -0.422 - math.log(scheduler.TRAV_BASE[1])
+    assert abs(math.exp(lm[c_low]) / (am.PAIR * math.exp(2 * (dS + dP))) - 1) < 1e-9
+    assert abs(lg[c_low] - (-0.003)) < 1e-12
+    # N' 3-6k, k >= 7, x < 0.1: S +0.032 - 0.038 - 0.067, P +0.085 - 0.072
+    # - 0.102 (the review's K7 and X01 as P's -0.08 and -0.04 before)
+    assert abs(math.exp(lm[c_hi]) / (am.PAIR * math.exp(2 * (dS + dP + 0.032 - 0.038 - 0.067
+                                                           + 0.085 - 0.072 - 0.102))) - 1) < 1e-9
+    assert abs(lg[c_sm] - (-0.003 - 0.25 - 0.088)) < 1e-12
     # quasi-Poisson: the same data with dispersion 4 gives a 2x wider se
     _, C1 = scheduler.fit_poisson_map(Z, y, np.log(E), mean, sd)
     _, C4 = scheduler.fit_poisson_map(Z, y, np.log(E), mean, sd, phi=np.full(len(y), 4.0))
@@ -532,14 +536,15 @@ def test_per_p():
     with tempfile.TemporaryDirectory() as state:
         P = (12, 6, 3, 2, 1, 1)
         cands, sc, plan = make_v2([P], state)
-        c = int(scheduler.cell_index(math.log(2000), 6, 0, 0.2))   # class rates 0.86, 0.64
+        c = int(scheduler.cell_index(math.log(2000), 6, 0, 0.2))   # class rates e^-0.159, e^-0.422
         # o (all squares of the P) is not used: the counts come from the
         # cells, where the expectations are
         summ = SimpleNamespace(perP={"12_6_3_2_1_1": {"o": [10, 30, 0, 0], "cells": {
             c: [5, 2, 6.0, 30, 30.0, 0, 30.0, 0, 0.1]}}})
         sc.set_factors(summ)
-        assert abs(math.exp(sc.lnfsq[0]) - (A + 2 / phi) / (A + 6 / phi)) < 1e-9
-        f_S, f_P = 60 / (30 + 30 * 0.86), 30 / (30 + 30 * 0.64)
+        e6 = 6 * math.exp(-0.003)       # (the squares rate of the cell)
+        assert abs(math.exp(sc.lnfsq[0]) - (A + 2 / phi) / (A + e6 / phi)) < 1e-9
+        f_S, f_P = 60 / (30 + 30 * math.exp(-0.159)), 30 / (30 + 30 * math.exp(-0.422))
         Fm = f_S ** 2 * f_P ** 2 * (1 + 1 / 60) * (1 + 1 / 30) / (1 + 1 / 30) ** 2
         assert abs(math.exp(sc.lnFm[0]) - Fm) < 1e-9
     print("per-P factors ok")
@@ -1489,12 +1494,18 @@ def test_dfirst_learning():
         # the time laws are handed over)
         a4 = am.dfirst_ratio_level(s.ratio["3"], 4, 3)
         assert abs(a4 - a - am.DFIRST_E4[0]) < 1e-12
-        assert scheduler.current_ratio_level(s.ratio) == (a4, s.ratio["3"])
-        # ... and with pairs of its own, those (from engine 4's prior)
+        l4, st_ = scheduler.current_ratio_level(s.ratio)
+        assert abs(l4 - a4) < 1e-12 and st_ == s.ratio["3"]
+        # ... and with pairs of its own, those from a prior at engine 3's
+        # level shifted (chained, as the time laws): a pair at that level
+        # leaves it unchanged, one above it raises it
+        a1 = am.dfirst_ratio_coefs(4)[1]
+        st4 = [1.0, sx, a4 + a1 * sx, (a4 + a1 * sx) ** 2]
+        assert abs(scheduler.current_ratio_level(dict(s.ratio, **{"4": st4}))[0] - a4) < 1e-12
         st4 = [1.0, sx, sy + 0.3, (sy + 0.3) ** 2]
         a4b = scheduler.current_ratio_level(dict(s.ratio, **{"4": st4}))[0]
-        assert abs(a4b - am.dfirst_ratio_level(st4, 4)) < 1e-12
-        assert a4b > am.dfirst_ratio_coefs(4)[0]
+        assert abs(a4b - am.dfirst_ratio_level(st4, 4, prior=a4)) < 1e-12
+        assert a4b > a4
         # (the same from scratch)
         whole = scheduler.Summary(state, 6)
         whole.update(units, store)
@@ -1504,7 +1515,7 @@ def test_dfirst_learning():
                                   unit_time=120.0, unit_drop=0.5, dfirst="auto", calib_frac=0.07,
                                   dfirst_min_n=2000.0)
         sch = scheduler.SchedulerV2(args, quiet=True)
-        assert abs(sch.scorer.lr0 - a4) < 1e-12 and sch.lr0 == a4
+        assert abs(sch.scorer.lr0 - a4) < 1e-12 and abs(sch.lr0 - a4) < 1e-12
     # (3) records after a sum is covered; incremental == full parse
     P2, key2, S2, raw2 = (12, 6, 3, 2, 1, 1), "12_6_3_2_1_1", 890, 1000
     with tempfile.TemporaryDirectory() as state:
@@ -1663,7 +1674,7 @@ def test_dfirst_e2e():
         T = s.totals
         assert T["dfirst_sums"] >= 1 and T["calib_sums"] + T["calib_dup"] >= 1, T
         # (sums of < DFIRST_TIME_MIN_N vectors do not teach the d-first law)
-        assert "3:dfirst" not in s.time, s.time.keys()
+        assert not any(k.endswith(":dfirst") for k in s.time), s.time.keys()
         out = run("--state", state, "report", *opts)
         assert "d-first (in the d-first time law only)" in out and "calibration streams" in out
         assert "d-first law" in out, out
@@ -1990,9 +2001,8 @@ def test_dfirst_star_cover():
 
 def test_calibration_target():
     """the shipped calibration after the calibration search in the target
-    region (research/calibration-target.md): squares at N' 6-12k x0.93,
-    S traversals x0.939 at 3-6k and x0.973 at 6-12k against the previous
-    priors, A_SQ 6, no selection discount (a band term instead), and the
+    region (research/calibration-target.md): the class-factor GLMs at its
+    refit's posterior (squares at N' 6-12k x0.93), A_SQ 6, no selection discount (a band term instead), and the
     "measured" truth of forecast --shipped (the laws x the measured CPU
     per N' band)"""
     import numpy as np
@@ -2000,11 +2010,13 @@ def test_calibration_target():
     c36 = scheduler.cell_index(math.log(4000), 6, 0, 0.2)
     c612 = scheduler.cell_index(math.log(8000), 6, 0, 0.2)
     c13 = scheduler.cell_index(math.log(2000), 6, 0, 0.2)
-    assert abs(lg[c612] - (-0.08)) < 1e-12 and abs(lg[c36]) < 1e-12
-    base = math.log(scheduler.TRAV_BASE[0])
-    assert abs(lS[c13] - base) < 1e-12
-    assert abs(math.exp(lS[c36] - base) / (math.exp(0.04) * 0.939) - 1) < 1e-3
-    assert abs(math.exp(lS[c612] - base) / (math.exp(0.04) * 0.973) - 1) < 1e-3
+    # the refit's posterior means (glm.out): k 6 (no k effect), ratio band
+    # 0 (none), x 0.2 (none): intercept + N' effects
+    assert abs(lg[c612] - (-0.003 - 0.002 - 0.078)) < 1e-12 and abs(lg[c36] - (-0.005)) < 1e-12
+    assert abs(lS[c13] - (-0.159)) < 1e-12
+    assert abs(lS[c36] - (-0.159 + 0.032)) < 1e-12
+    assert abs(lS[c612] - (-0.159 + 0.032 - 0.018)) < 1e-12
+    assert abs(lP[c612] - (-0.422 + 0.085 + 0.042)) < 1e-12
     assert scheduler.A_SQ == 6.0 and scheduler.SELECTION_SD == 0.12
     assert not hasattr(scheduler, "SELECTION_DISCOUNT")
     ns = argparse.Namespace
