@@ -20,6 +20,11 @@ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
   string(APPEND CMAKE_C_FLAGS_DEBUG " --param=asan-use-after-return=0")
 endif()
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+# instrumentation builds for measurements, in their own build directory,
+# e.g. cmake -DMAGIC_DEFS="CLASS_PROF" (empty by default)
+if (MAGIC_DEFS)
+  add_compile_definitions(${MAGIC_DEFS})
+endif()
 
 enable_testing()
 

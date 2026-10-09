@@ -105,6 +105,21 @@ typedef struct {
    * top_numbers[0], as the squares of V_d all contain every number of d */
   const uint64_t *top_numbers;
   int n_top, top_root_only;
+  /* class support (the V_d searches of dfirst.c; default 0 = off): when
+   * top_numbers holds n numbers (n_top == n) and every vector has exactly
+   * one of them, its class (as every vector of V_d has one of d's
+   * numbers), the rows of a square have the n classes, a row of class j
+   * meets the col of class j at that number and every other col at a
+   * number outside top_numbers. So, with 1, the children with one row and
+   * one col placed drop the candidates with a cell that neither a placed
+   * vector of the other axis nor an other-axis candidate of the right
+   * class (its own for its top number, another for the rest) covers, or
+   * that meet no other-axis candidate of some class not yet placed there
+   * outside the placed vectors, on both axes to the fixpoint (see
+   * CLASS_SUP in arrange_core.h). The same squares, fewer nodes; only on
+   * the carried path (a no-op on the matrices, or when some vector has
+   * not exactly one top number). */
+  int class_support;
 } search_opts_t;
 
 void search_opts_default(search_opts_t *o);

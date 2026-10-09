@@ -62,15 +62,20 @@ posting lengths) per d). Every square of V_d contains all of d, so d's
 numbers get the top labels and only the first rows through the rarest of
 them are roots (`--d-plain-root`: all of V_d, as `bin/dsearch`; a V_d
 searched with the 8-word intersection matrices, i.e. 257-512 labels without
-AVX-512BW, always gets the plain root, which is 1.27x faster there). Per
-sum, against the plain search of this code (CPU, paired, research/ideas.md
-"Measurements on the integrated binary"): 1.25x at N = 4.1k, 0.65x at
-6.7k, 0.57x at 7.6k, 0.55x at 11.7k, 0.42-0.47x at 15-21k, 0.29x at 23k,
-and 0.32-0.43x at 21-32k with more than 256 labels (where the plain
-search itself got 3.8x faster); the crossover is at N ~ 4-5k depending on
-P, hence the default `--diag-first-min-n` 5000, which also keeps the plain
-search's semi-magic squares, for the models, below it. It does not
-enumerate the semi-magic squares:
+AVX-512BW, always gets the plain root, which is 1.27x faster there). Each
+vector of V_d holds exactly one of d's numbers, its class, so the V_d
+searches also prune with the class support (see the list below; on by
+default, `--no-class-support` turns it off for A/B runs): 0.39-0.63x the
+nodes and 0.60-0.76x the CPU per sum at N >= 11.7k (0.81-0.89x at
+5.9-11.3k, 0.99x at 4.1k), the same pairs. Per sum, against the plain
+search of this code (CPU, paired, research/ideas.md "Measurements on the
+integrated binary" and "Class support in the V_d searches"): 1.24x at N =
+4.1k, 0.53x at 6.7k, 0.51x at 7.6k, 0.38x at 11.7k, 0.32-0.34x at
+15-16k, 0.20-0.28x at 21-23k, and 0.19-0.31x at 21-32k with more than 256
+labels (where the plain search itself got 3.8x faster); the crossover is
+at N ~ 4-5k depending on P, hence the default `--diag-first-min-n` 5000,
+which also keeps the plain search's semi-magic squares, for the models,
+below it. It does not enumerate the semi-magic squares:
 d-first sums write "dsquare" records (one per pair, with `set_count` =
 `sp_count`, `magic`, `partner`; dedupe magic squares by `hash`), "dchunk"
 checkpoint records every `--d-chunk` (256) indices of d (`d_lo`, `d_hi`:
@@ -157,7 +162,11 @@ bin/bench --update bench/quick.txt     # print instances with observed values
 Built with `-DCHILD_PROF` (e.g. `gcc -O3 -march=native -DCHILD_PROF -o
 bench_prof bench.c arrange.c square.c enumerate.c -lm`), the search prints
 on exit where the creation of children spends its cycles, by layer (rows
-and cols placed) and phase, and which test kills them.
+and cols placed) and phase, and which test kills them. With
+`-DCLASS_PROF` (with CMake: `cmake -DMAGIC_DEFS=CLASS_PROF` in a build
+directory of its own) it prints the cycles of the class support of the
+V_d searches, as a share of the search's, and its calls, passes and
+entries dropped.
 
 Each instance line is `n | exponents | S | expected squares | expected hash`.
 The hash is an order-independent hash of the squares found (sum of hashes of
@@ -225,6 +234,24 @@ versa), plus:
   them; with the matrices it runs
   only with AVX-512 and byte counters (39% fewer nodes, 22% less time on
   `bench/full.txt`), elsewhere it cost more than it saved;
+- class support (the V_d searches of `--diag-first`, `opts.class_support`;
+  carried lists only): every vector of V_d holds exactly one of d's numbers,
+  its class (d's numbers have the top labels), and the rows (cols) of a
+  square have the n classes, the row of class j meeting the col of class j
+  at d_j and every other col outside d. So at the children with one row
+  and one col placed, a candidate is dropped when a cell of it lies in no
+  placed vector of the other axis and in no other-axis candidate of the
+  right class (its own for d_j, another for the rest), or when it misses,
+  outside the placed vectors, every other-axis candidate of some class not
+  yet placed there; both axes, to the fixpoint, with the support filter's
+  death checks. The lists are sorted by descending labels, so each class is
+  a block of each list and the tests of a block are the unions of the
+  other axis' blocks (one zmm per class); a pass after the first tests
+  only the cells and classes that changed since, a keep mask marks the
+  dropped entries, and the lists are compacted once, if the node lives.
+  0.39-0.65x the nodes of the V_d searches, 0.60-0.76x their CPU per sum
+  at N >= 11.7k, for 12-35% of the search's cycles (`-DCLASS_PROF`;
+  research/ideas.md, "Class support in the V_d searches");
 - branching on the unmatched cell with the fewest candidates, ties broken by
   the smallest label; the counts are exact (saturating byte counters) with
   AVX-512BW and up to 512 labels (256 on the matrix path), where the cell is

@@ -71,6 +71,7 @@ void search_opts_default(search_opts_t *o) {
   o->top_root_only = 0;
   o->r1_list = NULL;
   o->r1_nlist = 0;
+  o->class_support = 0;
 }
 
 /*
@@ -252,6 +253,19 @@ typedef struct {
     double t, t2, q, q2, nodes;
   } r1s[8];
   uint32_t *r1_list, r1_nlist;
+  /* class support (opts.class_support; CLASS_SUP in arrange_core.h): the
+   * layers it runs at (bit r + c: the children with r rows and c cols
+   * placed; 0 = off), the number of classes and their labels (the top
+   * ncls) */
+  int cls_np, ncls;
+  uint64_t clsmask[CARRY_WORDS];
+  /* the words of the class labels (cls_whi: of label L - 1, cls_wlo: of the
+   * lowest), the lzcnt of label L - 1 in its word, and the number of class
+   * labels in word cls_whi when they span two words (see CLS_AT), and
+   * per axis the keep masks of the class support's passes */
+  int cls_whi, cls_wlo;
+  long long cls_lz0, cls_nhi;
+  uint8_t *clskm[2];
 } sstate_t;
 
 static inline bool bit_get(const uint64_t *row, uint32_t u) {
@@ -598,6 +612,37 @@ static void __attribute__((destructor)) cp_print(void) {
 #define CP_PHASE(l, p)
 #endif
 
+#ifdef CLASS_PROF
+/* the cost of the class support (build with -DMAGIC_DEFS=CLASS_PROF;
+ * printed on exit): TSC cycles in CLASS_SUP and in the whole search, its
+ * calls, the dead ones, its passes, and the entries in and dropped (from
+ * the nodes that live) */
+#include <x86intrin.h>
+enum { CLP_ALL, CLP_SEARCH, CLP_N };
+uint64_t clp_cyc[CLP_N], clp_calls, clp_dead, clp_passes, clp_removed, clp_in,
+    clp_npass_hist[2][16];
+static void __attribute__((destructor)) clp_print(void) {
+  if (!clp_calls)
+    return;
+  const double t = (double)clp_cyc[CLP_SEARCH];
+  fprintf(stderr,
+          "class support: %lu calls, %.1f%% dead, %.2f passes, in %.1f "
+          "removed %.1f entries per call; search %.3fG cycles, class %.2f%%, "
+          "%.0f cycles per call\n",
+          (unsigned long)clp_calls, 100.0 * clp_dead / clp_calls,
+          (double)clp_passes / clp_calls, (double)clp_in / clp_calls,
+          (double)clp_removed / (clp_calls - clp_dead + 1e-9), t * 1e-9,
+          100.0 * clp_cyc[CLP_ALL] / t, (double)clp_cyc[CLP_ALL] / clp_calls);
+  fprintf(stderr, "  passes of the live / dead calls:");
+  for (int k = 0; k < 2; k++) {
+    fprintf(stderr, k ? " | dead" : " live");
+    for (int i = 0; i < 16; i++)
+      fprintf(stderr, " %lu", (unsigned long)clp_npass_hist[k][i]);
+  }
+  fprintf(stderr, "\n");
+}
+#endif
+
 /*
  * r1 sampling (search_opts_t r1_*), for timing sums too large to search
  * whole: the root loop runs only the sampled r1, by their global index in
@@ -772,6 +817,18 @@ static void search_root(sstate_t *s, int W_, int carry) {
       ;
     if (s->r1_ns && s->opts.r1_log)
       fprintf(s->opts.r1_log, "# run W %d r1 %u .. %u\n", w, i0, i1);
+#ifdef ARRANGE_DEBUG
+    /* poison the words that a narrower run must not read (they hold the
+     * lists of the wider runs before it) */
+    if (w < W_)
+      for (int d = 0; d <= 2 * s->n + 1; d++) {
+        const size_t off = (size_t)w * s->cap,
+                     len = (size_t)(W_ - w) * s->cap * sizeof(uint64_t);
+        memset(s->vw[d][0] + off, 0xff, len);
+        memset(s->vw[d][1] + off, 0xff, len);
+        memset(s->kidw[d] + off, 0xff, len);
+      }
+#endif
     search_root_w(s, w, i0, i1);
   }
 }
@@ -1175,9 +1232,40 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   if (carry)
     for (int a = 0; a < 2; a++)
       s.ptmask[a] = malloc(s.cap / 8 + 1);
+  /* class support: the top numbers are the classes when every vector has
+   * exactly one of them, i.e. its largest label is a top one and its
+   * second largest is not (checked here; V_d guarantees it). With fewer
+   * than n of them occurring there is no square, and the classes that do
+   * occur are as good as any. Carried path only, with the support filter
+   * (which it extends). */
+  if (carry && opts->class_support > 0 && opts->top_numbers &&
+      opts->n_top == n && ntop > 0 && opts->support && opts->forward_check) {
+    const size_t c0 = L - (size_t)ntop; /* the lowest class label */
+    int ok = 1;
+    for (size_t v = 0; v < count && ok; v++)
+      ok = s.lab[v][0] >= c0 && s.lab[v][1] < c0;
+    if (ok) {
+      s.ncls = ntop;
+      s.cls_np = 1 << 2; /* the (1,1) children */
+      for (size_t x = c0; x < L; x++)
+        s.clsmask[x >> 6] |= (uint64_t)1 << (x & 63);
+      s.cls_whi = (int)((L - 1) >> 6);
+      s.cls_wlo = (int)(c0 >> 6);
+      s.cls_lz0 = 63 - (long long)((L - 1) & 63);
+      s.cls_nhi = (long long)((L - 1) & 63) + 1;
+      for (int a = 0; a < 2; a++)
+        s.clskm[a] = malloc(s.cap / 8 + 2);
+    }
+  }
   double t1 = wall_time();
 
+#ifdef CLASS_PROF
+  const uint64_t clp_t0 = __rdtsc();
+#endif
   search_root(&s, W_, carry);
+#ifdef CLASS_PROF
+  clp_cyc[CLP_SEARCH] += __rdtsc() - clp_t0;
+#endif
 
   free(s.r1_list);
   st.nodes = s.nodes;
@@ -1227,8 +1315,10 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
     free(s.kids[d]);
     free(s.kidw[d]);
   }
-  for (int a = 0; a < 2; a++)
+  for (int a = 0; a < 2; a++) {
     free(s.ptmask[a]);
+    free(s.clskm[a]);
+  }
   free(s.inters0);
   free(s.inters1);
   free(s.has_label);

@@ -42,6 +42,16 @@
 #define CROSS CAT(cross, W)
 #define SUPPORT_AGAIN CAT(support_again, W)
 #define CROSS_CHUNK CAT(cross_chunk, W)
+#define CLS_OF CAT(cls_of, W)
+#define CLS_AT CAT(cls_at, W)
+#define CLS_BOUNDS CAT(cls_bounds, W)
+#define CLS_LANEMASK CAT(cls_lanemask, W)
+#define CLS_REDUCE CAT(cls_reduce, W)
+#define CLS_UNIONS CAT(cls_unions, W)
+#define CLS_COMPACT CAT(cls_compact, W)
+#define CLS_LOOP CAT(cls_loop, W)
+#define CLASS_PASS CAT(class_pass, W)
+#define CLASS_SUP CAT(class_sup, W)
 
 /* whether the candidate lists carry their bitsets (see vw in arrange.c) */
 #if W <= CARRY_MAX_W
@@ -1083,6 +1093,455 @@ static __attribute__((noinline)) int SUPPORT_AGAIN(sstate_t *s, int d,
                                                    int a) {
   return SUPPORT(s, d, a, 1);
 }
+
+/*
+ * Class support for the V_d searches (opts.class_support; see arrange.h),
+ * at the children with one row and one col placed. Every vector has
+ * exactly one class label (the top ncls labels; class c is label
+ * L - 1 - c), and the rows (cols) of a square have the n classes. A row
+ * of class j meets the col of class j at label j, and every other col at a
+ * cell outside the class labels. So in any completion of a node, for a
+ * candidate x of axis a and class j, with oa the other axis and C the
+ * cells of its placed vectors:
+ *   - (bad) the class label of x is in C or in a candidate of oa of class
+ *     j, and each other cell of x in C or in a candidate of oa of another
+ *     class (the support filter, with the classes);
+ *   - (meet) for every class c != j not placed on oa, x meets a candidate of
+ *     oa of class c outside C (the vector of class c of axis oa meets x
+ *     once, at a cell of no placed vector of oa).
+ * The candidate lists are sorted by class (by descending labels, and the
+ * class label is a vector's largest), which the filters keep, so each
+ * class is a block of a list, and the tests of block j of axis a are
+ * unions of the blocks of oa (G[oa][c], per class). The passes alternate
+ * between the axes, axis a first, until neither drops an entry, and the
+ * node is dead when an axis has too few candidates left or an unmatched
+ * cell without one, as in the support filter, checked after every pass
+ * that drops entries. This is the greatest fixpoint, the same in any
+ * order (a test only gets stricter as the lists shrink), so it does not
+ * depend on how the passes are organized:
+ *   - an entry dropped is cleared in its group's keep mask (s->clskm, a
+ *     byte per 8 entries), and the lists are compacted once, if the node
+ *     lives, so the blocks keep their bounds;
+ *   - after the first pass of an axis, a pass tests block j only for the
+ *     cells that became bad and the classes whose cells shrank since (the
+ *     labels lost by the other axis' unions, Lost), among the cells of the
+ *     block's entries: an alive entry passed every older test, and these
+ *     are the only ones it can fail now;
+ *   - the tests of the classes are or-ed per word and the class results
+ *     combined with an unsigned minimum (nonzero iff every class is met),
+ *     8 entries at a time, in loops specialized for the number of classes.
+ * Returns nonzero if the node is dead.
+ */
+
+/* the class of entry i of a carried list (classes: see CLASS_SUP) */
+static inline int CLS_OF(const sstate_t *s, const uint64_t *list, size_t cap,
+                         uint32_t i) {
+  for (int w = W - 1; w >= 0; w--) {
+    const uint64_t t = list[w * cap + i] & s->clsmask[w];
+    if (t)
+      return (int)(s->L - 1 - (64 * w + 63 - __builtin_clzll(t)));
+  }
+  return 0;
+}
+
+/* the class of entry i of a class-sorted list, from the words of the class
+ * labels: cls_whi holds label L - 1, cls_wlo the lowest class label. An r1
+ * run can be narrower than cls_whi (with the plain root: the r1 without the
+ * top label, whose largest label x is a class label all the same), and
+ * then the classes above x are absent from its lists */
+static inline int CLS_AT(const sstate_t *s, const uint64_t *list,
+                         uint32_t i) {
+  const size_t cap = s->cap;
+  const uint64_t hi =
+      s->cls_whi < W ? list[s->cls_whi * cap + i] & s->clsmask[s->cls_whi]
+                     : 0;
+  const uint64_t lo = list[s->cls_wlo * cap + i] & s->clsmask[s->cls_wlo];
+  return hi ? (int)(__builtin_clzll(hi) - s->cls_lz0)
+            : (int)(__builtin_clzll(lo | 1) + s->cls_nhi);
+}
+
+/* the class blocks of a class-sorted list of cnt entries: block c is
+ * [b[c], b[c + 1]); a branchless binary search for the first entry of a
+ * class > c, per c (independent chains, which overlap) */
+static void CLS_BOUNDS(const sstate_t *s, const uint64_t *list, uint32_t cnt,
+                       uint32_t *b) {
+  const int nc = s->ncls;
+  b[0] = 0;
+  b[nc] = cnt;
+  for (int c = 0; c + 1 < nc; c++) {
+    uint32_t base = 0, len = cnt;
+    if (!len) {
+      b[c + 1] = 0;
+      continue;
+    }
+    while (len > 1) {
+      const uint32_t half = len / 2;
+      base = CLS_AT(s, list, base + half) <= c ? base + half : base;
+      len -= half;
+    }
+    b[c + 1] = base + (CLS_AT(s, list, base) <= c);
+  }
+#ifdef ARRANGE_DEBUG
+  /* the list is sorted by class, and every entry has exactly one */
+  for (uint32_t i = 0; i < cnt; i++) {
+    const int c = CLS_OF(s, list, s->cap, i);
+    int t = 0;
+    for (int w = 0; w < W; w++)
+      t += __builtin_popcountll(list[w * s->cap + i] & s->clsmask[w]);
+    if (t != 1 || c >= nc || c != CLS_AT(s, list, i) || i < b[c] ||
+        i >= b[c + 1]) {
+      fprintf(stderr,
+              "CLS_BOUNDS: entry %u of %u (class %d, %d class labels) is not "
+              "in its block\n",
+              i, cnt, c, t);
+      abort();
+    }
+  }
+#endif
+}
+
+/* the lanes of block [b0, b1) in group g (entries 8 g .. 8 g + 7) */
+static inline __mmask8 CLS_LANEMASK(uint32_t b0, uint32_t b1, uint32_t g) {
+  const uint32_t i = 8 * g;
+  const uint32_t lo = b0 > i ? b0 - i : 0, hi = b1 < i + 8 ? b1 - i : 8;
+  return (__mmask8)(((1u << hi) - 1) & ~((1u << lo) - 1));
+}
+
+/* lane w of the result: the or of the 8 lanes of acc[w] (w < W; the other
+ * lanes 0) */
+static inline __m512i CLS_REDUCE(const __m512i *acc) {
+  __m512i a[8];
+  for (int w = 0; w < 8; w++)
+    a[w] = w < W ? acc[w] : _mm512_setzero_si512();
+  return or_lanes8(a);
+}
+
+/* the union of each block of list (G, a register per class with word w in
+ * lane w), every entry alive */
+static void CLS_UNIONS(const sstate_t *s, const uint64_t *list,
+                       const uint32_t *b, __m512i *G) {
+  const size_t cap = s->cap;
+  for (int c = 0; c < s->ncls; c++) {
+    __m512i acc[W];
+    for (int w = 0; w < W; w++)
+      acc[w] = _mm512_setzero_si512();
+    for (uint32_t i = b[c]; i < b[c + 1]; i += 8) {
+      const __mmask8 live =
+          b[c + 1] - i >= 8 ? 0xff : (__mmask8)((1u << (b[c + 1] - i)) - 1);
+      for (int w = 0; w < W; w++)
+        acc[w] = _mm512_or_si512(
+            acc[w], _mm512_maskz_loadu_epi64(live, list + w * cap + i));
+    }
+    G[c] = CLS_REDUCE(acc);
+  }
+}
+
+/* drop the entries of list[0..cnt) outside the keep masks km, in place
+ * (the stores at k <= i overwrite only entries already loaded) */
+static void CLS_COMPACT(const sstate_t *s, uint64_t *list, uint32_t cnt,
+                        const uint8_t *km, uint32_t kept) {
+  const size_t cap = s->cap;
+  uint32_t k = 0, i = 0;
+  /* (the groups before the first drop stay where they are) */
+  for (; i < cnt && km[i >> 3] == 0xff; i += 8)
+    k += 8;
+  for (; i < cnt; i += 8) {
+    const __mmask8 keep = km[i >> 3];
+    for (int w = 0; w < W; w++)
+      _mm512_storeu_si512(list + w * cap + k,
+                          _mm512_maskz_compress_epi64(
+                              keep, _mm512_loadu_si512(list + w * cap + i)));
+    k += (uint32_t)__builtin_popcount(keep);
+  }
+#ifdef ARRANGE_DEBUG
+  if (k != kept) {
+    fprintf(stderr, "CLS_COMPACT: %u entries kept, %u counted\n", k, kept);
+    abort();
+  }
+#else
+  (void)kept;
+#endif
+}
+
+/* the tests of one group g of a block (lanes lm): HB, the bad cells; NT
+ * classes to meet (gx); updates its keep mask, the union acc of the
+ * entries kept and the count of entries dropped */
+#define CLS_GROUP(g, lm)                                                       \
+  do {                                                                         \
+    const __mmask8 al_ = km[g] & (lm);                                         \
+    const uint32_t i_ = 8 * (g);                                               \
+    __m512i x_[W];                                                             \
+    for (int w = 0; w < W; w++)                                                \
+      x_[w] = _mm512_loadu_si512(list + w * cap + i_);                         \
+    __mmask8 keep_ = al_;                                                      \
+    if (HB) {                                                                  \
+      __m512i t_ = _mm512_and_si512(x_[0], _mm512_set1_epi64((long long)bad[0])); \
+      for (int w = 1; w < W; w++)                                              \
+        t_ = _mm512_ternarylogic_epi64(                                        \
+            t_, x_[w], _mm512_set1_epi64((long long)bad[w]), 0xF8);            \
+      keep_ = _mm512_mask_testn_epi64_mask(keep_, t_, t_);                     \
+    }                                                                          \
+    if (NT) {                                                                  \
+      __m512i m_ = _mm512_setzero_si512();                                     \
+      for (int k = 0; k < NT; k++) {                                           \
+        __m512i h_ = _mm512_and_si512(x_[0],                                   \
+                                      _mm512_set1_epi64((long long)gx[k][0])); \
+        for (int w = 1; w < W; w++)                                            \
+          h_ = _mm512_ternarylogic_epi64(                                      \
+              h_, x_[w], _mm512_set1_epi64((long long)gx[k][w]), 0xF8);        \
+        m_ = k ? _mm512_min_epu64(m_, h_) : h_;                                \
+      }                                                                        \
+      keep_ = _mm512_mask_test_epi64_mask(keep_, m_, m_);                      \
+    }                                                                          \
+    for (int w = 0; w < W; w++)                                                \
+      acc[w] = _mm512_mask_or_epi64(acc[w], keep_, acc[w], x_[w]);             \
+    km[g] = (uint8_t)(km[g] & (keep_ | (uint8_t)~(lm)));                       \
+    rem += (uint32_t)(__builtin_popcount(al_) - __builtin_popcount(keep_));    \
+  } while (0)
+
+/* the tests of block [b0, b1) of list (keep masks km), specialized for NT
+ * classes and HB: acc[w] gets the union of word w of the entries kept (in
+ * 8 lanes); returns the number dropped */
+static inline __attribute__((always_inline)) uint32_t
+CLS_LOOP(const uint64_t *list, size_t cap, uint8_t *km, uint32_t b0,
+         uint32_t b1, const uint64_t *bad, uint64_t (*gx)[8],
+         const int NT, const int HB, __m512i *acc) {
+  for (int w = 0; w < W; w++)
+    acc[w] = _mm512_setzero_si512();
+  uint32_t rem = 0;
+  const uint32_t g0 = b0 >> 3, g1 = (b1 - 1) >> 3;
+  const __mmask8 lm0 = CLS_LANEMASK(b0, b1, g0), lm1 = CLS_LANEMASK(b0, b1, g1);
+  if (g0 == g1) {
+    CLS_GROUP(g0, lm0 & lm1);
+  } else {
+    CLS_GROUP(g0, lm0);
+    for (uint32_t g = g0 + 1; g < g1; g++)
+      CLS_GROUP(g, 0xff);
+    CLS_GROUP(g1, lm1);
+  }
+  return rem;
+}
+#undef CLS_GROUP
+
+/*
+ * One pass of the class support over the list of axis a (blocks b, keep
+ * masks s->clskm[a]) against the other axis' unions G[oa]: full (every
+ * test; the first pass of the axis) or incremental (only the tests an
+ * alive entry can fail since the axis' last pass, from Lost[oa]). Updates
+ * the keep masks, G[a] and Lost[a]; returns the number of entries dropped.
+ * G and Lost: a register per class, word w in lane w.
+ */
+static uint32_t CLASS_PASS(sstate_t *s, int d, int a, int full, int uvalid,
+                           int pcls_oa, const uint32_t *b,
+                           __m512i (*G)[SQ_MAX_N], __m512i (*Lost)[SQ_MAX_N]) {
+  const int nc = s->ncls, oa = 1 - a;
+  const size_t cap = s->cap;
+  const uint64_t *list = s->vw[d][a];
+  uint8_t *km = s->clskm[a];
+  const __mmask8 wm = (__mmask8)((1u << W) - 1);
+  const __m512i Cz = _mm512_maskz_loadu_epi64(wm, s->cells[d][oa]),
+                cmz = _mm512_maskz_loadu_epi64(wm, s->clsmask);
+  /* per class c of oa: its cells to meet (GX), whether it has any, and the
+   * unions of the other classes' G and Lost (prefix and suffix ors) */
+  __m512i GX[SQ_MAX_N], LX[SQ_MAX_N], GO[SQ_MAX_N], LO[SQ_MAX_N];
+  int anyc = 0;
+  __m512i pg = _mm512_setzero_si512(), pl = pg;
+  for (int c = 0; c < nc; c++) {
+    GO[c] = pg;
+    LO[c] = pl;
+    pg = _mm512_or_si512(pg, G[oa][c]);
+    pl = _mm512_or_si512(pl, Lost[oa][c]);
+    GX[c] = _mm512_andnot_si512(Cz, G[oa][c]);
+    LX[c] = _mm512_andnot_si512(Cz, Lost[oa][c]);
+    anyc |= (_mm512_test_epi64_mask(GX[c], GX[c]) != 0) << c;
+  }
+  pg = pl = _mm512_setzero_si512();
+  for (int c = nc - 1; c >= 0; c--) {
+    GO[c] = _mm512_or_si512(GO[c], pg);
+    LO[c] = _mm512_or_si512(LO[c], pl);
+    pg = _mm512_or_si512(pg, G[oa][c]);
+    pl = _mm512_or_si512(pl, Lost[oa][c]);
+  }
+  const int avail = ((1 << nc) - 1) & ~pcls_oa;
+  uint32_t removed = 0;
+  for (int j = 0; j < nc; j++) {
+    const uint32_t b0 = b[j], b1 = b[j + 1];
+    if (b0 == b1)
+      continue;
+    const int aj = avail & ~(1 << j);
+    /* bad = ~(C | (G_j & cm) | G_other), in lanes < W */
+    __m512i bz = _mm512_maskz_ternarylogic_epi64(
+        wm, _mm512_or_si512(Cz, GO[j]), G[oa][j], cmz, 0x07);
+    int tests = aj;
+    if (uvalid) /* (only the bad cells the block's entries have) */
+      bz = _mm512_and_si512(bz, G[a][j]);
+    if (!full) {
+      /* the cells that became bad and the classes that lost cells, among
+       * the cells of the block's entries U */
+      const __m512i Uz = G[a][j];
+      bz = _mm512_and_si512(
+          bz, _mm512_or_si512(LO[j], _mm512_and_si512(Lost[oa][j], cmz)));
+      int lost = 0;
+      for (int c = 0; c < nc; c++)
+        lost |= (_mm512_test_epi64_mask(LX[c], Uz) != 0) << c;
+      tests &= lost;
+    }
+    const int hb = _mm512_test_epi64_mask(bz, bz) != 0;
+    uint32_t rem = 0;
+    __m512i gn = _mm512_setzero_si512(), acc[W];
+    if (aj & ~anyc) {
+      /* some class to meet has no candidate: the block goes */
+      for (uint32_t g = b0 >> 3; g <= (b1 - 1) >> 3; g++) {
+        const __mmask8 lm = CLS_LANEMASK(b0, b1, g);
+        rem += (uint32_t)__builtin_popcount(km[g] & lm);
+        km[g] = (uint8_t)(km[g] & ~lm);
+      }
+    } else if (!full && !hb && !tests) {
+      continue; /* nothing that block j's entries meet has changed */
+    } else {
+      uint64_t bad[8] __attribute__((aligned(64)));
+      uint64_t gx[SQ_MAX_N][8] __attribute__((aligned(64)));
+      _mm512_store_si512(bad, bz);
+      int nt = 0;
+      for (int c = 0; c < nc; c++)
+        if (tests >> c & 1)
+          _mm512_store_si512(gx[nt++], GX[c]);
+#define CLS_CASE(k)                                                            \
+  case k:                                                                      \
+    rem = hb ? CLS_LOOP(list, cap, km, b0, b1, bad, gx, k, 1, acc)             \
+             : CLS_LOOP(list, cap, km, b0, b1, bad, gx, k, 0, acc);            \
+    break;
+      switch (nt) {
+        CLS_CASE(0)
+        CLS_CASE(1)
+        CLS_CASE(2)
+        CLS_CASE(3)
+        CLS_CASE(4)
+        CLS_CASE(5)
+        CLS_CASE(6)
+      default:
+        CLS_CASE(7)
+      }
+#undef CLS_CASE
+      if (!full && !rem)
+        continue;
+      gn = CLS_REDUCE(acc);
+    }
+    Lost[a][j] = _mm512_ternarylogic_epi64(Lost[a][j], G[a][j], gn, 0xF4);
+    G[a][j] = gn;
+    removed += rem;
+  }
+  return removed;
+}
+
+#ifdef CLASS_PROF
+#define CLASS_SUP_IMPL CAT(class_sup_impl, W)
+static int CLASS_SUP_IMPL(sstate_t *s, int d, int a);
+static __attribute__((noinline)) int CLASS_SUP(sstate_t *s, int d, int a) {
+  const uint64_t t0 = __rdtsc();
+  clp_calls++;
+  const uint32_t k0 = s->nvalid[d][ROW] + s->nvalid[d][COL];
+  clp_in += k0;
+  const int r = CLASS_SUP_IMPL(s, d, a);
+  clp_dead += r != 0;
+  if (!r)
+    clp_removed += k0 - (s->nvalid[d][ROW] + s->nvalid[d][COL]);
+  clp_cyc[CLP_ALL] += __rdtsc() - t0;
+  return r;
+}
+static inline __attribute__((always_inline)) int CLASS_SUP_IMPL(sstate_t *s,
+                                                                int d, int a) {
+#else
+static __attribute__((noinline)) int CLASS_SUP(sstate_t *s, int d, int a) {
+#endif
+  const int n = s->n, nc = s->ncls;
+  const __mmask8 wm = (__mmask8)((1u << W) - 1);
+  /* per axis: the class blocks, the entries alive, and per class the union
+   * of the alive entries (G) and the labels it lost since the last pass
+   * over the other axis (Lost) */
+  __m512i G[2][SQ_MAX_N], Lost[2][SQ_MAX_N];
+  uint32_t bnd[2][SQ_MAX_N + 1], alive[2];
+  int pcls[2] = {0, 0}, changed[2] = {0, 0};
+  for (int ax = 0; ax < 2; ax++) {
+    for (int q = 0; q < s->np[ax]; q++) {
+      const uint64_t *pw = s->placedw[ax][q];
+      for (int w = W - 1; w >= 0; w--)
+        if (pw[w] & s->clsmask[w]) {
+          pcls[ax] |= 1 << (int)(s->L - 1 -
+                                 (64 * w + 63 -
+                                  __builtin_clzll(pw[w] & s->clsmask[w])));
+          break;
+        }
+    }
+    const uint32_t cnt = s->nvalid[d][ax];
+    CLS_BOUNDS(s, s->vw[d][ax], cnt, bnd[ax]);
+    alive[ax] = cnt;
+    uint8_t *km = s->clskm[ax];
+    memset(km, 0xff, (cnt + 7) / 8);
+    if (cnt & 7)
+      km[cnt / 8] = (uint8_t)((1u << (cnt & 7)) - 1);
+    for (int c = 0; c < nc; c++)
+      G[ax][c] = Lost[ax][c] = _mm512_setzero_si512();
+  }
+  CLS_UNIONS(s, s->vw[d][1 - a], bnd[1 - a], G[1 - a]);
+  const int a0 = a;
+#ifdef CLASS_PROF
+  int npass = 0;
+#endif
+  int full[2] = {1, 1}, quiet = 0;
+  while (quiet < 2) {
+#ifdef CLASS_PROF
+    clp_passes++;
+    npass++;
+#endif
+    const int oa = 1 - a;
+    /* (G[a] holds the unions of a's blocks after the first pass of a,
+     * and those of oa from the start) */
+    const uint32_t removed = CLASS_PASS(s, d, a, full[a], !full[a] || a != a0,
+                                        pcls[oa], bnd[a], G, Lost);
+    for (int c = 0; c < nc; c++)
+      Lost[oa][c] = _mm512_setzero_si512();
+    full[a] = 0;
+    if (!removed) {
+      quiet++;
+    } else {
+      quiet = 1;
+      changed[a] = 1;
+      alive[a] -= removed;
+      /* too few candidates, or an unmatched cell of oa without one */
+      __m512i un = _mm512_setzero_si512();
+      for (int c = 0; c < nc; c++)
+        un = _mm512_or_si512(un, G[a][c]);
+      const __m512i C = _mm512_maskz_loadu_epi64(wm, s->cells[d][oa]),
+                    Ca = _mm512_maskz_loadu_epi64(wm, s->cells[d][a]);
+      const __m512i unm = _mm512_ternarylogic_epi64(C, Ca, un, 0x10);
+      if (s->np[a] + (int)alive[a] < n || _mm512_test_epi64_mask(unm, unm)) {
+#ifdef CLASS_PROF
+        clp_npass_hist[1][npass < 16 ? npass : 15]++;
+#endif
+        return 1;
+      }
+    }
+    a = oa;
+  }
+  /* the node lives: the lists without the dropped entries */
+  for (int ax = 0; ax < 2; ax++)
+    if (changed[ax]) {
+      CLS_COMPACT(s, s->vw[d][ax], s->nvalid[d][ax], s->clskm[ax], alive[ax]);
+      s->nvalid[d][ax] = alive[ax];
+      __m512i un = _mm512_setzero_si512();
+      for (int c = 0; c < nc; c++)
+        un = _mm512_or_si512(un, G[ax][c]);
+      _mm512_mask_storeu_epi64(s->uni[d][ax], wm, un);
+    }
+#ifdef CLASS_PROF
+  clp_npass_hist[0][npass < 16 ? npass : 15]++;
+#endif
+  return 0;
+}
+#ifdef CLASS_SUP_IMPL
+#undef CLASS_SUP_IMPL
+#endif
 #endif
 
 static void SEARCH_REC(sstate_t *s, int d);
@@ -1303,6 +1762,9 @@ static inline TRY_CHILD_INLINE void TRY_CHILD(sstate_t *s, int d, int b,
         CP_WHY(CD_AFTER);
       }
     }
+    /* class support (opts.class_support) */
+    if (!dead && (s->cls_np >> (s->np[ROW] + s->np[COL]) & 1))
+      dead = CLASS_SUP(s, d + 1, o);
     if (!dead) {
       /* the child survives: count the labels of its lists, for the cells
        * each list covers (the unmatched cells of the other axis); only
@@ -1632,6 +2094,16 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
 #undef CROSS
 #undef SUPPORT_AGAIN
 #undef CROSS_CHUNK
+#undef CLS_OF
+#undef CLS_AT
+#undef CLS_BOUNDS
+#undef CLS_LANEMASK
+#undef CLS_REDUCE
+#undef CLS_UNIONS
+#undef CLS_COMPACT
+#undef CLS_LOOP
+#undef CLASS_PASS
+#undef CLASS_SUP
 #undef TRY_CHILD_INLINE
 #undef CROSS_SIMD
 #undef COUNT_BYTES

@@ -35,9 +35,10 @@
  *                     get the plain search
  *   --diag-first-min-n N0   default 5000, about where d-first and the
  *                     plain search cost the same per sum (d-first / plain
- *                     CPU: 1.25x at N = 4.1k, 0.65x at 6.7k, 0.57x at
- *                     7.6k, 0.55x at 11.7k, 0.42-0.47x at 15-21k, 0.29x at
- *                     23k, 0.32-0.43x at 21-32k with > 256 labels;
+ *                     CPU, with the class support: 1.24x at N = 4.1k,
+ *                     0.53x at 6.7k, 0.51x at 7.6k, 0.38x at 11.7k,
+ *                     0.32-0.34x at 15-16k, 0.20-0.28x at 21-23k,
+ *                     0.19-0.31x at 21-32k with > 256 labels;
  *                     research/ideas.md)
  *   --d-stride k, --d-offset o   search only d = lo + o, lo + o + k, ...
  *                     (an unbiased sample; o defaults to a random offset
@@ -55,6 +56,10 @@
  *   --d-plain-root    search all of V_d's first rows, not only those through
  *                     d's rarest number (as bin/dsearch; see
  *                     dfirst_set_top_root)
+ *   --no-class-support   without the class support of the V_d searches
+ *                     (search_opts_t class_support, on by default with
+ *                     --diag-first: 0.60-0.76x the CPU per sum at N >=
+ *                     11.7k; the same pairs, for A/B runs)
  *   --calib-r1-stride k   for each d-first sum, also run the plain search
  *                     on every k-th first row r1 (random offset), which
  *                     estimates the sum's semi-magic squares and plain time
@@ -532,6 +537,7 @@ int main(int argc, char *argv[]) {
   const char *d_log_file = NULL;
   uint32_t calib_stride = 0;
   int d_top_root = 1; /* see dfirst_set_top_root */
+  int d_class_support = 1; /* search_opts_t class_support in V_d */
   const char *dfirst_opt = NULL; /* a d-first option given (for the check) */
   /* r1 sampling of the plain search */
   uint32_t r1_stride = 0, r1_strata[8];
@@ -557,6 +563,7 @@ int main(int argc, char *argv[]) {
       {"r1-log", required_argument, 0, 1011},
       {"sample-seed", required_argument, 0, 1012},
       {"d-plain-root", no_argument, 0, 1013},
+      {"no-class-support", no_argument, 0, 1014},
       {"vec-size", required_argument, 0, 'n'},
       {"min-sum", required_argument, 0, 'a'},
       {"max-sum", required_argument, 0, 'b'},
@@ -698,6 +705,10 @@ int main(int argc, char *argv[]) {
       d_top_root = 0;
       dfirst_opt = "d-plain-root";
       break;
+    case 1014:
+      d_class_support = 0;
+      dfirst_opt = "no-class-support";
+      break;
     default:
       return 2;
     }
@@ -713,7 +724,7 @@ int main(int argc, char *argv[]) {
             "[--no-cross] [--pretest-min K]\n"
             "  [--diag-first [--diag-first-min-n N0] [--d-stride k] "
             "[--d-offset o] [--d-range lo:hi] [--d-chunk C] [--d-log FILE] "
-            "[--d-plain-root] [--calib-r1-stride k]]\n"
+            "[--d-plain-root] [--no-class-support] [--calib-r1-stride k]]\n"
             "  [--r1-stride k] [--r1-offset o] [--r1-strata k1,k2,..] "
             "[--r1-log FILE] [--sample-seed X]\n"
             "  e1 e2 ...   (P = 2^e1 3^e2 5^e3 ...; see the header of "
@@ -724,6 +735,8 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "msearch: --%s needs --diag-first\n", dfirst_opt);
     return 2;
   }
+  /* (a no-op outside the V_d searches: it needs their top numbers) */
+  opts.class_support = diag_first && d_class_support;
 
   FILE *out = stdout;
   if (out_file) {

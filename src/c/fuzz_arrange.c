@@ -897,6 +897,9 @@ typedef struct {
   int fc, mrv, support, min_words, gather, cross;
   int fixw;    /* 1: opts.r1_width = 0 (every r1 at the width of all labels) */
   int pretest; /* opts.pretest_min: 0 = the default, -1 = never */
+  int cls;     /* opts.class_support (only the V_d searches of --dfirst have
+                  top numbers; the plain fuzz skips these variants unless
+                  --variants selects them) */
 } variant_t;
 static const variant_t variants[] = {
     {"default", 1, 1, 1, 0, 0, 1},  {"nofc", 0, 1, 1, 0, 0, 1},
@@ -928,6 +931,24 @@ static const variant_t variants[] = {
     {"pt_4_w7_fixw", 1, 1, 1, 7, 0, 1, 1, 4},
     {"pt_2_w8_xcross", 1, 1, 1, 8, 0, 2, 0, 2},
     {"pt_5_w8_fixw", 1, 1, 1, 8, 0, 1, 1, 5},
+    /* the class support of the V_d searches (--dfirst), with the other
+     * options: forced widths, the pretest from other depths, cross support
+     * everywhere or nowhere, without MRV; without the support filter or
+     * forward checking it is off */
+    {"cls", 1, 1, 1, 0, 0, 1, 0, 0, 1},
+    {"cls_w3", 1, 1, 1, 3, 0, 1, 0, 0, 1},
+    {"cls_w4_fixw", 1, 1, 1, 4, 0, 1, 1, 0, 1},
+    {"cls_w5", 1, 1, 1, 5, 0, 1, 0, 0, 1},
+    {"cls_w8_fixw", 1, 1, 1, 8, 0, 1, 1, 0, 1},
+    {"cls_nomrv", 1, 0, 1, 0, 0, 1, 0, 0, 1},
+    {"cls_xcross", 1, 1, 1, 0, 0, 2, 0, 0, 1},
+    {"cls_nocross", 1, 1, 1, 0, 0, 0, 0, 0, 1},
+    {"cls_pt_off", 1, 1, 1, 0, 0, 1, 0, -1, 1},
+    {"cls_pt_1", 1, 1, 1, 0, 0, 1, 0, 1, 1},
+    {"cls_pt_2_w6", 1, 1, 1, 6, 0, 1, 0, 2, 1},
+    {"cls_pt_3_w7_fixw", 1, 1, 1, 7, 0, 1, 1, 3, 1},
+    {"cls_nosup", 1, 1, 0, 0, 0, 1, 0, 0, 1},
+    {"cls_nofc", 0, 1, 1, 0, 0, 1, 0, 0, 1},
 };
 #define NVAR (int)(sizeof(variants) / sizeof(variants[0]))
 
@@ -956,6 +977,12 @@ static void dump(const char *path, uint64_t seed) {
  * which brute force computes from all pairs of the square's traversals in
  * the set. The planted square must be reported twice and flagged both
  * times; a d-stride 3 split (offsets 0, 1, 2) must add up to the same.
+ * Each seed runs the default options, the default options with the class
+ * support (search_opts_t class_support), and one variant in turn (of
+ * those --variants selects; the cls_* variants have the class support).
+ * With --diff (where the oracle exceeds its budget) or --noracle, the
+ * squares of the plain search with the default options stand in for the
+ * oracle's.
  */
 typedef struct {
   canon_t sq;
@@ -1358,17 +1385,50 @@ int main(int argc, char **argv) {
       vec_list_push(&l, e);
     }
     if (dfirst) {
-      if (have_oracle != 1) {
+      if (have_oracle != 1 && !diff) {
         skipped++;
         ran--;
         vec_list_free(&l);
         continue;
       }
-      /* the default options, and one other option set in turn */
+      if (have_oracle != 1) {
+        /* --diff / --noracle: the squares of the plain search with the
+         * default options are the reference (as in the plain fuzz) */
+        search_opts_t o0;
+        search_opts_default(&o0);
+        found.k = 0;
+        invalid = 0;
+        canon_len = 2 * n * n;
+        const search_stats_t st0 = search_vectors(&l, 0, l.count, &o0, cb, NULL);
+        if (found.k)
+          qsort(found.a, found.k, sizeof(canon_t), cmp_canon);
+        oracle_out.k = 0;
+        for (int i = 0; i < found.k; i++)
+          if (i == 0 || cmp_canon(&found.a[i - 1], &found.a[i]) != 0)
+            cl_push(&oracle_out, &found.a[i]);
+        if (st0.truncated || invalid) {
+          fails++;
+          printf("REFERENCE FAILED seed %lu: truncated %d invalid %d\n",
+                 (unsigned long)seed, st0.truncated, invalid);
+        }
+      }
+      /* the default options, with the class support, and one other
+       * option set in turn (of those --variants selects) */
       search_opts_t o;
       search_opts_default(&o);
       fails += dfirst_check(seed, &l, &o, "default", 1);
+      o.class_support = 1;
+      fails += dfirst_check(seed, &l, &o, "default_cls", 1);
+      search_opts_default(&o);
       const variant_t *V = &variants[seed % NVAR];
+      if (varsel) {
+        int sel[NVAR], nsel = 0;
+        for (int vi = 0; vi < NVAR; vi++)
+          if (strstr(varsel, variants[vi].name))
+            sel[nsel++] = vi;
+        if (nsel)
+          V = &variants[sel[seed % nsel]];
+      }
       o.forward_check = V->fc;
       o.mrv = V->mrv;
       o.support = V->support;
@@ -1378,7 +1438,10 @@ int main(int argc, char **argv) {
       o.r1_width = !V->fixw;
       if (V->pretest)
         o.pretest_min = V->pretest > 0 ? V->pretest : 0;
-      fails += dfirst_check(seed, &l, &o, V->name, (int)(seed / NVAR % 2));
+      o.class_support = V->cls;
+      /* (the class support needs the top root's top numbers) */
+      fails += dfirst_check(seed, &l, &o, V->name,
+                            V->cls ? 1 : (int)(seed / NVAR % 2));
       total_sq += oracle_out.k;
       inst_with_sq += oracle_out.k > 0;
       vec_list_free(&l);
@@ -1399,7 +1462,7 @@ int main(int argc, char **argv) {
     int labels = -1;
     for (int vi = 0; vi < NVAR; vi++) {
       const variant_t *V = &variants[vi];
-      if (varsel && !strstr(varsel, V->name))
+      if (varsel ? !strstr(varsel, V->name) : V->cls)
         continue;
       search_opts_t o;
       search_opts_default(&o);
@@ -1412,6 +1475,7 @@ int main(int argc, char **argv) {
       o.r1_width = !V->fixw;
       if (V->pretest)
         o.pretest_min = V->pretest > 0 ? V->pretest : 0;
+      o.class_support = V->cls; /* (a no-op: no top numbers) */
       found.k = 0;
       invalid = 0;
       double t1 = now();

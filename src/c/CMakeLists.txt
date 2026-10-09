@@ -145,16 +145,27 @@ add_test(NAME fast_fuzz_dfirst COMMAND fuzz_arrange --dfirst 1 150
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME fast_fuzz_dfirst_matrices COMMAND fuzz_arrange_matrices --dfirst 5000 60
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+# the class support of the V_d searches through the API with the plain
+# root, whose r1 runs can be narrower than the class labels; built with
+# ARRANGE_DEBUG (the class blocks are checked, and the words a narrower run
+# must not read are poisoned)
+add_executable(class_support_test class_support_test.c enumerate.c arrange.c square.c)
+target_compile_definitions(class_support_test PRIVATE ARRANGE_DEBUG)
+target_link_libraries(class_support_test m)
+add_test(NAME fast_class_support_plain_root COMMAND class_support_test 1 400)
 # msearch --diag-first finds the one (square, SP traversal) pair of
 # P = 2^16 3^5 5^4 7^2, S = 849 (as bin/dsearch does)
 add_test(NAME fast_msearch_dfirst_849 COMMAND sh -c
   "$<TARGET_FILE:msearch> --diag-first --diag-first-min-n 0 --sums 849 16 5 4 2 | grep -c '\"type\":\"dsquare\"' | grep -qx 1")
+# ... also without the class support of the V_d searches
+add_test(NAME fast_msearch_dfirst_849_no_class_support COMMAND sh -c
+  "$<TARGET_FILE:msearch> --diag-first --diag-first-min-n 0 --no-class-support --sums 849 16 5 4 2 | grep -c '\"type\":\"dsquare\"' | grep -qx 1")
 # msearch ignores bench's SAMPLE_* environment (a leftover export must not
 # turn scheduler units into sampled runs), and rejects malformed options
 add_test(NAME fast_msearch_no_sample_env COMMAND sh -c
   "SAMPLE_STRIDE=3 SAMPLE_LOG=/dev/null $<TARGET_FILE:msearch> --sums 327 10 4 3 2 | grep -c '\"type\":\"square\"' | grep -qx 1")
 add_test(NAME fast_msearch_bad_args COMMAND sh -c
-  "m=$<TARGET_FILE:msearch>; for a in '--diag-first --d-range 5:3' '--diag-first --d-range x' '--d-stride 3' '--calib-r1-stride 2' '--r1-strata 1,2,3,4,5,6,7,8,9' '--min-sum 3x' '--diag-first --diag-first-min-n abc' '--diag-first --d-log /nonexistent/x'; do $m $a --sums 327 10 4 3 2 > /dev/null 2>&1; [ $? -eq 2 ] || { echo \"accepted: $a\"; exit 1; }; done")
+  "m=$<TARGET_FILE:msearch>; for a in '--diag-first --d-range 5:3' '--diag-first --d-range x' '--d-stride 3' '--calib-r1-stride 2' '--r1-strata 1,2,3,4,5,6,7,8,9' '--min-sum 3x' '--diag-first --diag-first-min-n abc' '--diag-first --d-log /nonexistent/x' '--no-class-support'; do $m $a --sums 327 10 4 3 2 > /dev/null 2>&1; [ $? -eq 2 ] || { echo \"accepted: $a\"; exit 1; }; done")
 # saturated byte counters at the node below r1 (every unmatched cell in
 # >= 255 candidates, so the cell is chosen among the saturated counts; the
 # oracle is too slow there, so the variants are compared with each other,
