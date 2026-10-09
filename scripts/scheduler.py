@@ -38,7 +38,17 @@ below stops growing at N ~ 5.5k). On top of it:
     engine on the process CPU time msearch reports ("cpu"), learning only an
     intercept, the step and the band offsets (the shape stays at the
     prior: a refit dominated by cheap small sums mispredicted the large
-    ones by 1.4-2x).
+    ones by 1.4-2x);
+  * d-first units (--dfirst auto, the default): a sum is searched
+    diagonal-first (msearch --diag-first, which finds every magic square
+    but not the other semi-magic squares) where the d-first time law
+    (amodel.DFIRST_TIME_PRIOR, its level learned online) plus a plain
+    calibration stream of ~7% of it (--calib-r1-stride k, whose sampled
+    squares enter the class and per-P factors, weighted) is below the plain
+    law: in practice from N' ~ 4-9k on. A d-first sum longer than 1.5 units
+    is split into units of d (--d-range lo:hi); the summary merges their
+    "dchunk" records and the planner continues a sum from its first d not
+    searched, crediting a part with its share of the sum's CPU and E.
 The candidates are a wide pool (scripts/pool.py, --pool wide): every
 exponent assignment over 2..29 with S0 = 6 P^(1/6) <= 6000, tau >= 1000,
 4-10 primes and (P / P_sorted)^(1/6) <= 1.2 (377,908 P), since most of the
@@ -108,7 +118,8 @@ usage:
     scheduler.py compact                  gzip finished unit files
 Global options (before the command): --state DIR, --vec-size N. Model and
 pool options (after the command): --model, --pool, --pool-ratio,
---pool-s0-max, --pool-primes, --tau-min, --explore, --profile-workers.
+--pool-s0-max, --pool-primes, --tau-min, --explore, --profile-workers;
+d-first (analytic): --dfirst {auto,off,on}, --dfirst-min-n, --calib-frac.
 Needs numpy (always for analytic; for `fit` and refits with regression).
 """
 import argparse
@@ -1379,6 +1390,41 @@ PHI_SUM = 2.5
 SELECTION_DISCOUNT = 0.8
 EXPLORE_V2 = 0.0            # optimism: posterior mean + EXPLORE * sd
 
+# d-first units (msearch --diag-first; research/scheduler-v2.md, "d-first
+# units"). --dfirst auto: a sum is searched d-first where the d-first law's
+# time plus its calibration stream is below the plain law's, and its N' >=
+# --dfirst-min-n (the d-first law was fitted at N' >= 4k; in practice auto
+# switches at N' ~ 5k).
+DFIRST_POLICIES = ("auto", "off", "on")
+DFIRST_MIN_NP = 2000.0
+# the calibration stream of a d-first sum (--calib-r1-stride k, a plain
+# search of every k-th first row: semi-magic squares for the models) costs
+# about this share of the sum's predicted d-first CPU; k = round(t_plain /
+# (CALIB_FRAC t_dfirst)). retrospective.md 7 assumed 10% (T11: 5% gives
+# E x1.01 at 1-1,000 CPU-years); at the frontier's ~10^3 squares per sum
+# and k ~ 15-45 it records 20-60 squares per sum.
+CALIB_FRAC = 0.07
+# a d-first sum predicted to take more than DFIRST_SPLIT x --unit-time is
+# split into units of d (--d-range lo:hi, each ~--unit-time); the last part
+# is extended to the end of the sum rather than leave a tail below
+# DFIRST_TAIL x a unit
+DFIRST_SPLIT = 1.5
+DFIRST_TAIL = 0.25
+# a part of a d-first sum ("dsum" with complete 0) enters the d-first time
+# law when it searched at least this many d (its CPU scaled to the whole sum
+# by the cost profile amodel.DFIRST_COST_PROFILE)
+DFIRST_TIME_MIN_ND = 32
+# ... and its sum has at least this many d (vectors before reduction): the
+# law was fitted at N 4-32k, and below ~2k the overheads outside the d loop
+# (enumeration, process start) dominate
+DFIRST_TIME_MIN_N = 2000
+# the calibration stream's squares enter the squares GLM with their
+# expectation E_sq / k, weighted down by their sampling dispersion phi_s =
+# se_squares^2 / (k est_squares) (squares sharing a first row come
+# together): w = min(1, PHI_SUM / (phi_s + PHI_SUM / k)); phi_s is taken as
+# CALIB_PHI where the stream sampled fewer than 5 squares
+CALIB_PHI = 2.5
+
 
 def ratio_bin(r):
     np = _np()
@@ -1566,20 +1612,27 @@ def fit_time_models(stats, prior=None):
         engine = int(engine)
         st = {k: (np.array(v) if isinstance(v, list) else v) for k, v in stats[key].items()}
         # (engine 3 on: the previous engine's posterior, shifted by
-        # amodel.ENGINE_TIME_SHIFT)
-        base = (am.time_prior(engine, last.get(mode)) if engine >= am.TIME_PRIOR["engine"]
-                else None)
-        tm = am.TimeModel(engine=engine).fit(st, prior=base)
+        # amodel.ENGINE_TIME_SHIFT; the d-first law starts at engine 3 from
+        # amodel.DFIRST_TIME_PRIOR)
+        first = _prior_engine(mode)
+        base = am.time_prior(engine, last.get(mode), mode) if engine >= first else None
+        tm = am.TimeModel(engine=engine, mode=mode).fit(st, prior=base)
         tm.engine = engine
         out[key] = tm
-        if engine >= am.TIME_PRIOR["engine"]:
+        if engine >= first:
             last[mode] = tm
     return out
 
 
+def _prior_engine(mode):
+    am = _am()
+    return (am.DFIRST_TIME_PRIOR if mode == "dfirst" else am.TIME_PRIOR)["engine"]
+
+
 def current_time_model(models, engine=None, mode="plain"):
-    """the time model of the newest engine (at least ENGINE): the fit of
-    that engine, or the posterior of the newest older engine >= 2, or the
+    """the time model of the newest engine (at least ENGINE) for a search
+    mode ("plain", "dfirst"): the fit of that engine, or the posterior of
+    the newest older engine with a prior (>= 2 plain, >= 3 d-first), or the
     shipped prior (either shifted by amodel.ENGINE_TIME_SHIFT, see
     amodel.time_prior)"""
     am = _am()
@@ -1588,10 +1641,10 @@ def current_time_model(models, engine=None, mode="plain"):
     key = f"{engine}:{mode}"
     if key in models:
         return models[key]
-    older = [e for e in engines if am.TIME_PRIOR["engine"] <= e < engine]
+    older = [e for e in engines if _prior_engine(mode) <= e < engine]
     if older:
-        return am.time_prior(engine, models[f"{max(older)}:{mode}"])
-    return am.time_prior(engine)
+        return am.time_prior(engine, models[f"{max(older)}:{mode}"], mode)
+    return am.time_prior(engine, mode=mode)
 
 
 # --------------------------------------------------------------------------
@@ -1859,6 +1912,28 @@ def _merge(intervals):
     return out
 
 
+def _merge_half(intervals):
+    """merge half-open integer intervals [lo, hi) (overlapping or touching)"""
+    out = []
+    for lo, hi in sorted(intervals):
+        if hi <= lo:
+            continue
+        if out and lo <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return out
+
+
+def _covers(iv, nd):
+    """the merged half-open intervals iv cover [0, nd)"""
+    return nd is not None and bool(iv) and iv[0][0] <= 0 and iv[0][1] >= nd
+
+
+def _in_cover(cov, S):
+    return any(lo <= S <= hi for lo, hi in cov)
+
+
 def open_text(path):
     if path.endswith(".gz"):
         import gzip
@@ -1880,8 +1955,9 @@ SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
 # the format of the summary (bump it when update_file / _ingest read the
 # records differently, so that an old summary is rebuilt): 2 = d-first
 # sums (msearch --diag-first); 3 = distinct d-first sums, notable squares
-# deduplicated, the CPU of sampled records
-SUMMARY_VERSION = 3
+# deduplicated, the CPU of sampled records; 4 = the parts of d-first sums
+# merged (dcov), the d-first time law, the calibration streams in the cells
+SUMMARY_VERSION = 4
 
 
 def sum_cpu(r):
@@ -1916,7 +1992,16 @@ class Summary:
                     "cells": [list(NBAND_EDGES), list(XBAND_EDGES), NCELLS]}
         self.files = {}      # basename (without .gz) -> per-file stats
         self.cover = {}      # 'e_e_e' -> merged [[lo, hi], ...]
-        self.perP = {}       # 'e_e_e' -> {"o": [sq, S, P, SP], "cpu", "nsums", "cells": {c: [9]}}
+        # the d-first sums searched in part: 'e_e_e' -> {"S": {"nd": number
+        # of d or None, "iv": merged [[lo, hi), ...] of d searched}}, from
+        # the "dchunk" records (d_stride 1); a sum leaves it for cover once
+        # its parts cover [0, nd)
+        self.dcov = {}
+        # 'e_e_e' -> {"o": [sq, S, P, SP], "cpu", "nsums", "cells": {c: [9]},
+        #  "pcov": merged [[lo, hi]] of the plain sums with a "sum" record,
+        #  "calS": {"S": the calibration stream's contribution [cell, 8
+        #  values] to the cells, or None}, "dfirst_S": [complete d-first S]}
+        self.perP = {}
         self.time = {}       # 'engine:mode' -> {"n", "FF", "Fy", "yy"}
         self.tband = {}      # 'engine:mode:band:W' -> [n, sum of the NT features, sum y]
         self.nbias = {}      # band -> [n, sum, sumsq] of ln(nvecs_raw / N')
@@ -1930,10 +2015,17 @@ class Summary:
                        # sample, a truncated run), their CPU seconds, and
                        # the distinct magic squares found
                        "dfirst_sums": 0, "dfirst_partial": 0, "dfirst_cpu": 0.0,
-                       "dfirst_magic": 0,
-                       # CPU seconds of the sampled records ("csum": r1
-                       # sampling, --calib-r1-stride), in no fit
-                       "sampled_cpu": 0.0}
+                       "dfirst_magic": 0, "dfirst_truncated": 0,
+                       # CPU seconds of the sampled records ("csum" of an
+                       # --r1-* run), in no fit
+                       "sampled_cpu": 0.0,
+                       # calibration streams (--calib-r1-stride, "csum"
+                       # mode calib): sums in the cells, their sampled
+                       # squares, CPU, est_squares and the model's squares
+                       # (x SQ12, before class factors) there, streams of a
+                       # sum already in the cells (not counted again)
+                       "calib_sums": 0, "calib_squares": 0, "calib_cpu": 0.0,
+                       "calib_est": 0.0, "calib_pred": 0.0, "calib_dup": 0}
         self.dirty = False
 
     @staticmethod
@@ -1944,7 +2036,7 @@ class Summary:
             with open(js) as f:
                 d = json.load(f)
             if d.get("tag") == s.tag:
-                for k in ("files", "cover", "time", "tband", "nbias", "lbias", "notable",
+                for k in ("files", "cover", "dcov", "time", "tband", "nbias", "lbias", "notable",
                           "types", "totals"):
                     setattr(s, k, d[k])
                 s.perP = d["perP"]
@@ -1954,7 +2046,8 @@ class Summary:
         return s
 
     def save(self):
-        d = {"tag": self.tag, "files": self.files, "cover": self.cover, "time": self.time,
+        d = {"tag": self.tag, "files": self.files, "cover": self.cover, "dcov": self.dcov,
+             "time": self.time,
              "tband": self.tband, "nbias": self.nbias, "lbias": self.lbias,
              "notable": self.notable, "types": self.types, "totals": self.totals,
              "perP": self.perP}
@@ -2039,6 +2132,10 @@ class Summary:
         # middle of a sum leaves orphan squares, which the rerun of that sum
         # writes again); squares still waiting are kept in st["pending"]
         pending = st.pop("pending", [])
+        # the same for the "csquare" records of a sampled plain search: they
+        # precede their "csum"; those of a calibration stream (csum mode
+        # "calib") are ingested with it, the others are dropped
+        cpend = st.pop("cpending", [])
         for line in data[:end].split(b"\n"):
             if not line:
                 continue
@@ -2061,6 +2158,18 @@ class Summary:
                 h = st.setdefault("holes", {}).setdefault(p_str(norm_p(r["P"]), "_"), [])
                 if r["S"] not in h:
                     h.append(r["S"])
+            if t == "csquare":
+                cpend.append(r)
+                continue
+            if t == "csum":
+                mine = [q for q in cpend if q["S"] == r["S"] and q["P"] == r["P"]]
+                cpend = [q for q in cpend if not (q["S"] == r["S"] and q["P"] == r["P"])]
+                if r.get("mode") == "calib":
+                    # a d-first sum's calibration stream: into the cells
+                    # (see _ingest), not a sampled research record
+                    self.totals["calib_cpu"] += r.get("cpu", 0.0)
+                    recs.setdefault(norm_p(r["P"]), []).append(dict(r, _csq=mine))
+                    continue
             if any(k in r for k in SAMPLED_KEYS):
                 # a sampled search (every k-th first row, research builds):
                 # its counts and times are not those of the sum
@@ -2083,9 +2192,13 @@ class Summary:
             elif r["type"] == "done" and pending:
                 self.totals["orphans"] = self.totals.get("orphans", 0) + len(pending)
                 pending = []
+            if r["type"] == "done":
+                cpend = []
             recs.setdefault(P, []).append(r)
         if pending:
             st["pending"] = pending
+        if cpend:
+            st["cpending"] = cpend
         st["off"] += end
         for P, rs in recs.items():
             self._ingest(P, rs, st, store)
@@ -2102,12 +2215,9 @@ class Summary:
         sums = [r for r in rs if r["type"] == "sum"]
         sqs = [r for r in rs if r["type"] == "square"]
         holes = fst.get("holes", {}).get(key, ())
+        ps = self.perP.setdefault(key, {"o": [0, 0, 0, 0], "cpu": 0.0, "nsums": 0, "cells": {}})
         for r in rs:
             if r["type"] == "sum":
-                cov.append((r["S"], r["S"]))
-            elif r["type"] == "dsum" and r.get("complete"):
-                # a d-first sum searched in full: every magic square of it
-                # found, but no semi-magic squares (see _ingest_dfirst)
                 cov.append((r["S"], r["S"]))
             elif r["type"] == "done":
                 fst["done"] = 1
@@ -2115,9 +2225,25 @@ class Summary:
                 fst["last_sum"] = r["last_sum"]
                 if r["last_sum"] >= r["min_sum"]:
                     cov.extend(split_range(r["min_sum"], r["last_sum"], holes))
+        # d-first sums searched in full: one complete "dsum", or parts (the
+        # "dchunk" records of --d-range units, also of killed ones) that
+        # together cover every d
+        for S in self._dcover(key, ps, rs):
+            cov.append((S, S))
         if cov:
             self.cover[key] = _merge([tuple(x) for x in self.cover.get(key, [])] + cov)
-        ps = self.perP.setdefault(key, {"o": [0, 0, 0, 0], "cpu": 0.0, "nsums": 0, "cells": {}})
+        if sums:
+            # the plain sums (a calibration stream of the same sum is no
+            # longer needed in the cells: the full search replaces it)
+            ps["pcov"] = _merge([tuple(x) for x in ps.get("pcov", [])]
+                                + [(r["S"], r["S"]) for r in sums])
+            dc = self.dcov.get(key)
+            for r in sums:
+                self._uncalib(ps, r["S"])
+                if dc:
+                    dc.pop(str(r["S"]), None)
+            if dc is not None and not dc:
+                self.dcov.pop(key, None)
         for r in sums:
             t = sum_cpu(r)
             ps["cpu"] += t
@@ -2148,20 +2274,26 @@ class Summary:
                 if q.get("hash") is None or kq not in notable_seen:
                     notable_seen.add(kq)
                     self.notable.append(dict(q, P=list(P)))
-        self._ingest_dfirst(P, rs)
-        if not sums and not sqs:
+        self._ingest_dfirst(P, rs, fst)
+        # the parts of d-first sums that teach the d-first time law, and the
+        # calibration streams
+        dsums = [r for r in rs if r["type"] == "dsum" and r.get("d_stride", 1) == 1
+                 and not r.get("truncated") and "cpu" in r
+                 and r.get("nvecs_raw", 0) >= DFIRST_TIME_MIN_N
+                 and r.get("nd", 0) >= min(DFIRST_TIME_MIN_ND, r["nvecs_raw"])]
+        calibs = [r for r in rs if r["type"] == "csum" and "_csq" in r]
+        if not sums and not sqs and not dsums and not calibs:
             return
         try:
             prof = store.get(P)
         except Exception:
             prof = None
-        if prof is None or len(P) > len(am.PRIMES):
+        if prof is None or len(P) > len(am.PRIMES) or not prof[1].any():
             self.totals["outside"] += len(sums)
+            for r in calibs:
+                self._calib_seen(ps, r, None)
             return
         A, v = prof
-        if not v.any():
-            self.totals["outside"] += len(sums)
-            return
         Sg = am.grid_sums(P, self.n)[v]
         k = sum(1 for a in P if a)
         rb = int(ratio_bin(np.float32(am.ratio(P, self.n))))
@@ -2211,22 +2343,58 @@ class Summary:
                 t = sum_cpu(r)
                 if t < 0.01:
                     continue
-                y = math.log(t)
-                tk = f"{engine_of(r)}:{r.get('mode', 'plain')}"
-                nt = am.NT
-                ts = self.time.setdefault(tk, {"n": 0, "FF": [[0.0] * nt for _ in range(nt)],
-                                               "Fy": [0.0] * nt, "yy": 0.0})
-                f = F[i]
-                ts["n"] += 1
-                ts["FF"] = (np.array(ts["FF"]) + np.outer(f, f)).tolist()
-                ts["Fy"] = (np.array(ts["Fy"]) + f * y).tolist()
-                ts["yy"] += y * y
-                W = (max(r["labels"], 1) + 63) // 64
-                tb = self.tband.setdefault(f"{tk}:{band}:{W}", [0.0] * (nt + 2))
-                tb[0] += 1
-                for j in range(nt):
-                    tb[1 + j] += float(f[j])
-                tb[nt + 1] += y
+                self._time_row(f"{engine_of(r)}:{r.get('mode', 'plain')}", F[i], math.log(t),
+                               band, r["labels"])
+        if dsums:
+            # the whole-sum CPU of a part [d_lo, d_lo + nd) of a d-first sum:
+            # its overhead (reduction, enumeration share, the d index) plus
+            # its d loop scaled by the cost profile along d
+            a = at([r["S"] for r in dsums])
+            F = am.time_features(a["lNp"], a["lLraw"], k)
+            for i, r in enumerate(dsums):
+                if not a["inside"][i]:
+                    continue
+                raw = r["nvecs_raw"]
+                frac = am.dfirst_cost_frac(r["d_lo"], min(r["d_lo"] + r["nd"], raw), raw)
+                if frac <= 0:
+                    continue
+                loop = max(r["time"] - r.get("index_time", 0.0), 0.0)
+                t = max(r["cpu"] - loop, 0.0) + loop / frac
+                if t < 0.01:
+                    continue
+                band = NBAND_NAMES[int(np.searchsorted(NBAND_EDGES, raw, side="right"))]
+                self._time_row(f"{engine_of(r)}:dfirst", F[i], math.log(t), band, r["labels"])
+        if calibs:
+            a = at([r["S"] for r in calibs])
+            T = NUM_TRAVERSALS[self.n]
+            for i, r in enumerate(calibs):
+                if not a["inside"][i] or r.get("truncated"):
+                    self._calib_seen(ps, r, None)
+                    continue
+                if not self._calib_seen(ps, r, True):
+                    continue
+                kk = max(int(r.get("r1_stride", 1)), 1)
+                esq = math.exp(a["lEs"][i]) * (am.SQ12 if a["lNp"][i] >= LN12K else 1.0)
+                o = int(r["squares"])
+                est, se = float(r.get("est_squares", o * kk)), float(r.get("se_squares", 0.0))
+                phi = se * se / (kk * est) if o >= 5 and est > 0 and se > 0 else CALIB_PHI
+                w = min(1.0, PHI_SUM / (phi + PHI_SUM / kk))
+                c = int(a["cell"][i])
+                vals = [w * o, w * esq / kk, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                for q in r["_csq"]:
+                    vals[2] += w * q["s_count"]
+                    vals[3] += w * T * math.exp(a["lpS"][i])
+                    vals[4] += w * q["p_count"]
+                    vals[5] += w * T * math.exp(a["lpP"][i])
+                    vals[6] += w * q["sp_count"]
+                    vals[7] += w * T * math.exp(a["lpSP"][i])
+                for j, val in enumerate(vals):
+                    acc(c, 1 + j, val)
+                ps["calS"][str(r["S"])] = [c] + vals
+                self.totals["calib_sums"] += 1
+                self.totals["calib_squares"] += o
+                self.totals["calib_est"] += est
+                self.totals["calib_pred"] += esq
         if sqs:
             a = at([q["S"] for q in sqs])
             T = NUM_TRAVERSALS[self.n]
@@ -2241,37 +2409,131 @@ class Summary:
                 acc(c, 7, q["sp_count"])
                 acc(c, 8, T * math.exp(a["lpSP"][i]))
 
-    def _ingest_dfirst(self, P, rs):
-        """d-first records (msearch --diag-first): a "dsum" per sum and a
-        "dsquare" per (square, SP diagonal) pair. They have no semi-magic
-        squares of the sum (only those with an SP traversal, each once per
-        such traversal), so they stay out of the cells (squares and
-        traversal fits) and of the time law, until the model is taught to
-        use them; their CPU time is counted apart, and their magic squares
-        (a "dsquare" with magic or partner, twice each) join the notable
-        squares once."""
-        ps = self.perP.setdefault(p_str(P, "_"), {"o": [0, 0, 0, 0], "cpu": 0.0, "nsums": 0,
-                                                  "cells": {}})
+    def _time_row(self, tk, f, y, band, labels):
+        np = _np()
+        nt = len(f)
+        ts = self.time.setdefault(tk, {"n": 0, "FF": [[0.0] * nt for _ in range(nt)],
+                                       "Fy": [0.0] * nt, "yy": 0.0})
+        ts["n"] += 1
+        ts["FF"] = (np.array(ts["FF"]) + np.outer(f, f)).tolist()
+        ts["Fy"] = (np.array(ts["Fy"]) + f * y).tolist()
+        ts["yy"] += y * y
+        W = (max(labels, 1) + 63) // 64
+        tb = self.tband.setdefault(f"{tk}:{band}:{W}", [0.0] * (nt + 2))
+        tb[0] += 1
+        for j in range(nt):
+            tb[1 + j] += float(f[j])
+        tb[nt + 1] += y
+
+    def _calib_seen(self, ps, r, use):
+        """record a calibration stream of sum r["S"]; with use, whether its
+        squares may enter the cells: not when the sum already has a stream
+        there or was searched plain (no double counting)"""
+        cal = ps.setdefault("calS", {})
+        S = str(r["S"])
+        if not use:
+            cal.setdefault(S, None)
+            return False
+        if cal.get(S) is not None or _in_cover(ps.get("pcov", ()), r["S"]):
+            self.totals["calib_dup"] += 1
+            return False
+        return True
+
+    def _uncalib(self, ps, S):
+        """a plain search of sum S replaces its calibration stream in the
+        cells"""
+        row = ps.get("calS", {}).get(str(S))
+        if not row:
+            return
+        c, vals = int(row[0]), row[1:]
+        cell = ps["cells"].get(c)
+        if cell is not None:
+            for j, val in enumerate(vals):
+                cell[1 + j] -= val
+        ps["calS"][str(S)] = None
+        self.totals["calib_sums"] -= 1
+
+    def _dcover(self, key, ps, rs):
+        """merge the d-first records of one P into dcov; returns the sums
+        newly searched in full (a complete "dsum", or parts covering every
+        d of the sum, duplicates and overlaps merged; only d_stride 1)"""
+        dc = self.dcov.get(key, {})
+        done = []
+        for r in rs:
+            t = r["type"]
+            if t not in ("dchunk", "dsum"):
+                continue
+            S = r["S"]
+            if t == "dsum" and r.get("complete"):
+                done.append(S)
+                continue
+            if r.get("d_stride", 1) != 1:
+                continue
+            e = dc.setdefault(str(S), {"nd": None, "iv": []})
+            if r.get("nvecs_raw"):
+                e["nd"] = int(r["nvecs_raw"])
+            if t == "dchunk":
+                e["iv"] = _merge_half(e["iv"] + [[r["d_lo"], r["d_hi"]]])
+                # (a V_d that hit --node-limit: counted as searched, like a
+                # truncated plain sum)
+                self.totals["dfirst_truncated"] += int(r.get("truncated", 0))
+            if _covers(e["iv"], e["nd"]):
+                done.append(S)
+        out = []
+        for S in done:
+            dc.pop(str(S), None)
+            fin = ps.setdefault("dfirst_S", [])
+            if S not in fin:
+                fin.append(S)
+                self.totals["dfirst_sums"] += 1
+                out.append(S)
+        if dc:
+            self.dcov[key] = dc
+        else:
+            self.dcov.pop(key, None)
+        return out
+
+    def dfirst_part(self, key, S):
+        """(nd, merged d intervals, share of the sum's d-loop CPU searched)
+        of a d-first sum searched in part, or None"""
+        e = self.dcov.get(key, {}).get(str(S))
+        if not e:
+            return None
+        nd = e["nd"]
+        frac = (sum(_am().dfirst_cost_frac(lo, hi, nd) for lo, hi in e["iv"]) if nd else 0.0)
+        return nd, e["iv"], frac
+
+    def _ingest_dfirst(self, P, rs, fst=None):
+        """d-first records (msearch --diag-first): a "dsum" per sum (or part
+        of one) and a "dsquare" per (square, SP diagonal) pair. They have no
+        semi-magic squares of the sum (only those with an SP traversal, each
+        once per such traversal), so they stay out of the cells (squares and
+        traversal fits; the sum's calibration stream, a "csum" of mode
+        calib, goes there) and out of the plain time law (the d-first law
+        learns from them); their CPU is counted apart, and their magic
+        squares (a "dsquare" with magic or partner, twice each) join the
+        notable squares once. Complete sums are counted in _dcover."""
+        fst = fst if fst is not None else {}
         for r in rs:
             if r["type"] == "dsum":
-                if r.get("complete"):
-                    # distinct sums (a sum searched again counts once)
-                    done = ps.setdefault("dfirst_S", [])
-                    if r["S"] not in done:
-                        done.append(r["S"])
-                        self.totals["dfirst_sums"] += 1
-                else:
+                if not r.get("complete"):
                     self.totals["dfirst_partial"] += 1
                 self.totals["dfirst_cpu"] += r.get("cpu", r.get("time", 0.0))
+                fst["dcpu"] = fst.get("dcpu", 0.0) + r.get("cpu", r.get("time", 0.0))
+            elif r["type"] == "csum" and "_csq" in r:
+                fst["dcpu"] = fst.get("dcpu", 0.0) + r.get("cpu", 0.0)
         dm = [q for q in rs if q["type"] == "dsquare" and (q.get("magic") or q.get("partner"))]
-        if dm:
+        cq = [q for r in rs if r["type"] == "csum" for q in r.get("_csq", ())
+              if q["best_score"] >= self.NOTABLE]
+        if dm or cq:
             known = {(tuple(q["P"]), q["S"], q.get("hash")) for q in self.notable}
-            for q in dm:
+            for q, flag in [(q, "dfirst") for q in dm] + [(q, "calib") for q in cq]:
                 kq = (tuple(P), q["S"], q["hash"])
                 if kq not in known:
                     known.add(kq)
-                    self.notable.append(dict(q, P=list(P), dfirst=1))
-                    self.totals["dfirst_magic"] += 1
+                    self.notable.append(dict(q, P=list(P), **{flag: 1}))
+                    if flag == "dfirst":
+                        self.totals["dfirst_magic"] += 1
 
     def time_stats(self):
         np = _np()
@@ -2282,8 +2544,17 @@ class Summary:
 # --------------------------------------------------------------------------
 # candidates, scorer and planner
 
-UnitV2 = collections.namedtuple("UnitV2", Unit._fields + ("a", "nodes", "cells", "mvec"),
-                                defaults=(None, 0.0, None, None))
+# a unit of v2: P, sums lo..hi; mode "plain" or "dfirst" (msearch
+# --diag-first --diag-first-min-n 0); a d-first unit with dlo set is one sum
+# (lo == hi) searched on the d with index in [dlo, dhi) of nd (dhi None: to
+# the end of the sum, nd only predicted), the share frac of the sum's
+# d-loop CPU and E; calib: the stride of its calibration stream (0: none);
+# time: predicted CPU, score: magic / CPU with the sum's calibration stream
+# spread over its parts
+UnitV2 = collections.namedtuple(
+    "UnitV2", Unit._fields + ("a", "nodes", "cells", "mvec", "mode", "dlo", "dhi", "nd", "calib",
+                              "frac"),
+    defaults=(None, 0.0, None, None, "plain", None, None, 0, 0, 1.0))
 
 
 class Cands:
@@ -2330,14 +2601,25 @@ class AnalyticScorer:
         lEm = lEs + ln g_sq(c) + ln SQ12 [N' >= 12k] + min(lPm + ln m(c), ln 1e-6)
               + ln f_sq(P) + ln F_m(P),        time from TimeModel(lN', L_raw)
 
-    with c the calibration cell of the sum and f_sq, F_m the per-P factors"""
+    with c the calibration cell of the sum and f_sq, F_m the per-P factors.
+    Each sum is searched plain (time law tm) or d-first (tmd, plus its
+    calibration stream, about calib_frac of that), by policy: "off" plain,
+    "on" d-first at N' >= dmin, "auto" d-first at N' >= dmin where that is
+    cheaper (see eval_modes)."""
 
-    def __init__(self, cands, store, calib, tm, n=6):
+    def __init__(self, cands, store, calib, tm, n=6, tmd=None, policy="auto",
+                 calib_frac=CALIB_FRAC, dmin=DFIRST_MIN_NP):
         np = _np()
         self.c = cands
         self.store = store
         self.n = n
         self.tm = tm
+        self.tmd = tmd if tmd is not None else _am().time_prior(ENGINE, mode="dfirst")
+        if policy not in DFIRST_POLICIES:
+            raise ValueError(f"d-first policy {policy}")
+        self.policy = policy
+        self.calib_frac = float(calib_frac)
+        self.ldmin = math.log(max(float(dmin), 1.0))
         self.set_calibration(calib)
         self.lnfsq = np.zeros(len(cands))
         self.lnFm = np.zeros(len(cands))
@@ -2346,6 +2628,15 @@ class AnalyticScorer:
     def set_calibration(self, calib):
         self.calib = calib
         self.ln_gsq, self.ln_rS, self.ln_rP, self.ln_m = calib.rates()
+
+    @staticmethod
+    def _fast(tm):
+        np = _np()
+        th = [float(v) for v in tm.th]
+        # ln t = c0 + th1 lN' + th2 lL + th3 max(0, lN' - ln 8000) + th4 [labels > 128]
+        #        + band offset, + sd^2/2 for the mean (am.time_features, written out)
+        return (th[0] - th[1] * math.log(4000) - th[2] * math.log(150) + 0.5 * tm.sd ** 2,
+                th[1], th[2], th[3], th[4], np.array(th[5:]))
 
     @property
     def tm(self):
@@ -2356,14 +2647,19 @@ class AnalyticScorer:
         self._tm = tm
         am = _am()
         np = _np()
-        th = [float(v) for v in tm.th]
-        # ln t = c0 + th1 lN' + th2 lL + th3 max(0, lN' - ln 8000) + th4 [labels > 128]
-        #        + band offset, + sd^2/2 for the mean (am.time_features, written out)
-        self._tc = (th[0] - th[1] * math.log(4000) - th[2] * math.log(150) + 0.5 * tm.sd ** 2,
-                    th[1], th[2], th[3], th[4], np.array(th[5:]))
+        self._tc = self._fast(tm)
         # labels_obs > 128  <=>  lL + LAB1 lN' > _w3c - LAB2 (k - 6)
         self._w3c = math.log(128) - am.LAB0 + am.LAB1 * math.log(4000)
         self._tbe = np.log(np.array(am.TIME_BAND_EDGES))
+
+    @property
+    def tmd(self):
+        return self._tmd
+
+    @tmd.setter
+    def tmd(self, tm):
+        self._tmd = tm
+        self._tcd = self._fast(tm)
 
     def prof(self, a):
         """per cand: S of the valid grid points, lN, lEs, lPm, L_raw there
@@ -2389,9 +2685,21 @@ class AnalyticScorer:
         self._cache[a] = out
         return out
 
+    def _choose(self, lNp, tp, td):
+        """per sum: d-first?, and the calibration stream's predicted CPU"""
+        np = _np()
+        tcal = np.minimum(tp, self.calib_frac * td) if self.calib_frac > 0 else np.zeros_like(td)
+        if self.policy == "off":
+            dm = np.zeros(np.shape(lNp), bool)
+        elif self.policy == "on":
+            dm = lNp >= self.ldmin
+        else:
+            dm = (lNp >= self.ldmin) & (td + tcal < tp)
+        return dm, tcal
+
     def grid_density(self, rows):
         """log magic squares per CPU-second on the grid, [len(rows), grid]
-        (-inf at invalid points)"""
+        (-inf at invalid points), with each point's search mode"""
         np = _np()
         am = _am()
         rows = np.asarray(rows, np.int64)
@@ -2414,22 +2722,28 @@ class AnalyticScorer:
         lem = (lEs + self.ln_gsq[cell] + math.log(am.SQ12) * (lNp >= LN12K)
                + np.minimum(lPm + self.ln_m[cell], am.LOG_PM_CAP)
                + (self.lnfsq[rows] + self.lnFm[rows])[:, None])
-        lt = np.log(self.tm.time(lNp, lL, self.c.k[rows, None]))
-        return np.where(V, lem - lt, -np.inf)
+        tp = self.tm.time(lNp, lL, self.c.k[rows, None])
+        if self.policy != "off":
+            td = self.tmd.time(lNp, lL, self.c.k[rows, None])
+            dm, tcal = self._choose(lNp, tp, td)
+            tp = np.where(dm, td + tcal, tp)
+        return np.where(V, lem - np.log(tp), -np.inf)
 
     _NB = None
 
-    def eval_sums(self, a, S):
-        """per sum: squares, magic squares, CPU seconds, lN', L_raw, cell
-        (the same as grid_density, at any S, by linear interpolation of the
-        profile's logs in S; written for speed)"""
+    def eval_modes(self, a, S):
+        """per sum: squares, magic squares, plain CPU, d-first CPU (whole
+        sum, without its calibration stream), the stream's CPU, d-first?,
+        lN', L_raw, cell (as grid_density, at any S, by linear
+        interpolation of the profile's logs in S; written for speed)"""
         np = _np()
         am = _am()
         Sg, gN, gEs, gPm, gL, base, lsmin, k = self.prof(a)
         S = np.asarray(S, float)
         if len(Sg) == 0:
             z = np.zeros(len(S))
-            return z, z, z + am.SUM_OVERHEAD, z, z, np.zeros(len(S), int)
+            t = z + am.SUM_OVERHEAD
+            return z, z, t, t, z, np.zeros(len(S), bool), z, z, np.zeros(len(S), int)
         if AnalyticScorer._NB is None:
             AnalyticScorer._NB = (np.log(np.array(NBAND_EDGES, float)), np.array(XBAND_EDGES))
         nbe, xbe = AnalyticScorer._NB
@@ -2449,23 +2763,72 @@ class AnalyticScorer:
         outside = below | (S > hi)
         c0, c1, c2, c3, c4, cb = self._tc
         w3 = lL + am.LAB1 * lNp > self._w3c - am.LAB2 * (k - 6)
-        t = np.exp(c0 + c1 * lNp + c2 * lL + c3 * np.maximum(0.0, lNp - LN8K) + c4 * w3
-                   + cb[np.searchsorted(self._tbe, lNp, side="right")]) + am.SUM_OVERHEAD
+        band = np.searchsorted(self._tbe, lNp, side="right")
+        hinge = np.maximum(0.0, lNp - LN8K)
+        tp = np.exp(c0 + c1 * lNp + c2 * lL + c3 * hinge + c4 * w3 + cb[band]) + am.SUM_OVERHEAD
+        if self.policy != "off":
+            c0, c1, c2, c3, c4, cb = self._tcd
+            td = np.exp(c0 + c1 * lNp + c2 * lL + c3 * hinge + c4 * w3 + cb[band]) + am.SUM_OVERHEAD
+            dm, tcal = self._choose(lNp, tp, td)
+        else:
+            td, tcal, dm = tp, np.zeros(len(S)), np.zeros(len(S), bool)
         if outside.any():
             sq[outside] = 0.0
-            t[below] = am.SUM_OVERHEAD
+            tp[below] = td[below] = am.SUM_OVERHEAD
+            tcal[below] = 0.0
+            dm = dm & ~below
         m = sq * np.exp(lpm)
-        return sq, m, t, lNp, lL, cell
+        return sq, m, tp, td, tcal, dm, lNp, lL, cell
 
-    def next_unit(self, a, lo, hi_max, unit_time, drop, detail=False):
-        """the next unit of cand a: sums lo.. (at most hi_max) while the
-        cumulative predicted time stays within unit_time (at least one sum)
-        and each sum's magic squares per CPU-second stay >= drop x the best
-        of the unit so far (see Scorer.next_unit); None if lo > hi_max"""
+    def eval_sums(self, a, S):
+        """per sum: squares, magic squares, CPU seconds in the chosen mode
+        (d-first: with the calibration stream), lN', L_raw, cell"""
+        np = _np()
+        sq, m, tp, td, tcal, dm, lNp, lL, cell = self.eval_modes(a, S)
+        return sq, m, np.where(dm, td + tcal, tp), lNp, lL, cell
+
+    def calib_stride(self, tp, td):
+        """--calib-r1-stride k for a d-first sum: its stream costs ~tp / k
+        ~ calib_frac x td (0: no stream)"""
+        if self.calib_frac <= 0:
+            return 0
+        return max(1, int(round(tp / (self.calib_frac * td))))
+
+    def next_unit(self, a, lo, hi_max, unit_time, drop, detail=False, dpart=None, calib_done=()):
+        """the next unit of cand a: sums lo.. (at most hi_max) in the mode
+        of sum lo, while the cumulative predicted time stays within
+        unit_time (at least one sum) and each sum's magic squares per
+        CPU-second stay >= drop x the best of the unit so far (see
+        Scorer.next_unit); None if lo > hi_max. A d-first sum predicted to
+        take more than DFIRST_SPLIT x unit_time, or searched in part before
+        (dpart: S -> (nd or None, merged d intervals)), gets a unit of d
+        (_drange_unit). calib_done: the sums whose calibration stream has
+        run (or is planned)."""
         np = _np()
         am = _am()
         if lo > hi_max:
             return None
+        dpart = dpart or {}
+        # the mode of the unit is that of its first sum inside the model's
+        # grid (the sums below it have no predicted squares and go with
+        # either mode; if that first sum gets units of d, the sums below
+        # are skipped, as Planner._walk skips such gaps)
+        Sg = self.prof(a)[0]
+        g0 = int(math.ceil(Sg[0] - 1e-9)) if len(Sg) else lo
+        first = max(lo, g0) if g0 <= hi_max else lo
+        sq0, m0, tp0, td0, tc0, dm0, lN0, _, cell0 = self.eval_modes(a, [float(first)])
+        dfirst = bool(dm0[0])
+        if first in dpart and self.policy != "off":
+            dfirst = True
+        cal0 = first in calib_done
+        if dfirst and (first in dpart
+                       or td0[0] + (0 if cal0 else tc0[0]) > DFIRST_SPLIT * unit_time):
+            return self._drange_unit(a, first, unit_time, dpart.get(first), cal0, sq0[0], m0[0],
+                                     tp0[0], td0[0], tc0[0], lN0[0], cell0[0], detail)
+        parts = np.array(sorted(dpart), float) if dpart else None
+        cals = np.array(sorted(calib_done), float) if (dfirst and calib_done) else None
+        # the calibration stride of a d-first unit (one for all its sums)
+        k = 0 if (not dfirst or cal0) else self.calib_stride(tp0[0], td0[0])
         acc_t = acc_m = acc_sq = 0.0
         best = 0.0
         hi = lo - 1
@@ -2474,13 +2837,28 @@ class AnalyticScorer:
         cells, mv = [], []
         while start <= hi_max:
             S = np.arange(start, min(start + size, hi_max + 1), dtype=float)
-            sq, m, t, lNp, lL, cell = self.eval_sums(a, S)
+            sq, m, tp, td, tc, dm, lNp, lL, cell = self.eval_modes(a, S)
+            if dfirst:
+                # every sum of the unit gets the stream, or none (the
+                # squares recorded are the stream's)
+                t = td + (tc if k else 0.0)
+                same = dm.copy()
+                if cals is not None:
+                    same &= np.isin(S, cals) == cal0
+                sq = sq / k if k else np.zeros_like(sq)
+            else:
+                t = tp
+                same = ~dm
+            same |= S < g0
+            if parts is not None:
+                same &= ~np.isin(S, parts)
             dens = m / t
             ct = np.cumsum(t)
             ct += acc_t
             rm = np.maximum.accumulate(dens)
             np.maximum(rm, best, out=rm)
-            ok = ct <= unit_time
+            # (the sums below the grid go with the first sum inside it)
+            ok = ((ct <= unit_time) | (S <= g0)) & same
             ok[1:] &= dens[1:] >= drop * rm[:-1]
             ok[0] &= dens[0] >= drop * best
             if acc_t == 0:
@@ -2502,7 +2880,49 @@ class AnalyticScorer:
         tot_t = acc_t + am.UNIT_OVERHEAD
         return UnitV2(self.c.P(a), lo, hi, acc_m / tot_t, tot_t, acc_sq, acc_m, a, None,
                       np.concatenate(cells) if detail else None,
-                      np.concatenate(mv) if detail else None)
+                      np.concatenate(mv) if detail else None,
+                      "dfirst" if dfirst else "plain", None, None, 0, k, 1.0)
+
+    def _drange_unit(self, a, S, unit_time, part, cal_done, sq, m, tp, td, tc, lNp, cell, detail):
+        """a unit of d of the d-first sum S: from the first d not searched
+        yet (part: (nd or None, merged d intervals)) for about unit_time of
+        the d loop (by the cost profile along d), to the end of the gap; the
+        sum's calibration stream goes with the first unit that runs"""
+        np = _np()
+        am = _am()
+        nd, iv = part if part else (None, [])
+        # the number of d: known from the records, else predicted (N' is
+        # the model's prediction of nvecs_raw)
+        ndp = nd if nd else max(int(round(math.exp(float(lNp)))), 1)
+        g0, gap_end = 0, ndp
+        for lo_, hi_ in iv:
+            if lo_ <= g0:
+                g0 = max(g0, hi_)
+            else:
+                gap_end = lo_
+                break
+        if g0 >= ndp:
+            # more d than predicted (only without a known nd): to the end
+            ndp = g0 + 1
+            gap_end = ndp
+        w0 = float(am.dfirst_cost_cum(g0 / ndp))
+        want = unit_time / max(td, 1e-9)
+        dhi = int(math.ceil(ndp * float(am.dfirst_cost_inv(w0 + want))))
+        dhi = min(max(dhi, g0 + 1), gap_end)
+        if am.dfirst_cost_frac(dhi, gap_end, ndp) < DFIRST_TAIL * want:
+            dhi = gap_end
+        frac = am.dfirst_cost_frac(g0, dhi, ndp)
+        k = 0 if cal_done else self.calib_stride(tp, td)
+        tcal = tp / k if k else 0.0
+        time_ = frac * td + tcal + am.UNIT_OVERHEAD
+        magic = frac * m
+        # the stream's cost spread over the sum's parts in the score (as in
+        # grid_density), so the parts of a sum rank alike
+        score = magic / (frac * (td + (0.0 if cal_done else tc)) + am.UNIT_OVERHEAD)
+        open_end = dhi >= ndp and not nd
+        return UnitV2(self.c.P(a), S, S, score, time_, sq / k if k else 0.0, magic, a, None,
+                      np.array([cell]) if detail else None, np.array([magic]) if detail else None,
+                      "dfirst", g0, None if open_end else dhi, ndp, k, frac)
 
     def unit_nodes(self, u):
         """predicted search nodes of the unit's largest (last) sum"""
@@ -2512,7 +2932,8 @@ class AnalyticScorer:
 
     def limits(self, u, unit_time):
         """msearch --node-limit (per sum) and --time-limit (per unit)"""
-        return int(max(2e10, 10 * self.unit_nodes(u))), max(2 * unit_time, 3 * u.time)
+        # (at least 1 s: msearch reads --time-limit 0 as none)
+        return int(max(2e10, 10 * self.unit_nodes(u))), max(2 * unit_time, 3 * u.time, 1.0)
 
     def set_factors(self, summary, explore=EXPLORE_V2):
         """per-P gamma factors f_sq and F_m from each P's observed counts and
@@ -2567,12 +2988,17 @@ class Planner:
 
     UB_MARGIN = 1.1
 
-    def __init__(self, cands, scorer, f0, cover, unit_time, drop, max_sums=2000):
+    def __init__(self, cands, scorer, f0, cover, unit_time, drop, max_sums=2000, dpart=None,
+                 calib=None):
         np = _np()
         self.c = cands
         self.sc = scorer
         self.f0 = np.asarray(f0, np.int64)     # start: max(S_min bound, legacy maxS + 1)
         self.cover = cover                     # a -> merged [[lo, hi], ...]
+        # d-first sums searched in part: a -> {S: (nd or None, merged [[lo, hi), ...] of d)}
+        self.dpart = dpart if dpart is not None else {}
+        # sums whose calibration stream has run (or is planned): a -> set(S)
+        self.calib = calib if calib is not None else {}
         self.unit_time = unit_time
         self.drop = drop
         self.max_sums = max_sums
@@ -2609,13 +3035,37 @@ class Planner:
         sq, m, t, _, _, _ = self.sc.eval_sums(a, S)
         return float((m / t).max()) < self.GAP_NEGLIGIBLE * best
 
-    def set_cover(self, a, intervals):
+    def set_cover(self, a, intervals, dpart=None, calib=None):
         self.cover[a] = [list(x) for x in intervals]
+        if dpart is not None:
+            self.dpart[a] = dpart
+        if calib is not None:
+            self.calib[a] = calib
         self.frontier[a] = self._walk(a, self.f0[a])
 
     def advance(self, a, hi):
         """planned (simulated) coverage up to hi"""
         self.frontier[a] = self._walk(a, max(self.frontier[a], hi + 1))
+
+    def advance_unit(self, u):
+        """planned (simulated) coverage after unit u: its sums, or its part
+        of a d-first sum (the sum is covered once its parts cover every d)"""
+        a = u.a
+        if u.calib:
+            self.calib.setdefault(a, set()).update(range(u.lo, u.hi + 1))
+        if u.dlo is None:
+            self.advance(a, u.hi)
+            return
+        dp = self.dpart.setdefault(a, {})
+        nd, iv = dp.get(u.lo, (None, []))
+        end = u.dhi if u.dhi is not None else max(u.nd, nd or 0)
+        iv = _merge_half([list(x) for x in iv] + [[u.dlo, end]])
+        if u.dhi is None or _covers(iv, nd or u.nd):
+            dp.pop(u.lo, None)
+            self.cover[a] = _merge([tuple(x) for x in self.cover.get(a, [])] + [(u.lo, u.lo)])
+            self.frontier[a] = self._walk(a, self.frontier[a])
+        else:
+            dp[u.lo] = (nd, iv)
 
     def hi_max(self, a):
         f = int(self.frontier[a])
@@ -2628,7 +3078,7 @@ class Planner:
 
     def unit(self, a, detail=False):
         return self.sc.next_unit(a, int(self.frontier[a]), self.hi_max(a), self.unit_time,
-                                 self.drop, detail)
+                                 self.drop, detail, self.dpart.get(a), self.calib.get(a, ()))
 
     def upper_bounds(self, rows, chunk=20000):
         np = _np()
@@ -2641,7 +3091,12 @@ class Planner:
             uf = self.frontier[r] / self.c.S0[r] - 1
             jf = np.searchsorted(am.GRID_U, uf) - 1
             d = np.where(np.arange(d.shape[1])[None, :] >= jf[:, None], d, -np.inf)
+            # (grid_density charges every d-first sum its calibration
+            # stream; a sum whose stream has run scores up to 1 +
+            # calib_frac higher)
             ub = self.UB_MARGIN * np.exp(d.max(1))
+            if self.sc.policy != "off":
+                ub *= 1 + max(self.sc.calib_frac, 0.0)
             out[i:i + chunk] = np.where(self.frontier[r] <= self.c.end[r], ub, 0.0)
         return out
 
@@ -2702,6 +3157,43 @@ def read_exact_smin(state, n):
                 if int(nn) == n and d.get("smin"):
                     out[e] = d["smin"]
     return out
+
+
+def dfirst_args(u):
+    """msearch options of a d-first unit: --diag-first with threshold 0 (the
+    scheduler chose the mode of every sum of the unit), its d range, its
+    calibration stream"""
+    if u.mode != "dfirst":
+        return []
+    out = ["--diag-first", "--diag-first-min-n", "0"]
+    if u.dlo is not None:
+        out += ["--d-range", f"{u.dlo}:{'' if u.dhi is None else u.dhi}"]
+    if u.calib:
+        out += ["--calib-r1-stride", str(u.calib)]
+    return out
+
+
+def describe_dunit(u):
+    """" d-first ..." for log lines and plans ("" for a plain unit)"""
+    if u.mode != "dfirst":
+        return ""
+    out = " d-first"
+    if u.dlo is not None:
+        end = "end" if u.dhi is None else u.dhi - 1
+        out += f" d {u.dlo}..{end} of {u.nd} ({100 * u.frac:.0f}%)"
+    if u.calib:
+        out += f" +calib 1/{u.calib}"
+    return out
+
+
+def unit_tag(u):
+    """the suffix of a unit file's name: "" plain, "D" d-first sums,
+    "d<lo>-<hi>" a d range (hi "end": to the end of the sum)"""
+    if u is None or u.mode != "dfirst":
+        return ""
+    if u.dlo is None:
+        return "D"
+    return f"d{u.dlo}-{'end' if u.dhi is None else u.dhi}"
 
 
 class SchedulerV2:
@@ -2802,18 +3294,42 @@ class SchedulerV2:
         idx = self.cands.index()
         return {idx[k]: v for k, v in self.summary.cover.items() if k in idx}
 
+    def dpart_of(self, key):
+        """the d-first sums of P (key) searched in part: {S: (nd, iv)}"""
+        return {int(S): (e["nd"], [list(x) for x in e["iv"]])
+                for S, e in self.summary.dcov.get(key, {}).items()}
+
+    def calib_of(self, key):
+        """the sums of P (key) whose calibration stream has run"""
+        return {int(S) for S in self.summary.perP.get(key, {}).get("calS", {})}
+
+    def dpart(self):
+        idx = self.cands.index()
+        return {idx[k]: self.dpart_of(k) for k in self.summary.dcov if k in idx}
+
+    def calib_done(self):
+        idx = self.cands.index()
+        return {idx[k]: self.calib_of(k) for k, st in self.summary.perP.items()
+                if k in idx and st.get("calS")}
+
     def refit(self, save=True):
-        """class factors, time model and per-P factors from the summary"""
+        """class factors, time models and per-P factors from the summary"""
         table = self.summary.cell_table()
         self.calib = Calibration.fit(table, self.summary.cell_ee())
         self.time_models = fit_time_models(self.summary.time_stats())
         self.tm = current_time_model(self.time_models)
+        self.tmd = current_time_model(self.time_models, mode="dfirst")
         explore = self.args.explore if self.args.explore is not None else EXPLORE_V2
         if not hasattr(self, "scorer"):
-            self.scorer = AnalyticScorer(self.cands, self.store, self.calib, self.tm, self.n)
+            a = self.args
+            self.scorer = AnalyticScorer(self.cands, self.store, self.calib, self.tm, self.n,
+                                         self.tmd, getattr(a, "dfirst", "auto") or "auto",
+                                         getattr(a, "calib_frac", CALIB_FRAC),
+                                         getattr(a, "dfirst_min_n", DFIRST_MIN_NP))
         else:
             self.scorer.set_calibration(self.calib)
             self.scorer.tm = self.tm
+            self.scorer.tmd = self.tmd
         self.scorer.set_factors(self.summary, explore)
         if save:
             self.save()
@@ -2823,29 +3339,30 @@ class SchedulerV2:
             json.dump(self.calib.to_json(), f, indent=1)
         with open(os.path.join(self.dir, f"time_{self.n}.json"), "w") as f:
             json.dump({k: v.to_json() for k, v in self.time_models.items()}
-                      | {"current": self.tm.to_json()}, f, indent=1)
+                      | {"current": self.tm.to_json(), "current_dfirst": self.tmd.to_json()},
+                      f, indent=1)
         self.summary.save()
 
     def planner(self, busy=()):
         p = Planner(self.cands, self.scorer, self.f0(), self.cover(), self.args.unit_time,
-                    self.args.unit_drop)
+                    self.args.unit_drop, dpart=self.dpart(), calib=self.calib_done())
         p.build(busy)
         return p
 
     def command(self, u, out, check=True):
         nl, tl = self.scorer.limits(u, self.args.unit_time)
         return [binary("msearch", check), "--vec-size", str(self.n), "--min-sum", str(u.lo),
-                "--max-sum", str(u.hi), "--time-limit", f"{tl:.0f}", "--node-limit", str(nl),
-                "--out", out, *map(str, u.P)]
+                "--max-sum", str(u.hi), *dfirst_args(u), "--time-limit", f"{tl:.0f}",
+                "--node-limit", str(nl), "--out", out, *map(str, u.P)]
 
-    def unit_path(self, P, lo, hi):
+    def unit_path(self, P, lo, hi, u=None):
         # a running sequence number (globbing units/ on every launch is
         # O(files); the time stamp keeps names unique across runs)
         if not hasattr(self, "_seq"):
             self._seq = len(self.summary.files)
         seq = self._seq
         self._seq += 1
-        name = f"{int(time.time())}_{seq:06d}_{p_str(P, '_')}_{lo}_{hi}.jsonl"
+        name = f"{int(time.time())}_{seq:06d}_{p_str(P, '_')}_{lo}_{hi}{unit_tag(u)}.jsonl"
         return os.path.join(self.units, name)
 
     def run(self):
@@ -2885,10 +3402,11 @@ class SchedulerV2:
                                 f"#S={q['s_count']} #P={q['p_count']} #SP={q['sp_count']} "
                                 f"{q['grid']}")
                     nseen = len(self.summary.notable)
-                    plan.set_cover(a, self.summary.cover.get(key, []))
+                    plan.set_cover(a, self.summary.cover.get(key, []), self.dpart_of(key),
+                                   self.calib_of(key))
                     if units_done % args.refit_every == 0:
                         self.refit()
-                        log(f"refit: {describe_calib(self.calib, self.tm)}")
+                        log(f"refit: {describe_calib(self.calib, self.tm, self.tmd)}")
                         plan.build({b for b, _ in running.values()})
                     else:
                         self.scorer.set_factor(self.summary, key)
@@ -2904,7 +3422,7 @@ class SchedulerV2:
                     if u is None:
                         exhausted = True
                         break
-                    path = self.unit_path(u.P, u.lo, u.hi)
+                    path = self.unit_path(u.P, u.lo, u.hi, u)
                     fresh = self.cands.key(u.a) not in self.summary.perP
                     proc = subprocess.Popen(self.command(u, path), stdout=subprocess.DEVNULL,
                                             env=msearch_env())
@@ -2913,10 +3431,12 @@ class SchedulerV2:
                     launched.write(json.dumps({
                         "file": os.path.basename(path), "P": list(u.P), "lo": u.lo, "hi": u.hi,
                         "time": u.time, "squares": u.squares, "magic": u.magic, "score": u.score,
-                        "fresh": fresh, "t": time.time()}) + "\n")
+                        "fresh": fresh, "t": time.time(), "mode": u.mode, "dlo": u.dlo,
+                        "dhi": u.dhi, "nd": u.nd, "calib": u.calib, "frac": u.frac}) + "\n")
                     launched.flush()
-                    log(f"start P={p_str(u.P)} S={u.lo}..{u.hi} (predicted {u.time:.0f}s, "
-                        f"{u.squares:.1f} squares, {u.score * 3.15e7:.3g} magic/CPU-year)")
+                    log(f"start P={p_str(u.P)} S={u.lo}..{u.hi}{describe_dunit(u)} (predicted "
+                        f"{u.time:.0f}s, {u.squares:.1f} squares, {u.score * 3.15e7:.3g} "
+                        f"magic/CPU-year)")
                 if exhausted and not running:
                     log("no more units to run (every candidate is covered or has no "
                         "predicted magic squares)")
@@ -2949,7 +3469,7 @@ class SchedulerV2:
             yield u
             hours += u.time / 3600
             i += 1
-            plan.advance(u.a, u.hi)
+            plan.advance_unit(u)
             plan.push(u.a)
 
 
@@ -2957,13 +3477,18 @@ def am_s0(P):
     return _am().s0(P)
 
 
-def describe_calib(calib, tm):
-    """one line: the data behind the class factors, and the current time law"""
+def describe_calib(calib, tm, tmd=None):
+    """one line: the data behind the class factors, and the current time
+    laws (plain; d-first: its level)"""
     d = calib.data
     parts = [f"{k} obs/exp {d[k][0]:.0f}/{d[k][1]:.1f}" for k in ("sq", "S", "P") if k in d]
-    return ("class-factor data: " + (", ".join(parts) or "none")
-            + f"; time law (engine {tm.engine}): th=["
-            + ", ".join(f"{v:.3f}" for v in tm.th) + f"] sd {tm.sd:.3f} ({tm.n} sums)")
+    out = ("class-factor data: " + (", ".join(parts) or "none")
+           + f"; time law (engine {tm.engine}): th=["
+           + ", ".join(f"{v:.3f}" for v in tm.th) + f"] sd {tm.sd:.3f} ({tm.n} sums)")
+    if tmd is not None:
+        out += (f"; d-first law: {tmd.th[0]:.3f} + {tmd.th[1]:.3f} ln(N'/4000), sd {tmd.sd:.3f} "
+                f"({tmd.n} sums or parts)")
+    return out
 
 
 def _poisson_interval(o, e, z=1.645, phi=1.0):
@@ -2986,12 +3511,27 @@ def report_v2(sch, top=20, out=None):
     pr = lambda *a: print(*a, file=out)  # noqa: E731
     pr(f"\n{len(s.perP)} values of P, {T['sums']} sums, {T['cpu'] / 3600:.2f} CPU-hours, "
        f"{T['squares']} semi-magic squares ({3600 * T['squares'] / max(T['cpu'], 1):.0f}/CPU-hour)")
-    if T.get("dfirst_sums") or T.get("dfirst_partial"):
-        pr(f"d-first (not in the fits): {T['dfirst_sums']} sums searched in full, "
-           f"{T['dfirst_partial']} parts, {T['dfirst_cpu'] / 3600:.2f} CPU-hours, "
-           f"{T['dfirst_magic']} magic squares")
+    if T.get("dfirst_sums") or T.get("dfirst_partial") or s.dcov:
+        pr(f"d-first (in the d-first time law only): {T['dfirst_sums']} sums searched in full, "
+           f"{T['dfirst_partial']} parts (dsum records of d ranges or samples), "
+           f"{T['dfirst_cpu'] / 3600:.2f} CPU-hours, {T['dfirst_magic']} magic squares"
+           + (f", {T['dfirst_truncated']} chunks with a V_d at --node-limit"
+              if T.get("dfirst_truncated") else ""))
+        part = [(k, int(S)) + s.dfirst_part(k, S) for k, d in s.dcov.items() for S in d]
+        if part:
+            pr(f"  sums searched in part ({len(part)}, to be continued from their last d): "
+               + ", ".join(f"P={p_str(parse_p(k))} S={S} {100 * f:.0f}% of {nd if nd else '?'} d"
+                           for k, S, nd, iv, f in sorted(part)[:top]))
+    if T.get("calib_sums") or T.get("calib_dup") or T.get("calib_cpu"):
+        r, lo, hi = _poisson_interval(T["calib_est"], T["calib_pred"], phi=PHI_SUM)
+        pr(f"calibration streams of d-first sums (in the cells, weighted): {T['calib_sums']} sums, "
+           f"{T['calib_squares']} sampled squares, {T['calib_cpu'] / 3600:.2f} CPU-hours"
+           f" ({100 * T['calib_cpu'] / max(T['dfirst_cpu'], 1e-9):.0f}% of the d-first CPU); "
+           f"est. squares / model x SQ12 = {T['calib_est']:.0f} / {T['calib_pred']:.1f} = "
+           f"{r:.2f}" + (f"; {T['calib_dup']} repeated streams not counted" if T["calib_dup"]
+                         else ""))
     if T.get("sampled_cpu"):
-        pr(f"sampled records (r1-sampled or calibration, not in the fits): "
+        pr(f"sampled records (r1-sampled, not in the fits): "
            f"{T['sampled_cpu'] / 3600:.2f} CPU-hours")
     names = {0: "0", 2: "S", 3: "P", 4: "S+S", 5: "S+P", 6: "P+P", 7: "SP",
              9: "SP+S", 10: "SP+P", 14: "MAGIC (SP+SP)"}
@@ -3030,7 +3570,7 @@ def report_v2(sch, top=20, out=None):
         b, C = sch.calib.beta[key], sch.calib.cov[key]
         pr(f"  {name:13} " + ", ".join(f"{e} {v:+.2f}({math.sqrt(C[i, i]):.2f})"
                                        for i, (e, v) in enumerate(zip(EFFECTS, b))))
-    pr(f"  {describe_calib(sch.calib, sch.tm)}")
+    pr(f"  {describe_calib(sch.calib, sch.tm, getattr(sch, 'tmd', None))}")
     for k, tm in sorted(sch.time_models.items()):
         pr(f"    engine:mode {k}: th=[{', '.join(f'{v:.3f}' for v in tm.th)}] sd {tm.sd:.3f} "
            f"({tm.n} sums)")
@@ -3077,6 +3617,13 @@ def report_launched(sch, pr):
             st = sch.summary.files.get(r["file"])
             if st and st.get("complete"):
                 rows.append((r, st))
+    drows = [(r, st) for r, st in rows if r.get("mode", "plain") == "dfirst"]
+    rows = [(r, st) for r, st in rows if r.get("mode", "plain") != "dfirst"]
+    if drows:
+        o = sum(st.get("dcpu", 0.0) for r, st in drows)
+        e = sum(r["time"] for r, st in drows)
+        pr(f"\nlaunched d-first units (complete only): {len(drows)}, observed / predicted CPU "
+           f"(d loop, calibration stream, overhead) {o:.0f} / {e:.0f} s = {o / max(e, 1e-9):.2f}")
     if not rows:
         return
     pr("\nlaunched units (complete only): observed / predicted squares (90% quasi-Poisson)")
@@ -3103,15 +3650,17 @@ def v2_plan(args):
     sch = SchedulerV2(args)
     plan = sch.planner()
     print(f"{'P':24} {'S range':>13} {'pred. time':>10} {'squares/h':>9} "
-          f"{'P(magic)':>9} {'magic/CPU-year':>14}")
+          f"{'P(magic)':>9} {'magic/CPU-year':>14}  mode (d-first: d range, calibration stride; "
+          f"squares/h: those recorded, the stream's)")
     for _ in range(args.top):
         u = plan.pop()
         if u is None:
             break
         h = u.time / 3600
+        pm = u.magic / max(u.squares, 1e-30) if u.mode == "plain" else float("nan")
         print(f"{p_str(u.P):24} {u.lo:6}-{u.hi:<6} {u.time:9.0f}s "
-              f"{u.squares / max(h, 1e-9):9.0f} {u.magic / max(u.squares, 1e-30):9.2e} "
-              f"{u.score * 3.15e7:14.3g}")
+              f"{u.squares / max(h, 1e-9):9.0f} {pm:9.2e} "
+              f"{u.score * 3.15e7:14.3g}  {u.mode}{describe_dunit(u)[8:]}")
 
 
 def v2_emit(args):
@@ -3120,7 +3669,8 @@ def v2_emit(args):
     if os.path.abspath(units_dir).startswith(ROOT + os.sep):
         units_dir = os.path.relpath(units_dir, ROOT)  # portable plan
     for i, u in enumerate(sch.simulate(max_units=args.units)):
-        out = os.path.join(units_dir, f"plan{i:06d}_{p_str(u.P, '_')}_{u.lo}_{u.hi}.jsonl")
+        out = os.path.join(units_dir,
+                           f"plan{i:06d}_{p_str(u.P, '_')}_{u.lo}_{u.hi}{unit_tag(u)}.jsonl")
         print(" ".join(sch.command(u, out, check=False)[1:]))
 
 
@@ -3135,8 +3685,10 @@ def v2_forecast(args):
         # factors (the state still sets the frontiers)
         sch.calib = Calibration()
         sch.tm = _am().time_prior(ENGINE)
+        sch.tmd = _am().time_prior(ENGINE, mode="dfirst")
         sch.scorer.set_calibration(sch.calib)
         sch.scorer.tm = sch.tm
+        sch.scorer.tmd = sch.tmd
         sch.scorer.lnfsq[:] = 0.0
         sch.scorer.lnFm[:] = 0.0
     frac = args.sample
@@ -3163,11 +3715,16 @@ def v2_forecast(args):
     last_u = None
     nunits = 0
     maxN = 0.0
+    E_at = {}
+    curve = [(0.0, 0.0)]
+    dmagic = dhours = 0.0
+    ndunits = 0
     print(f"{'CPU-years':>10} {'squares':>12} {'magic squares':>14} {'P touched':>9} {'units':>9}"
           f" {'max N':>7}  latest unit"
           + (f"   (sample {frac:g} of the candidates, scaled)" if frac < 1 else ""))
 
     def line(m, tail):
+        E_at[m] = magic
         print(f"{m / frac / yr:10.3g} {squares / frac:12.4g} {magic / frac:14.3g} "
               f"{len(touched) / frac:9.0f} {nunits / frac:9.0f} {maxN:7.0f}  {tail}", flush=True)
 
@@ -3176,6 +3733,11 @@ def v2_forecast(args):
         squares += u.squares
         magic += u.magic
         nunits += 1
+        curve.append((hours, magic))
+        if u.mode == "dfirst":
+            dmagic += u.magic
+            dhours += u.time / 3600
+            ndunits += 1
         a = u.a
         touched.add(a)
         np.add.at(Ecell, u.cells, u.mvec)
@@ -3189,7 +3751,8 @@ def v2_forecast(args):
             maxN = max(maxN, math.exp(sch.scorer.eval_sums(a, [u.hi])[3][0]))
         last_u = u
         while marks and hours >= marks[0]:
-            line(marks.pop(0), f"P={p_str(u.P)} S={u.lo}..{u.hi}")
+            line(marks.pop(0), f"P={p_str(u.P)} S={u.lo}..{u.hi}{describe_dunit(u)}")
+    marks_all = sorted(set(E_at) | set(marks))
     for m in marks:   # ran out of candidates
         line(m, "(no more units)")
     if magic <= 0:
@@ -3203,6 +3766,12 @@ def v2_forecast(args):
         tot = sum(cnt.values())
         print(f"  {name:8} " + ", ".join(f"{k} {100 * cnt[k] / tot:.0f}%"
                                         for k in orders[name] if cnt[k]))
+    sc = sch.scorer
+    print(f"  mode     d-first (--dfirst {sc.policy}, N' >= {math.exp(sc.ldmin):.0f}, calibration "
+          f"stream {100 * sc.calib_frac:.0f}%): {100 * dmagic / magic:.0f}% of E in "
+          f"{100 * dhours / max(hours, 1e-12):.0f}% of the CPU ({ndunits / frac:.0f} units)")
+    if sc.policy != "off":
+        forecast_plain_only(sch, budget, frac, marks_all, E_at, curve, yr)
     # uncertainty: draws of the class factors (Laplace posterior) times
     # lognormal(0, 0.2) for the pair factor and for SP+SP
     rng = np.random.default_rng(1)
@@ -3225,10 +3794,49 @@ def v2_forecast(args):
     print(f"predicted CPU-years per magic square at this pace: {hours / magic / yr:.3g}")
 
 
+def forecast_plain_only(sch, budget, frac, marks, E_at, curve, yr):
+    """the same simulation with the plain search only (--dfirst off): E at
+    the marks with and without d-first, and the CPU d-first needs for the
+    plain-only E at the end of the budget"""
+    np = _np()
+    sc = sch.scorer
+    pol = sc.policy
+    sc.policy = "off"
+    try:
+        hours = magic = 0.0
+        todo = list(marks)
+        E_off = {}
+        for u in sch.simulate(max_hours=budget):
+            hours += u.time / 3600
+            magic += u.magic
+            while todo and hours >= todo[0]:
+                E_off[todo.pop(0)] = magic
+        for m in todo:
+            E_off[m] = magic
+    finally:
+        sc.policy = pol
+    print("with and without d-first (the same greedy with --dfirst off; plain times above N' ~11k "
+          "come from the plain law, which over-predicts the integrated build there):")
+    print(f"  {'CPU-years':>10} {'E d-first':>10} {'E plain':>10} {'ratio':>6}")
+    for m in marks:
+        e1, e0 = E_at.get(m, curve[-1][1]), E_off.get(m, magic)
+        print(f"  {m / frac / yr:10.3g} {e1 / frac:10.3g} {e0 / frac:10.3g} "
+              f"{e1 / max(e0, 1e-300):6.3f}")
+    # CPU with d-first to reach the plain-only E of the whole budget
+    h = np.array([c[0] for c in curve])
+    e = np.array([c[1] for c in curve])
+    target = E_off.get(marks[-1], magic) if marks else magic
+    if target > 0 and e[-1] >= target:
+        need = float(np.interp(target, e, h))
+        print(f"  E = {target / frac:.3g} (plain only, {marks[-1] / frac / yr:.3g} CPU-years) "
+              f"takes {need / frac / yr:.3g} CPU-years with d-first: "
+              f"{marks[-1] / max(need, 1e-12):.2f}x less CPU")
+
+
 def v2_fit(args):
     sch = SchedulerV2(args)
     sch.refit()
-    print(describe_calib(sch.calib, sch.tm))
+    print(describe_calib(sch.calib, sch.tm, sch.tmd))
     print(json.dumps(sch.calib.to_json()["beta"], indent=1))
 
 
@@ -3372,6 +3980,18 @@ def main():
                        help="number of most promising P to consider at a time "
                             "(regression only)")
         p.add_argument("--only", help="restrict to these P, e.g. '13 6 3 2;12 7 4 2 1'")
+        p.add_argument("--dfirst", choices=DFIRST_POLICIES, default="auto",
+                       help="analytic: search a sum diagonal-first (msearch --diag-first, which "
+                            "finds every magic square but not the other semi-magic squares) "
+                            "where its predicted CPU, with its calibration stream, is below the "
+                            "plain search's (auto), never (off), or always (on); at N' >= "
+                            "--dfirst-min-n only")
+        p.add_argument("--dfirst-min-n", type=float, default=DFIRST_MIN_NP,
+                       help="analytic: smallest predicted N' of a d-first sum")
+        p.add_argument("--calib-frac", type=float, default=CALIB_FRAC,
+                       help="analytic: CPU of a d-first sum's calibration stream (msearch "
+                            "--calib-r1-stride, semi-magic squares for the models) as a share "
+                            "of its predicted d-first CPU (0 = none)")
 
     def dispatch(v1, v2):
         return lambda a: (v2 if a.model == "analytic" else v1)(a)
