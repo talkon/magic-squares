@@ -199,6 +199,14 @@ the previous code is fdb77fc):
 * Scheduler v2 chooses the mode per sum by the measured ratio and runs
   large d-first sums as units of d (research/scheduler-v2.md, "d-first
   units").
+* Since round 2 (msearch engine 4) the d-first column is lower: the V_d
+  searches prune with the class matching of d's numbers (in the V_d of at
+  least 137 labels) and skip 3 in 4 of the d through one number x* (the
+  star cover; every magic square is still found). Paired against the
+  table's code: 0.83-0.96x at N 3-6k, 0.81x at 7.6k, 0.63-0.72x at
+  11.7-31.7k (d-first CPU per sum = e^-0.138 (N/4000)^-0.162 x before), so
+  d-first wins from N' ~3.5k (research/ideas.md, "Integration of the
+  round-2 d-first changes").
 
 ## Status (October 2026)
 

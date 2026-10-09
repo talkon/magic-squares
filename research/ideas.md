@@ -2845,3 +2845,44 @@ and the d loop), pairs equal in all arms:
   level at about -0.08 (14 d-first sums, research/calibration-target.md
   3.6). It is not folded into the prior: the scheduler learns the level
   online from the streams, as before.
+
+### The star cover with d-range units
+
+c2/star was written before v2 launched d-first units. Its verifier's
+required fixes, on main's units (research/scheduler-v2.md, "The star
+cover"): dchunk records carry star_x and star_k; `Summary._dcover` keeps one
+coverage per (x*, K) and never merges chunks of different x* or K (two x*
+could each skip one diagonal of the same magic square); star-only chunks
+(and star chunks without star_x) count towards no coverage; v2 passes
+`--dfirst-star 4` to every d-first unit and, to a unit that continues a
+sum, the K and x* (`--dfirst-star-x`, new) of the parts it continues, and
+records both; a covered sum's pairs and their estimate come from its
+group's chunks, each weighted by the share of its range new to the group,
+so that duplicates count once and disjoint chunks add up to msearch's own
+est_pairs; the d-first law takes a part's span as its d searched plus those
+the star filter skipped, and learns from engine 4 only with v2's K.
+
+### Gates of the integrated build (integ/round2)
+
+* Build: `cmake -S . -B build-r2 -D CMAKE_BUILD_TYPE=Release`; dfirst.c and
+  msearch.c also compile with `-Wall -Wextra -Werror -std=c17
+  -pedantic-errors`.
+* `ctest -R fast_`: 51 of 51 pass (new: `fast_msearch_class_gate`; the
+  star test also checks a forced x* and star_x on the chunks; 7 more
+  refusals in `fast_msearch_bad_args`).
+* `fuzz_arrange`, fresh seeds, 0 fails: `--dfirst` 600 (9100000-), `--dfirst
+  --n 6` 500 (planted 6x6 magic pairs), `--dfirst --mode 7` 500 (257-500
+  labels), plain mixed modes 600, `--mode 7` 500, and `--dfirst` 300 each on
+  the matrices, portable and no-GFNI builds. The d-first runs check every
+  seed without class support, with it in every V_d or gated at a random
+  label count, and a rotating variant, and the star cover (K = -1, a random
+  K, star-only, stride splits, planted magic pairs with x* on one
+  diagonal): 274k (square, d) pairs, 5,904 planted magic pairs with x* on
+  a diagonal found and flagged, 36k star runs with 1.0M kept pairs checked.
+* bench quick / full / prod: 1,770,779 / 14,958,507 / 50,375,738 nodes,
+  hashes ok; against 189b49f's build (alternating, min of 3) 0.994 /
+  0.981 / 0.991 of its time: the plain search is unchanged (c2/classsup's
+  verifier had seen +0.8% on prod, within noise).
+* `python3 scripts/test_scheduler.py` and `test_calibrate.py`: all ok.
+* The paired engine 3 / engine 4 runs found the same pairs in every arm.
+
