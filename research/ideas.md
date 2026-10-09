@@ -2303,10 +2303,12 @@ Fits of t = a (N / 4000)^b CPU-s on the same 11 sums (4.1-31.7k):
 
 * The residual sd grows because the gain is not uniform: 0.60 at c2700
   against 0.76 at a2200.
-* The scheduler has no d-first time law to update: v2 never launches
-  d-first units (see "Measurements on the integrated binary"). The engine
-  version stays: the plain search is unchanged, and the scheduler keeps
-  the d-first sums out of its fits.
+* (Written against be625d8, where v2 did not launch d-first units yet.
+  On main, v2 launches them and fits a d-first time law and a d-first /
+  plain ratio per engine, so the integration bumps msearch to engine 4
+  and seeds engine 4's d-first law and ratio from these measurements:
+  "Integration of the round-2 d-first changes". The plain search is
+  unchanged.)
 * CPU per expected (square, SP traversal) pair, best mode:
   * ~3.7-7.8k at 11.7-16.4k (was 5.4-10.6k);
   * 12.4k at 23k (was 17.8k);
@@ -2564,11 +2566,12 @@ CPU used: ~1.5 CPU-hours in all.
 * Gates: ~15 min.
 * Measurements: ~10 min.
 * x* checks: ~5 min.
+
 ## Pair rules on top of the class support (October 2026, branch c2/classhall: no-go at stage A, not built)
 
 Question: the class support (`class_support = 1`, the level 2 of the
 c2/vdclass prototype; "Class support in the V_d searches", branch
-c2/classsup) checks, at the (1,1) children of a V_d search, that
+c2/classsup, code f46b203 and measurements a30a7fc) checks, at the (1,1) children of a V_d search, that
 each candidate's cells and the classes it has to meet allow a matching:
 every cell needs a class (the "bad" test) and every class needs a cell
 (the "meet" test). The prototype's level 6 adds Hall's condition on pairs:
@@ -2593,12 +2596,20 @@ that hit. Stage A was to decide by counting first:
 * and if the gated test is estimated at <= 5% of the d-first time.
 
 **Answer: no-go on both counts.**
-* Two thirds of the entries that pass level 2 need the exact test, in
-  all three sums counted.
-* The gated test would cost ~23% of the d-first time.
-* Even at zero cost, the pair rules would bring the d-first time only to
-  0.75-0.85 of level 2's. That leaves no room under the success bar
-  (<= 0.90 at N >= 15k).
+* The gate does not gate: (i) ∪ (ii), the entries that need the exact
+  test, are 65-75% of the entries that pass level 2 (66-68% in the counts
+  below, in all three sums), against the GO bar of 25%.
+* The pair work is far over budget: to reach <= 0.90 at N >= 15k the
+  whole pair stage may cost 8-15% of the level-2 time (below), while the
+  eager pair work is 45-73% of it, i.e. 3-10x the budget. The lazy design
+  saves at most half of that, and its estimate (~23% of the d-first time,
+  against <= 5% wanted) is optimistic: it prices the exact test per entry
+  that needs it, but the passes run on blocks of 8 entries, and with two
+  thirds of the lanes hit nearly every block pays for all 8.
+* The zero-cost ceiling is not the reason. With the pairs at no cost the
+  d-first time would be 0.75-0.85 of level 2's (below), which is below
+  the success bar (<= 0.90 at N >= 15k): the rules are worth having in
+  principle; their cost rules them out.
 * Stage B was not built.
 * The instrumentation is in `research/wip/patches/c2-classhall/`: three
   patches on be625d8 (c2/profile's DPROF instrumentation, the c2/vdclass
