@@ -1389,17 +1389,25 @@ LN8K = math.log(8000)
 # class rates of S and P traversals that the shipped P(magic | square)
 # corresponds to (analytic.md 4.3: 0.86 and 0.64 near S_min)
 TRAV_BASE = (0.86, 0.64)
-# prior strength of the per-P gamma factors: A_SQ = 15 is a between-P sd of
-# 1/sqrt(15) = 0.26 in ln(squares obs/pred) (the per-unit sd measured on
-# held-out units); squares within one P are overdispersed too (per-sum
-# Pearson chi2/df 2.5), so their counts enter the posterior divided by
-# PHI_SUM
-A_SQ, A_TRAV = 15.0, 30.0
+# prior strength of the per-P gamma factors: A_SQ = 6 is a between-P sd of
+# 1/sqrt(6) = 0.41 in ln(squares obs/pred), as measured by the calibration
+# search in the target region (research/calibration-target.md 3.1: sd 0.46
+# over its plain sums, 0.40 after stratum means; its GLM refit uses A_SQ 6).
+# It was 15 (sd 0.26, the per-unit sd of earlier held-out units), with
+# which 15-18% of those sums fell outside their 90% interval. Squares within
+# one P are overdispersed too (per-sum Pearson chi2/df 2.5), so their counts
+# enter the posterior divided by PHI_SUM
+A_SQ, A_TRAV = 6.0, 30.0
 PHI_SUM = 2.5
-# share of the forecast's E to quote after selection: held-out units that v2
-# itself ranked highest came in at 0.7-0.9 of their predicted magic density
-# (squares 0.87-0.94, P(magic) proxy 0.7-1.05; research/scheduler-v2.md)
-SELECTION_DISCOUNT = 0.8
+# selection: the forecast's E is no longer discounted (it was x0.8, from
+# held-out units v2 ranked highest at 0.7-0.9 of prediction). Within the
+# 3-6k band the calibration search found no winner's curse: the top
+# quartile by predicted magic per CPU-second came in at 0.96 [0.82, 1.11],
+# the slope of ln(obs/pred) on ln density +0.020 +- 0.027 (244 sums); the
+# earlier shortfall is the 6-12k squares correction, which the prior now
+# carries (calibration-target.md 5). What remains goes into the band as
+# lognormal(0, SELECTION_SD), the write-up's selection term.
+SELECTION_SD = 0.12
 EXPLORE_V2 = 0.0            # optimism: posterior mean + EXPLORE * sd
 
 # d-first units (msearch --diag-first; research/scheduler-v2.md, "d-first
@@ -1506,13 +1514,22 @@ def _prior(intercept, sd0, sd, **effects):
 # K7 (e^-0.16) and X01 (e^-0.08) on P(magic | square).
 GLM_PRIORS = {
     # squares: over-predicted below N' 1k (0.74 on 146 P), right at S_min
-    # (x < 0.05: 0.65) and at N' 6-12k (0.78-0.80, as analytic.md 3.4's
-    # held-out 0.78 at N 3.4-8.9k)
+    # (x < 0.05: 0.65); at N' 6-12k -0.08 (0.09), the calibration search's
+    # GLM refit with A_SQ 6 (calibration-target.md 3.1 and 5: its 25 sums
+    # there came in at 1.28 of the shipped -0.22 (0.15), x0.80, which had
+    # come from held-out live units at 0.78 and analytic.md 3.4's 0.78 at N
+    # 3.4-8.9k; the refit combines both)
     "sq": _prior(0.0, 0.3, 0.25, **{"N'<1k": (-0.25, 0.15), "x<0.1": (-0.1, 0.15),
-                                    "N' 6-12k": (-0.22, 0.15)}),
-    # S traversals at N' >= 3k: +0.04 (the review's +0.09 was not borne out
-    # by the live units, 0.91 relative, nor by all data, 0.94 at 3-12k)
-    "S": _prior(math.log(TRAV_BASE[0]), 0.1, 0.1, **{"N'>=3k": (0.04, 0.1)}),
+                                    "N' 6-12k": (-0.08, 0.09)}),
+    # S traversals per square at N' >= 3k: the shipped +0.04 x the
+    # calibration search's 0.939 at 3-6k [0.918, 0.960] (calibration-target.md
+    # 3.2: 5,408 / 5,759, p 5e-5 with the measured overdispersion), i.e.
+    # 0.04 + ln 0.939 = -0.023; at 6-12k its 0.973 [0.89, 1.07] (eff. 342),
+    # 0.04 + ln 0.973 = +0.013, i.e. +0.036 on top of the N' >= 3k effect
+    # (the review's +0.09 at N' >= 3k had already not been borne out by the
+    # live units, 0.91 relative)
+    "S": _prior(math.log(TRAV_BASE[0]), 0.1, 0.1, **{"N'>=3k": (-0.023, 0.1),
+                                                     "N' 6-12k": (0.036, 0.1)}),
     "P": _prior(math.log(TRAV_BASE[1]), 0.1, 0.1, **{"N'>=3k": (0.06, 0.1), "k>=7": (-0.08, 0.1),
                                                      "x<0.1": (-0.04, 0.1)}),
 }
@@ -4080,17 +4097,32 @@ def v2_emit(args):
         print(" ".join(sch.command(u, out, check=False)[1:]))
 
 
-FORECAST_TRUTHS = ("laws", "anchored")
+FORECAST_TRUTHS = ("measured", "laws", "anchored")
+# the "measured" truth: the measured CPU / the law's prediction per N' band
+# (NBAND_NAMES index) in the calibration search in the target region
+# (research/calibration-target.md 3.6, its archive/results/analyze.out
+# "## Time", sum(obs) / sum(pred), as its forecast_update.py variant
+# "time"): plain sums against the plain law (3-6k: 289 sums; 6-12k: 18;
+# 12-24k and >= 24k: the streams' est_time of 4 and 3 d-first sums), d-first
+# sums against the d-first law (7, 4 and 3 sums; at 3-6k, not measured,
+# the plain factor, as the ratio law held there: 0.95); 1 below 3k (not
+# measured). The plain law (engine 3) is right at 3-6k (0.97), where the
+# "anchored" truth charges plain sums 1.5x too much (0.65 of it).
+TIME_TRUTH_PLAIN = {2: 0.969, 3: 1.185, 4: 0.622, 5: 0.159}
+TIME_TRUTH_DFIRST = {2: 0.969, 3: 0.848, 4: 0.558, 5: 0.379}
 
 
 def unit_charge(sc, u, truth="laws"):
     """CPU seconds charged for a planned unit u: its predicted time (truth
-    "laws"), or under the "anchored" truth (research/scheduler-v2.md,
-    "d-first units"): a d-first sum costs the d-first law, a plain sum the
-    d-first law / r(N') at N' >= 5k (the measured ratio, and the d-first law
-    back-tests at 0.94 where the plain law is off by 0.3-1.35x), the plain
-    law at N' <= 3k, geometrically blended between; a calibration stream
-    the plain cost / k"""
+    "laws"); under the "measured" truth (TIME_TRUTH_PLAIN, _DFIRST: the
+    calibration search's measured CPU per N' band) a plain sum costs the
+    plain law and a d-first sum the d-first law, each x the factor of its N'
+    band, a calibration stream the plain cost / k; or under the "anchored"
+    truth (research/scheduler-v2.md, "d-first units"): a d-first sum costs
+    the d-first law, a plain sum the d-first law / r(N') at N' >= 5k (the
+    measured ratio, and the d-first law back-tests at 0.94 where the plain
+    law is off by 0.3-1.35x), the plain law at N' <= 3k, geometrically
+    blended between; a calibration stream the plain cost / k"""
     if truth == "laws":
         return u.time
     np = _np()
@@ -4100,6 +4132,18 @@ def unit_charge(sc, u, truth="laws"):
     else:
         S = np.arange(u.lo, u.hi + 1, dtype=float)
     sq, m, tp, td, tc, dm, lNp, lL, cell = sc.eval_modes(u.a, S)
+    if truth == "measured":
+        nb = np.searchsorted(np.log(NBAND_EDGES), lNp, side="right")
+        tpm = tp * np.array([TIME_TRUTH_PLAIN.get(int(b), 1.0) for b in nb])
+        tdm = td * np.array([TIME_TRUTH_DFIRST.get(int(b), 1.0) for b in nb])
+        Sg = sc.prof(u.a)[0]
+        below = S < (Sg[0] - 1e-9) if len(Sg) else np.ones(len(S), bool)
+        tpm[below] = tdm[below] = am.SUM_OVERHEAD
+        if u.mode == "dfirst":
+            c = float((u.frac * tdm + (tpm / u.calib if u.calib else 0.0)).sum())
+        else:
+            c = float(tpm.sum())
+        return c + am.UNIT_OVERHEAD
     if sc.policy == "off":
         c0, c1, c2, c3, c4, cb = sc._tcd
         k6 = int(sc.c.k[u.a])
@@ -4117,6 +4161,17 @@ def unit_charge(sc, u, truth="laws"):
     else:
         c = float(tpa.sum())
     return c + am.UNIT_OVERHEAD
+
+
+def forecast_truth(args):
+    """the truth a forecast charges its units under: --truth, by default
+    "measured" for --shipped (the shipped laws, corrected by the
+    calibration search's measured CPU) and "laws" otherwise (the laws as
+    learned from the state's records)"""
+    t = getattr(args, "truth", None)
+    if t:
+        return t
+    return "measured" if getattr(args, "shipped", False) else "laws"
 
 
 def v2_forecast(args):
@@ -4166,7 +4221,7 @@ def v2_forecast(args):
     curve = [(0.0, 0.0)]
     dmagic = dhours = 0.0
     ndunits = 0
-    truth = getattr(args, "truth", "laws") or "laws"
+    truth = forecast_truth(args)
     if truth != "laws":
         print(f"(each unit charged under the {truth!r} truth, see --truth; the plan uses the "
               f"scheduler's laws)")
@@ -4227,24 +4282,27 @@ def v2_forecast(args):
     if sc.policy != "off":
         forecast_plain_only(sch, budget, frac, marks_all, E_at, curve, yr, truth)
     # uncertainty: draws of the class factors (Laplace posterior) times
-    # lognormal(0, 0.2) for the pair factor and for SP+SP
+    # lognormal(0, 0.2) for the pair factor and for SP+SP, and
+    # lognormal(0, SELECTION_SD) for selection
     rng = np.random.default_rng(1)
     lg0, _, _, lm0 = sch.calib.rates()
     vals = []
     for lg, lm in sch.calib.draws(rng, args.draws):
         f = np.exp(lg - lg0 + lm - lm0)
         vals.append(float((Ecell * f).sum()) / frac
-                    * math.exp(rng.normal(0, 0.2) + rng.normal(0, 0.2)))
+                    * math.exp(rng.normal(0, 0.2) + rng.normal(0, 0.2)
+                               + rng.normal(0, SELECTION_SD)))
     E = magic / frac
     print(f"E({hours / frac / yr:.3g} CPU-years) = {E:.3g} at the posterior-mean log factors")
     if vals:
         q = np.percentile(vals, [5, 50, 95])
         print(f"  band from {len(vals)} draws (class-factor posterior x lognormal(0, 0.2) for PAIR "
-              f"and for SP+SP; the plan is not re-optimised per draw): 5% {q[0]:.3g}, median "
+              f"and for SP+SP x lognormal(0, {SELECTION_SD}) for selection; the plan is not "
+              f"re-optimised per draw): 5% {q[0]:.3g}, median "
               f"{q[1]:.3g}, mean {np.mean(vals):.3g}, 95% {q[2]:.3g} (the draws' median is above "
               f"the point: the factors vary per cell and the sum of lognormals is skewed)")
-    print(f"  after the selection discount (x{SELECTION_DISCOUNT}: units v2 ranks highest came in "
-          f"below prediction on held-out data): E = {SELECTION_DISCOUNT * E:.3g}")
+    print("  (no selection discount: the calibration search found no winner's curse within a "
+          "band; selection is in the band)")
     print(f"predicted CPU-years per magic square at this pace: {hours / magic / yr:.3g}")
 
 
@@ -4488,12 +4546,14 @@ def main():
     p.add_argument("--shipped", action="store_true",
                    help="analytic: use the shipped calibration (no learned class, time or "
                         "per-P factors)")
-    p.add_argument("--truth", choices=FORECAST_TRUTHS, default="laws",
+    p.add_argument("--truth", choices=FORECAST_TRUTHS, default=None,
                    help="analytic: the CPU each planned unit is charged (the plan is always "
-                        "made with the scheduler's laws): laws = its predicted time; anchored "
+                        "made with the scheduler's laws): measured (the default with "
+                        "--shipped) = the laws x the CPU the calibration search measured per "
+                        "N' band; laws (the default otherwise) = its predicted time; anchored "
                         "= the d-first law for d-first sums and the d-first law / the measured "
                         "ratio r(N') for plain sums at N' >= 5k (the plain law at <= 3k, "
-                        "blended between), which measures the d-first gain")
+                        "blended between; it overcharges the plain sums at 3-6k 1.5x)")
     p.set_defaults(func=dispatch(cmd_forecast, v2_forecast))
 
     p = sub.add_parser("fit")

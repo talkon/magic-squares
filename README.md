@@ -277,6 +277,13 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
     remains is the SP coupling (f_rho^2, ln sd 0.47).
   * The existence estimate's level factor goes from x/÷2.0 to x/÷1.8. Its
     large-N widening is unchanged: the search has only 7 sums at 12-45k.
+  * The scheduler ships these refits now (squares at 6-12k x0.93, S
+    traversals x0.94 at 3-6k, A_SQ 6, no selection discount, and `forecast
+    --shipped` charging each unit at the CPU measured per N' band). With
+    msearch engine 4 it forecasts **0.119 at 1 CPU-year and 0.269 at 10**
+    (90% band at 10: 0.09-0.88), before the f_rho^2 median 1.12 that the
+    0.126 / 0.28 above include (research/scheduler-v2.md, "The calibration
+    search's numbers in the shipped calibration").
 * Speedups are best compared by the ratio of E at a fixed budget: 10x faster
   gives x2.2 at 1 CPU-year and x1.5 at 1,000; time ~ N^2 instead of ~N^4
   beyond N = 4,000 gives x1.1 and x1.7.

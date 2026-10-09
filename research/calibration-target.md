@@ -473,3 +473,37 @@ The first analysis was reviewed twice before this write-up. The fixes:
   is corrected (section 1).
 * **Reproducibility.** The data are archived in the repository, and the paths are set by
   `CALIB_TARGET_DIR`.
+
+## 9. Shipped in the scheduler (round-2 integration)
+
+The scheduler now ships these numbers (research/scheduler-v2.md, "The
+calibration search's numbers in the shipped calibration"):
+
+* squares at N' 6-12k: the GLM prior -0.08 (sd 0.09), x0.93, in place of
+  -0.22 (0.15), x0.80 (section 3.1, the A_SQ 6 refit);
+* S traversals per square: x0.939 at 3-6k and x0.973 at 6-12k against the
+  previous prior (section 3.2), i.e. the N' >= 3k effect +0.04 -> -0.023
+  and a 6-12k effect of +0.036;
+* A_SQ 15 -> 6 (the measured between-sum sd, section 3.1);
+* no x0.8 selection discount; selection is a lognormal(0, 0.12) term of
+  the forecast's band (section 5);
+* `forecast --shipped` charges each unit under the "measured" truth by
+  default: the laws x the measured CPU / prediction of its N' band (section
+  3.6; this write-up's variant "time"). The engine-3 plain law is right at
+  3-6k (0.97), where the anchored truth charged 1.5x.
+
+Not shipped: the P-traversal effects (1.02-1.08) and f_rho (the SP
+coupling stays uncalibrated, section 6). The calibration search's ratio
+level (about -0.08 for engine 3) is not folded into the prior either; the
+scheduler learns it from the streams.
+
+With engine 4 (the class support and the star cover in the d-first
+search) and these numbers, `forecast --shipped` (10%, seed 1) gives E =
+0.119 at 1 CPU-year and 0.269 at 10 (90% band at 10: 0.090-0.88), as the
+0.118 / 0.268 of section 5's measured-CPU variant before f_rho^2.
+
+**Reproducing sections 1-8.** The scripts here import the scheduler, whose
+shipped calibration, engine and default truth have changed since: run them
+against the scheduler of ba9b503 (e.g. `git archive ba9b503 scripts |
+tar -x -C /some/dir` and put that `scripts/` first on `sys.path`, or check
+out ba9b503) to get the archived numbers.

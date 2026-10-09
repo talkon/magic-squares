@@ -228,12 +228,13 @@ Held-out evidence (not used for any constant when it was measured):
 
 So the squares model holds on held-out data within about +-10% on average.
 What v2 selects came in 5-15% low on squares and somewhat low on P(magic)
-(0.7-1.05). The **selection discount of 0.8** that `forecast` prints is the
+(0.7-1.05). The **selection discount of 0.8** that `forecast` printed was the
 middle of that range. The calibration search above finds no such effect
 within band once the 6-12k squares correction is refit. Its update
 therefore drops the discount and carries selection as a band term instead.
-`forecast` still prints the x0.8 (SELECTION_DISCOUNT in scheduler.py is
-unchanged).
+`forecast` no longer prints the x0.8: SELECTION_DISCOUNT is gone and its
+band has a lognormal(0, 0.12) selection term ("The calibration search's
+numbers in the shipped calibration" below).
 
 ## Caveats and open points
 
@@ -735,6 +736,59 @@ adversarial review, and a live run with kills and restarts) found:
   replaces its squares in the cells (the sum then has two plain-time rows).
 * v1 (`--model regression`) still never launches d-first units, and counts
   a sum searched in parts as unsearched.
+
+## The calibration search's numbers in the shipped calibration (round-2 integration)
+
+research/calibration-target.md searched 321 pre-registered sums at N' 3-45k
+against the frozen predictions of this scheduler. Its refit numbers, as
+shipped now (each from that write-up; its scripts are in
+research/calibration-target/):
+
+| what | before | now | source |
+| --- | --- | --- | --- |
+| squares GLM prior, N' 6-12k | -0.22 (sd 0.15), x0.80 | -0.08 (sd 0.09), x0.93 | its GLM refit with A_SQ 6 (glm.out: -0.078 +- 0.085); 25 sums at 1.28 of x0.80 |
+| S traversals per square, N' >= 3k | +0.04 | -0.023 (x0.939 at 3-6k) | 3-6k: 5,408 / 5,759 = 0.939 [0.918, 0.960] |
+| S traversals, N' 6-12k | 0 | +0.036 (x0.973 overall) | 6-12k: 0.973 [0.89, 1.07] |
+| A_SQ (between-P sd of squares) | 15 (sd 0.26) | 6 (sd 0.41) | between-sum sd 0.46, 0.40 after stratum means |
+| selection | E x0.8 quoted | no discount; lognormal(0, 0.12) in the band | top quartile 0.96 [0.82, 1.11], slope +0.020 +- 0.027 |
+| forecast truth (default with `--shipped`) | laws | "measured": the laws x the measured CPU / prediction per N' band | 3.6 and analyze.out "## Time" |
+
+* P traversals (1.02-1.08) and the SP coupling (f_rho, 7 pairs) are not
+  moved: neither was asked of the scheduler's prior, and f_rho is not
+  calibrated (calibration-target.md 6).
+* **The measured truth** (`--truth measured`, `TIME_TRUTH_PLAIN` /
+  `TIME_TRUTH_DFIRST`): plain sums at the plain law x 0.969 (3-6k, 289
+  sums), 1.185 (6-12k, 18), 0.622 and 0.159 (12-24k and >= 24k: the
+  streams' est_time of 4 and 3 d-first sums); d-first sums at the d-first
+  law x 0.969 (3-6k: not measured, the plain factor, since the ratio law
+  held), 0.848, 0.558 and 0.379 (7, 4 and 3 sums); 1 below 3k. It is
+  the write-up's variant "time" (forecast_update.py `corrected_charge`).
+  The engine-3 plain law was right at 3-6k (0.97), where the "anchored"
+  truth charged the plain sums 1.5x (0.65 of it); "anchored" stays as an
+  option. The factors are relative to engine 3's laws; engine 4's d-first
+  law is engine 3's x the measured engine 4 / 3 factor, so the product
+  stays the measured truth. Without `--shipped` the default stays "laws":
+  a state's learned laws already absorb its own records.
+* The above-12k factors rest on 7 sums (effectively a handful of squares
+  and a few CPU-hours); they matter little at 1-10 CPU-years (2% of E above
+  12k at 10).
+* Forecast with these (engine 4, `forecast --shipped`, 10% of the
+  candidates, seed 1, on the calibration search's profiled state; the
+  plan is made with the shipped laws, each unit charged under the truth):
+
+  | truth | E 0.1 CPU-yr | E 1 | E 10 | E with / without d-first at 1 / 10 | CPU for the plain-only E of 10 |
+  | --- | ---: | ---: | ---: | --- | ---: |
+  | measured (default) | 0.045 | 0.119 | 0.269 | 0.998 / 1.069 | 1.23x less |
+  | anchored | 0.045 | 0.116 | 0.257 | 1.061 / 1.133 | 1.48x less |
+
+  90% band at 10 CPU-years (measured truth, 400 draws: class factors,
+  pair and SP+SP factors lognormal(0, 0.2), selection lognormal(0, 0.12)):
+  0.090-0.88. The write-up's own forecast (engine 3, the updated class
+  factors, its measured truth) was 0.118 / 0.268 before its f_rho^2 median
+  1.12 (0.132 / 0.30 with it), the same as here: engine 4's d-first gain
+  moves E little at 1-10 CPU-years under the measured truth, which charges
+  the plain sums at 3-6k at the plain law (d-first holds 75% of E in 91% of
+  the CPU at 10 CPU-years).
 
 ## Fixes after verification
 

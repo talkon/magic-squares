@@ -502,8 +502,10 @@ def test_fit_poisson_map():
     c_hi = scheduler.cell_index(math.log(4000), 7, 0, 0.05)
     c_sm = scheduler.cell_index(math.log(800), 6, 0, 0.05)
     assert abs(math.exp(lm[c_low]) - am.PAIR) < 1e-9 and abs(lg[c_low]) < 1e-12
-    # N' >= 3k: e^{2 (0.04 + 0.06)}; k >= 7: e^{-0.16}; x < 0.1: e^{-0.08}
-    assert abs(math.exp(lm[c_hi]) / (am.PAIR * math.exp(0.2) * am.K7 * am.X01) - 1) < 0.01
+    # N' 3-6k: e^{2 (-0.023 + 0.06)} (S x0.939 after the calibration
+    # search); k >= 7: e^{-0.16}; x < 0.1: e^{-0.08}
+    assert abs(math.exp(lm[c_hi]) / (am.PAIR * math.exp(2 * (-0.023 + 0.06)) * am.K7 * am.X01)
+               - 1) < 0.01
     assert abs(lg[c_sm] - (-0.25 - 0.1)) < 1e-12
     # quasi-Poisson: the same data with dispersion 4 gives a 2x wider se
     _, C1 = scheduler.fit_poisson_map(Z, y, np.log(E), mean, sd)
@@ -1670,6 +1672,10 @@ def test_dfirst_e2e():
         out = run("--state", state, "forecast", *opts, "--hours", "0.01", "--draws", "0",
                   "--truth", "anchored")
         assert "under the 'anchored' truth" in out, out
+        out = run("--state", state, "forecast", *opts, "--hours", "0.01", "--draws", "2",
+                  "--shipped")
+        assert "under the 'measured' truth" in out and "for selection" in out, out
+        assert "no selection discount" in out, out
     print("d-first end to end ok")
 
 
@@ -1982,6 +1988,52 @@ def test_dfirst_star_cover():
     print("d-first star coverage ok")
 
 
+def test_calibration_target():
+    """the shipped calibration after the calibration search in the target
+    region (research/calibration-target.md): squares at N' 6-12k x0.93,
+    S traversals x0.939 at 3-6k and x0.973 at 6-12k against the previous
+    priors, A_SQ 6, no selection discount (a band term instead), and the
+    "measured" truth of forecast --shipped (the laws x the measured CPU
+    per N' band)"""
+    import numpy as np
+    lg, lS, lP, lm = scheduler.Calibration().rates()
+    c36 = scheduler.cell_index(math.log(4000), 6, 0, 0.2)
+    c612 = scheduler.cell_index(math.log(8000), 6, 0, 0.2)
+    c13 = scheduler.cell_index(math.log(2000), 6, 0, 0.2)
+    assert abs(lg[c612] - (-0.08)) < 1e-12 and abs(lg[c36]) < 1e-12
+    base = math.log(scheduler.TRAV_BASE[0])
+    assert abs(lS[c13] - base) < 1e-12
+    assert abs(math.exp(lS[c36] - base) / (math.exp(0.04) * 0.939) - 1) < 1e-3
+    assert abs(math.exp(lS[c612] - base) / (math.exp(0.04) * 0.973) - 1) < 1e-3
+    assert scheduler.A_SQ == 6.0 and scheduler.SELECTION_SD == 0.12
+    assert not hasattr(scheduler, "SELECTION_DISCOUNT")
+    ns = argparse.Namespace
+    assert scheduler.forecast_truth(ns(truth=None, shipped=True)) == "measured"
+    assert scheduler.forecast_truth(ns(truth=None, shipped=False)) == "laws"
+    assert scheduler.forecast_truth(ns(truth="anchored", shipped=True)) == "anchored"
+    # unit_charge under the measured truth: each sum at its law x the
+    # factor of its N' band
+    P = (13, 7, 4, 3, 1, 1)
+    with tempfile.TemporaryDirectory() as state:
+        cands, sc, plan = make_v2([P], state, unit_time=1e9)
+        S = np.arange(1850.0, 2700.0, 10.0)
+        sq, m, tp, td, tc, dm, lNp, lL, cell = sc.eval_modes(0, S)
+        nb = np.searchsorted(np.log(scheduler.NBAND_EDGES), lNp, side="right")
+        assert set(nb) >= {2, 3, 4}
+        for i in (0, len(S) // 2, len(S) - 1):
+            u = scheduler.UnitV2(P, int(S[i]), int(S[i]), 0, 1, 0, 0, 0, None, None, None,
+                                 "plain")
+            want = tp[i] * scheduler.TIME_TRUTH_PLAIN.get(int(nb[i]), 1.0)
+            got = scheduler.unit_charge(sc, u, "measured") - scheduler._am().UNIT_OVERHEAD
+            assert abs(got / want - 1) < 1e-9, (got, want)
+            u = u._replace(mode="dfirst", dlo=0, dhi=100, nd=1000, calib=10, frac=0.25)
+            want = (0.25 * td[i] * scheduler.TIME_TRUTH_DFIRST.get(int(nb[i]), 1.0)
+                    + tp[i] * scheduler.TIME_TRUTH_PLAIN.get(int(nb[i]), 1.0) / 10)
+            got = scheduler.unit_charge(sc, u, "measured") - scheduler._am().UNIT_OVERHEAD
+            assert abs(got / want - 1) < 1e-9, (got, want)
+    print("calibration target ok")
+
+
 def test_no_enumerate():
     """A9: the analytic paths never call bin/enumerate (or any subprocess
     other than msearch)"""
@@ -2114,6 +2166,7 @@ if __name__ == "__main__":
     test_dfirst_e2e()
     test_dfirst_star()
     test_dfirst_star_cover()
+    test_calibration_target()
     test_no_enumerate()
     test_commands_v2()
     test_commands()
