@@ -4,7 +4,9 @@ Tests of scheduler.py and of scheduler v2 (amodel.py, pool.py): the
 regression fit on synthetic data, coverage tracking, the analytic model's
 reference numbers and guards, the exact pool generator, the profile store,
 the lazy planner against brute force, the learning (GLM MAP, per-P factors,
-time refit), the incremental summary, and the commands end to end on a few
+time refit), the incremental summary, d-first units (mode choice, the
+d-first time law, d-range units merged and resumed, the calibration
+streams in the cells), and the commands end to end on a few
 small values of P in temporary state directories, with both models. Needs
 numpy and a build (bin/msearch; bin/enumerate for --model regression).
 
@@ -791,7 +793,8 @@ def test_dfirst_summary():
         import io
         buf = io.StringIO()
         scheduler.report_v2(sch, out=buf)
-        assert "d-first (not in the fits): 1 sums searched in full, 1 parts" in buf.getvalue()
+        assert "d-first (in the d-first time law only): 1 sums searched in full, 1 parts" \
+            in buf.getvalue()
         assert "(d-first)" in buf.getvalue()
     # a notable square of a sum searched twice (two units) is notable once;
     # the units never inherit bench's SAMPLE_* variables
@@ -851,7 +854,8 @@ def test_dfirst_summary():
         assert s.cover[key] == [[327, 328], [330, 330], [333, 333]], s.cover
         assert s.totals["sums"] == 3 and s.totals["dfirst_sums"] == 1
         assert s.totals["dfirst_partial"] == 1
-        assert sum(st["n"] for st in s.time.values()) <= 3
+        assert sum(st["n"] for k, st in s.time.items() if k.endswith(":plain")) <= 3
+        assert set(s.time) <= {"3:plain", "3:dfirst"}, s.time.keys()
         # v1 agrees on the coverage
         res = scheduler.Results(6)
         for name in "abcd":
@@ -864,6 +868,447 @@ def test_dfirst_summary():
         assert sorted(res.covered[P]) == [(327, 327), (327, 328), (328, 328), (330, 330),
                                           (330, 330), (333, 333), (333, 333)], res.covered
     print("d-first summary ok")
+
+
+def _dchunk(P, S, lo, hi, raw=None, stride=1, truncated=0):
+    r = {"type": "dchunk", "n": 6, "P": list(P), "S": S, "d_lo": lo, "d_hi": hi,
+         "d_stride": stride, "d_offset": 0, "nd": (hi - lo + stride - 1) // stride, "nodes": 10,
+         "pairs": 0, "partners": 0, "time": 0.01 * (hi - lo), "truncated": truncated}
+    if raw is not None:
+        r["nvecs_raw"] = raw
+    return r
+
+
+def _dsum(P, S, lo, hi, raw, cpu=10.0, time_=9.9, index_time=0.1, complete=0, stride=1,
+          truncated=0):
+    nd = (hi - lo + stride - 1) // stride
+    return {"type": "dsum", "mode": "dfirst", "n": 6, "P": list(P), "S": S, "nvecs": raw - 1,
+            "nvecs_raw": raw, "labels": 150, "d_lo": lo, "d_hi": hi, "d_stride": stride,
+            "d_offset": 0, "nd": nd, "nodes": 10 ** 6, "pairs": 0, "partners": 0, "time": time_,
+            "index_time": index_time, "cpu": cpu, "truncated": truncated, "complete": complete,
+            "engine": 3}
+
+
+def _done(P, lo, hi):
+    return {"type": "done", "n": 6, "P": list(P), "min_sum": lo, "last_sum": hi, "complete": 1,
+            "time": 1.0, "mode": "dfirst", "diag_first_min_n": 0}
+
+
+def _write(path, recs, tail=""):
+    with open(path, "w") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in recs) + tail)
+
+
+def test_dfirst_merge():
+    """v2: the parts of a d-first sum (--d-range units: dchunk records with
+    d_stride 1) merge into dcov, robust to duplicates, overlaps, killed units
+    (chunks without a dsum, a partial last line), sampled parts (ignored)
+    and chunks without nvecs_raw; the sum is covered once they cover every d
+    (counted once), also across incremental reads and a save / load; the
+    d-first time law learns the whole-sum CPU of a part (the cost profile
+    along d), and the plain law never sees it"""
+    saved = scheduler.DFIRST_TIME_MIN_N
+    scheduler.DFIRST_TIME_MIN_N = 1000   # (these sums have 1000 d)
+    try:
+        _test_dfirst_merge()
+    finally:
+        scheduler.DFIRST_TIME_MIN_N = saved
+    # with the default, a sum of 1000 d teaches the law nothing
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        P = (12, 6, 3, 2, 1, 1)
+        _write(os.path.join(units, "a.jsonl"), [_dchunk(P, 890, 0, 512, 1000),
+                                                _dsum(P, 890, 0, 512, 1000)])
+        s = scheduler.Summary(state, 6)
+        s.update(units, scheduler.ProfileStore(state, None, 6))
+        assert not s.time and s.dcov
+    print("d-first merge ok")
+
+
+def _test_dfirst_merge():
+    import amodel as am
+    P = (12, 6, 3, 2, 1, 1)
+    key = "12_6_3_2_1_1"
+    S, raw = 890, 1000
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        # unit a: d 0..512 in two chunks; b: a duplicate of the first chunk;
+        # c: an overlap 400..700; d: killed after its chunk 700..800 (no
+        # dsum, a partial line); e: a d-stride 3 sample of 800..1000
+        _write(os.path.join(units, "a.jsonl"),
+               [_dchunk(P, S, 0, 256, raw), _dchunk(P, S, 256, 512, raw),
+                _dsum(P, S, 0, 512, raw), _done(P, S, S)])
+        _write(os.path.join(units, "b.jsonl"),
+               [_dchunk(P, S, 0, 256, raw), _dsum(P, S, 0, 256, raw), _done(P, S, S)])
+        _write(os.path.join(units, "c.jsonl"),
+               [_dchunk(P, S, 400, 656, raw), _dchunk(P, S, 656, 700, raw),
+                _dsum(P, S, 400, 700, raw), _done(P, S, S)])
+        _write(os.path.join(units, "d.jsonl"), [_dchunk(P, S, 700, 800, raw)],
+               tail=json.dumps(_dchunk(P, S, 800, 900, raw))[:40])
+        _write(os.path.join(units, "e.jsonl"),
+               [_dchunk(P, S, 800, 1000, raw, stride=3), _dsum(P, S, 800, 1000, raw, stride=3),
+                _done(P, S, S)])
+        s = scheduler.Summary(state, 6)
+        s.update(units, store)
+        assert not s.cover.get(key), s.cover
+        assert s.dcov[key] == {str(S): {"nd": raw, "iv": [[0, 800]]}}, s.dcov
+        nd, iv, frac = s.dfirst_part(key, S)
+        assert nd == raw and abs(frac - float(am.dfirst_cost_cum(0.8))) < 1e-12
+        assert s.totals["dfirst_sums"] == 0 and s.totals["dfirst_partial"] == 4
+        # the d-first time law: one row per part with d_stride 1 (a, b, c),
+        # its CPU scaled to the whole sum by the cost profile
+        T = s.time["3:dfirst"]
+        assert T["n"] == 3 and "3:plain" not in s.time and not s.perP[key]["cells"], s.time.keys()
+        ys = []
+        for lo, hi in ((0, 512), (0, 256), (400, 700)):
+            f = am.dfirst_cost_frac(lo, hi, raw)
+            ys.append(math.log(0.1 + 0.1 + 9.8 / f))
+        assert abs(T["yy"] - sum(y * y for y in ys)) < 1e-9, (T["yy"], ys)
+        # the killed unit's run continues from 800 (a rerun of 800..900
+        # whose first record is a duplicate), and covers the sum
+        _write(os.path.join(units, "f.jsonl"),
+               [_dchunk(P, S, 800, 900, raw), _dchunk(P, S, 900, 1000, raw),
+                _dsum(P, S, 800, 1000, raw), _done(P, S, S)])
+        s.update(units, store)
+        assert s.cover[key] == [[S, S]] and key not in s.dcov, (s.cover, s.dcov)
+        assert s.totals["dfirst_sums"] == 1 and s.perP[key]["dfirst_S"] == [S]
+        # a complete dsum of the same sum later: still one sum
+        _write(os.path.join(units, "g.jsonl"),
+               [_dsum(P, S, 0, raw, raw, complete=1), _done(P, S, S)])
+        s.update(units, store)
+        assert s.totals["dfirst_sums"] == 1 and s.cover[key] == [[S, S]]
+        # chunks without nvecs_raw (an older msearch): the number of d comes
+        # from a dsum; then the sum completes from chunks alone
+        S2 = 891
+        _write(os.path.join(units, "h.jsonl"), [_dchunk(P, S2, 0, 500)])
+        s.update(units, store)
+        assert s.dcov[key][str(S2)] == {"nd": None, "iv": [[0, 500]]}
+        _write(os.path.join(units, "i.jsonl"), [_dsum(P, S2, 0, 500, 600)])
+        s.update(units, store)
+        assert s.dcov[key][str(S2)] == {"nd": 600, "iv": [[0, 500]]}
+        _write(os.path.join(units, "j.jsonl"), [_dchunk(P, S2, 500, 600)])
+        s.update(units, store)
+        assert s.cover[key] == [[S, S2]] and key not in s.dcov
+        # the same from scratch, and after a save / load
+        whole = scheduler.Summary(state, 6)
+        whole.update(units, store)
+        assert summary_state(whole) == summary_state(s)
+        assert whole.dcov == s.dcov
+        s.save()
+        again = scheduler.Summary.load(state, 6)
+        assert summary_state(again) == summary_state(s) and again.dcov == s.dcov
+    # a part read before and after a save keeps its intervals; the plain
+    # search of a sum searched in part removes it from dcov
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        _write(os.path.join(units, "a.jsonl"), [_dchunk(P, S, 0, 300, raw)])
+        s = scheduler.Summary(state, 6)
+        s.update(units, store)
+        s.save()
+        s = scheduler.Summary.load(state, 6)
+        _write(os.path.join(units, "b.jsonl"), [_dchunk(P, S, 250, 600, raw)])
+        s.update(units, store)
+        assert s.dcov[key][str(S)]["iv"] == [[0, 600]]
+        write_unit(os.path.join(units, "c.jsonl"), P, [(S, 2)], done=(S, S))
+        s.update(units, store)
+        assert key not in s.dcov and s.cover[key] == [[S, S]]
+
+
+def test_dfirst_plan():
+    """v2: the mode of each sum (the d-first law plus the calibration
+    stream against the plain law), the d-first prior and its online level,
+    units of d sized to --unit-time by the cost profile, resumed from the
+    first d not searched, the calibration stream on the first unit of a sum
+    only, the parts adding up to the sum (E and CPU), and the upper bounds
+    of the lazy planner with d-first"""
+    import numpy as np
+    import amodel as am
+    # the d-first prior, and a level learned online (the slope held)
+    tmd = scheduler.current_time_model({}, mode="dfirst")
+    assert tmd.mode == "dfirst" and tmd.engine == 3
+    assert np.allclose(tmd.th, am.DFIRST_TIME_PRIOR["th"]) and tmd.sd == am.DFIRST_TIME_PRIOR["sd"]
+    rng = np.random.default_rng(7)
+    lNp = np.log(rng.uniform(5000, 30000, 40))
+    lL = np.log(rng.uniform(150, 280, 40))
+    y = tmd.log_time(lNp, lL, 6) + math.log(0.6) + 0.5 * (lNp - math.log(4000)) \
+        + rng.normal(0, 0.2, 40)
+    y -= 0.5 * np.mean(lNp - math.log(4000))   # the same mean level, another slope
+    st = am.TimeModel.stats(am.time_features(lNp, lL, 6), y)
+    models = scheduler.fit_time_models({"3:dfirst": st, "3:plain": st})
+    td2 = scheduler.current_time_model(models, mode="dfirst")
+    assert td2.mode == "dfirst" and td2.n == 40
+    assert abs(td2.th[1] - tmd.th[1]) < 1e-3 and np.allclose(td2.th[2:], tmd.th[2:], atol=1e-3)
+    assert abs(td2.th[0] - tmd.th[0] - math.log(0.6)) < 0.1, td2.th
+    # the plain law of the same data is fitted from the plain prior
+    assert np.allclose(models["3:plain"].th[1:4], am.time_prior(3).th[1:4], atol=1e-3)
+    assert scheduler.current_time_model(models, engine=4, mode="dfirst").th[0] == td2.th[0]
+    P = (13, 7, 4, 3, 1, 1)
+    with tempfile.TemporaryDirectory() as state:
+        cands, sc, plan = make_v2([P], state, unit_time=600.0)
+        tm, tmd = sc.tm, sc.tmd
+        # the mode choice, from the two laws
+        S = np.arange(1850.0, 2700.0, 10.0)
+        sq, m, tp, td, tc, dm, lNp, lL, cell = sc.eval_modes(0, S)
+        assert np.allclose(tp, tm.time(lNp, lL, 6), rtol=1e-6)
+        assert np.allclose(td, tmd.time(lNp, lL, 6), rtol=1e-6)
+        assert np.allclose(tc, np.minimum(tp, scheduler.CALIB_FRAC * td))
+        assert (dm == ((td + tc < tp) & (lNp >= math.log(scheduler.DFIRST_MIN_NP)))).all()
+        # (measured: plain at N 4.1k, S = 1900; d-first at 15.2k, S = 2200)
+        assert not dm[S == 1900][0] and dm[S == 2200][0] and dm[S >= 2200].all()
+        t_eff = sc.eval_sums(0, S)[2]
+        assert np.allclose(t_eff, np.where(dm, td + tc, tp))
+        # grid_density agrees with eval_sums at the grid points
+        Sg = sc.prof(0)[0]
+        g = sc.grid_density([0])[0]
+        g = g[np.isfinite(g)]
+        sqg, mg, tg = sc.eval_sums(0, Sg)[:3]
+        assert np.allclose(g, np.log(mg / tg), rtol=1e-3, atol=1e-3)
+        sc.policy = "off"
+        assert not sc.eval_modes(0, S)[5].any() and np.allclose(sc.eval_sums(0, S)[2], tp)
+        sc.policy, sc.ldmin = "on", 0.0
+        assert sc.eval_modes(0, S)[5].all()
+        sc.policy, sc.ldmin = "auto", math.log(scheduler.DFIRST_MIN_NP)
+        # a sum of ~11k CPU-s at S = 2400 in units of d (600 s each)
+        f0 = int(plan.f0[0])
+        plan.set_cover(0, [[f0, 2399]])
+        assert plan.frontier[0] == 2400
+        sq1, m1, tp1, td1, tc1 = [float(v[0]) for v in sc.eval_modes(0, [2400.0])[:5]]
+        units = []
+        while plan.frontier[0] == 2400:
+            u = plan.unit(0)
+            units.append(u)
+            plan.advance_unit(u)
+            assert len(units) < 100
+        n_exp = td1 / 600
+        assert abs(len(units) - n_exp) <= 1.5, (len(units), n_exp)
+        assert all(u.mode == "dfirst" and u.lo == u.hi == 2400 for u in units)
+        nd = units[0].nd
+        assert abs(nd - math.exp(sc.eval_modes(0, [2400.0])[6][0])) <= 1
+        assert units[0].dlo == 0 and units[0].calib > 1 and all(u.calib == 0 for u in units[1:])
+        assert all(a.dhi == b.dlo for a, b in zip(units, units[1:]))
+        # (the last unit runs to the end of the sum: nd is only predicted)
+        assert units[-1].dhi is None and all(u.dhi is not None for u in units[:-1])
+        assert abs(sum(u.frac for u in units) - 1) < 1e-9
+        assert abs(sum(u.magic for u in units) - m1) < 1e-9 * m1
+        k = units[0].calib
+        assert abs(k - tp1 / (scheduler.CALIB_FRAC * td1)) <= 0.5
+        assert abs(sum(u.time for u in units) - (td1 + tp1 / k + len(units) * am.UNIT_OVERHEAD)) \
+            < 1e-6 * td1
+        for u in units[:-2]:
+            assert abs(u.frac * td1 - 600) < 0.01 * 600 + td1 / nd, (u.frac * td1, u)
+        # the first part has the density of the whole sum with its stream
+        # (spread over the parts), the others that of the d loop alone
+        assert abs(units[0].score / (m1 / (td1 + tc1)) - 1) < 0.01
+        assert all(abs(u.score / (m1 / td1) - 1) < 0.01 for u in units[1:-1]), \
+            [u.score * td1 / m1 for u in units]
+        assert plan.frontier[0] > 2400 and plan.cover[0] == [[f0, 2400]], plan.cover[0]
+        assert 2400 not in plan.dpart.get(0, {})
+        # resume from the records of a sum searched in part (nd known)
+        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 5000], [9000, 9500]])}, {2400})
+        u = plan.unit(0)
+        assert u.dlo == 5000 and 5000 < u.dhi <= 9000 and u.calib == 0 and u.nd == 23000
+        assert scheduler.dfirst_args(u) == ["--diag-first", "--diag-first-min-n", "0", "--d-range",
+                                            f"5000:{u.dhi}"]
+        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 8990], [9000, 9500]])}, set())
+        u = plan.unit(0)
+        assert (u.dlo, u.dhi) == (8990, 9000) and u.calib > 0
+        plan.advance_unit(u)
+        u = plan.unit(0)
+        assert u.dlo == 9500 and u.calib == 0
+        # (--dfirst off: the sum is searched plain, whole)
+        sc.policy = "off"
+        u = plan.unit(0)
+        assert u.mode == "plain" and u.lo == 2400 and u.dlo is None
+        assert scheduler.dfirst_args(u) == []
+        sc.policy = "auto"
+        # whole d-first sums in one unit (S = 2000: ~240 s each)
+        plan.set_cover(0, [[f0, 1999]], {}, set())
+        u = plan.unit(0)
+        assert u.mode == "dfirst" and u.dlo is None and u.hi > u.lo and u.calib > 0
+        assert "--d-range" not in scheduler.dfirst_args(u)
+    # upper bounds hold with d-first (and with --dfirst on)
+    Ps = small_pool(60, seed=11)
+    with tempfile.TemporaryDirectory() as state:
+        for policy in ("auto", "on"):
+            cands, sc, plan = make_v2(Ps, state, unit_time=30.0)
+            sc.policy = policy
+            if policy == "on":
+                sc.ldmin = 0.0
+            ub = plan.upper_bounds(np.arange(len(Ps)))
+            nd = 0
+            for a in range(len(Ps)):
+                u = plan.unit(a)
+                assert u is None or u.score <= ub[a] * (1 + 1e-9), (Ps[a], u, ub[a])
+                nd += u is not None and u.mode == "dfirst"
+            assert policy == "auto" or nd > 0
+    print("d-first plan ok")
+
+
+def test_calib_cells():
+    """v2: the calibration stream of a d-first sum (csum mode calib and its
+    csquare records) enters the cells: squares with expectation E_sq / k
+    and the traversals of its squares, weighted by its sampling dispersion;
+    a stream repeated, or of a sum searched plain before, is not counted
+    again; a plain search after it replaces it; r1-sampled research records
+    stay out; the csquares wait for their csum across reads"""
+    P = (12, 6, 3, 2, 1, 1)
+    key = "12_6_3_2_1_1"
+    S = 890
+    grid = [[1] * 6] * 6
+
+    def csq(i, best=3):
+        return {"type": "csquare", "n": 6, "P": list(P), "weight": 10, "S": S, "s_count": 2 + i,
+                "p_count": 1, "sp_count": i % 2, "best_score": best, "hash": f"c{i}",
+                "grid": grid}
+
+    def csum(k=10, o=3, se=20.0, mode="calib", S_=S):
+        r = {"type": "csum", "mode": mode, "n": 6, "P": list(P), "S": S_, "nvecs": 900,
+             "nvecs_raw": 910, "labels": 120, "squares": o, "est_squares": k * o,
+             "se_squares": se, "cpu": 0.5, "time": 0.5, "truncated": 0, "engine": 3}
+        r["r1_stride"] = k
+        return r
+
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        # the reference: the plain sum S and its 3 squares
+        ref = scheduler.Summary(state, 6)
+        refp = os.path.join(state, "ref.jsonl")
+        write_unit(refp, P, [(S, 3)], [(S, 2, 1, 0, 3), (S, 3, 1, 1, 3), (S, 4, 1, 0, 3)],
+                   done=(S, S))
+        ref.update_file(refp, store)
+        (c, row), = ref.perP[key]["cells"].items()
+        E = row[2]
+        # the stream: 3 sampled squares at k = 10 (one notable), its csum
+        # in the next read
+        path = os.path.join(units, "u.jsonl")
+        recs = [csq(0), csq(1, best=7), csq(2)]
+        _write(path, recs + [_dsum(P, S, 0, 910, 910, complete=1)])
+        s = scheduler.Summary(state, 6)
+        s.update(units, store)
+        assert not s.perP[key]["cells"] and s.totals["calib_sums"] == 0
+        _write(path, recs + [_dsum(P, S, 0, 910, 910, complete=1), csum(), _done(P, S, S)])
+        s.update(units, store)
+        w = min(1.0, scheduler.PHI_SUM / (scheduler.CALIB_PHI + scheduler.PHI_SUM / 10))
+        cells = s.perP[key]["cells"]
+        assert list(cells) == [c], cells
+        got = cells[c]
+        assert got[0] == 0 and abs(got[1] - 3 * w) < 1e-9 and abs(got[2] - w * E / 10) < 1e-9
+        # the traversals of its squares, with the same expectations per
+        # square as a plain search's
+        for j in range(3, 9):
+            assert abs(got[j] - w * row[j]) < 1e-9 * max(1, row[j]), (j, got, row)
+        T = s.totals
+        assert (T["calib_sums"], T["calib_squares"], T["calib_cpu"]) == (1, 3, 0.5)
+        assert abs(T["calib_est"] - 30) < 1e-9 and abs(T["calib_pred"] - E) < 1e-9
+        assert T["squares"] == 0 and T["sampled_cpu"] == 0
+        assert [q["hash"] for q in s.notable] == ["c1"] and s.notable[0]["calib"] == 1
+        assert s.perP[key]["calS"][str(S)][0] == c
+        # the same from scratch
+        whole = scheduler.Summary(state, 6)
+        whole.update(units, store)
+        assert summary_state(whole) == summary_state(s)
+        # a second stream of the same sum: not counted again
+        _write(os.path.join(units, "v.jsonl"), [csq(0), csum(), _done(P, S, S)])
+        s.update(units, store)
+        assert s.perP[key]["cells"][c] == got and s.totals["calib_dup"] == 1
+        # the plain search of the sum replaces the stream
+        write_unit(os.path.join(units, "w.jsonl"), P, [(S, 3)],
+                   [(S, 2, 1, 0, 3), (S, 3, 1, 1, 3), (S, 4, 1, 0, 3)], done=(S, S))
+        s.update(units, store)
+        for j in range(9):
+            assert abs(s.perP[key]["cells"][c][j] - row[j]) < 1e-9, (s.perP[key]["cells"], row)
+        assert s.totals["calib_sums"] == 0
+        # a stream of a sum searched plain before: not counted
+        _write(os.path.join(units, "x.jsonl"), [csq(0), csum(), _done(P, S, S)])
+        s.update(units, store)
+        assert s.totals["calib_dup"] == 2 and abs(s.perP[key]["cells"][c][1] - row[1]) < 1e-9
+        # the weight from the stream's dispersion where it sampled >= 5
+        # squares: phi = se^2 / (k est)
+        S3 = 892
+        _write(os.path.join(units, "y.jsonl"),
+               [dict(csq(i), S=S3) for i in range(6)]
+               + [csum(k=4, o=6, se=24.0, S_=S3), _done(P, S3, S3)])
+        s.update(units, store)
+        phi = 24.0 ** 2 / (4 * 24)
+        w3 = min(1.0, scheduler.PHI_SUM / (phi + scheduler.PHI_SUM / 4))
+        row3 = s.perP[key]["calS"][str(S3)]
+        assert abs(row3[1] - 6 * w3) < 1e-9 and w3 < 1
+        # r1-sampled research output: neither cells nor calibration
+        n0 = dict(s.totals)
+        _write(os.path.join(units, "z.jsonl"),
+               [dict(csq(0), S=S3 + 1), csum(mode="sampled", S_=S3 + 1),
+                {"type": "done", "n": 6, "P": list(P), "min_sum": S3 + 1, "last_sum": S3 + 1,
+                 "complete": 1, "time": 1.0, "mode": "sampled", "r1_sample": 1}])
+        s.update(units, store)
+        assert s.totals["calib_sums"] == n0["calib_sums"] and s.totals["sampled_cpu"] == 0.5
+        assert str(S3 + 1) not in s.perP[key]["calS"]
+        # the class factors learn from the streams: squares at 2x the model
+        # in calibration streams alone raise the squares intercept
+        import numpy as np
+        tab = np.zeros((scheduler.NCELLS, 9))
+        tab[c, 1], tab[c, 2] = 2 * 400 * w, 400 * w
+        cal = scheduler.Calibration.fit(tab)
+        assert cal.beta["sq"][0] > 0.3, cal.beta["sq"]
+    print("calibration streams ok")
+
+
+def test_dfirst_e2e():
+    """v2 end to end with msearch: --dfirst on with a low threshold and tiny
+    units, so that d-first sums are split into units of d, each run resumed
+    from the records of the previous ones and merged into coverage, the
+    first with the calibration stream; report, emit and forecast with
+    d-first"""
+    P = (10, 4, 3, 2)
+    key = "10_4_3_2"
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        # sums up to 269 searched before (a plain unit)
+        write_unit(os.path.join(units, "seed.jsonl"), P, [(S, 0) for S in range(170, 270)],
+                   done=(170, 269))
+        opts = ("--only", "10 4 3 2", "--dfirst", "on", "--dfirst-min-n", "0",
+                "--unit-time", "0.004")
+        out = run("--state", state, "emit", *opts, "--units", "6")
+        assert "--diag-first --diag-first-min-n 0 --d-range 0:" in out, out
+        assert "--calib-r1-stride" in out and "d0-" in out, out
+        run("--state", state, "run", *opts, "--workers", "1", "--hours", "0.0008")
+        launched = [json.loads(l) for l in open(os.path.join(state, "launched_6.jsonl"))]
+        assert launched and all(r["mode"] == "dfirst" for r in launched), launched[:3]
+        by_S = {}
+        for r in launched:
+            by_S.setdefault(r["lo"], []).append(r)
+        split = {S: rs for S, rs in by_S.items() if len(rs) >= 2}
+        assert split, by_S
+        s = scheduler.Summary.load(state, 6)
+        for S, rs in split.items():
+            assert all(r["lo"] == r["hi"] == S and r["dlo"] is not None for r in rs)
+            assert rs[0]["dlo"] == 0 and rs[0]["calib"] > 0
+            assert all(r["calib"] == 0 for r in rs[1:])
+            # each unit starts where the records of the previous ones stop
+            assert all(a["dhi"] == b["dlo"] for a, b in zip(rs, rs[1:])), rs
+            if rs[-1]["dhi"] is None or rs[-1]["dhi"] == rs[-1]["nd"]:
+                assert any(lo <= S <= hi for lo, hi in s.cover[key]), (S, s.cover)
+                assert str(S) not in s.dcov.get(key, {})
+            # the second unit knows the number of d from the first's records
+            assert rs[1]["dhi"] is not None and rs[1]["nd"] == s.dcov.get(key, {}).get(
+                str(S), {}).get("nd", rs[1]["nd"])
+        T = s.totals
+        assert T["dfirst_sums"] >= 1 and T["calib_sums"] + T["calib_dup"] >= 1, T
+        # (sums of < DFIRST_TIME_MIN_N vectors do not teach the d-first law)
+        assert "3:dfirst" not in s.time, s.time.keys()
+        out = run("--state", state, "report", *opts)
+        assert "d-first (in the d-first time law only)" in out and "calibration streams" in out
+        assert "d-first law" in out, out
+        out = run("--state", state, "forecast", *opts, "--hours", "0.01", "--draws", "2")
+        assert "with and without d-first" in out and "mode     d-first" in out, out
+    print("d-first end to end ok")
 
 
 def test_no_enumerate():
@@ -985,6 +1430,10 @@ if __name__ == "__main__":
     test_time_model()
     test_summary()
     test_dfirst_summary()
+    test_dfirst_merge()
+    test_dfirst_plan()
+    test_calib_cells()
+    test_dfirst_e2e()
     test_no_enumerate()
     test_commands_v2()
     test_commands()
