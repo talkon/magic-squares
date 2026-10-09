@@ -45,7 +45,7 @@ below stops growing at N ~ 5.5k). On top of it:
     (amodel.DFIRST_TIME_PRIOR, its level learned online) plus a plain
     calibration stream of ~7% of it (--calib-r1-stride k, whose sampled
     squares enter the class and per-P factors, weighted) is below the plain
-    law: in practice from N' ~ 4-9k on. A d-first sum longer than 1.5 units
+    law: in practice from N' ~ 5-11k on. A d-first sum longer than 1.5 units
     is split into units of d (--d-range lo:hi); the summary merges their
     "dchunk" records and the planner continues a sum from its first d not
     searched, crediting a part with its share of the sum's CPU and E.

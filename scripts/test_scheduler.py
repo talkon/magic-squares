@@ -1050,6 +1050,7 @@ def test_dfirst_plan():
     P = (13, 7, 4, 3, 1, 1)
     with tempfile.TemporaryDirectory() as state:
         cands, sc, plan = make_v2([P], state, unit_time=600.0)
+        sc.tm = am.time_prior(scheduler.ENGINE)
         tm, tmd = sc.tm, sc.tmd
         # the mode choice, from the two laws
         S = np.arange(1850.0, 2700.0, 10.0)
@@ -1131,6 +1132,17 @@ def test_dfirst_plan():
         u = plan.unit(0)
         assert u.mode == "dfirst" and u.dlo is None and u.hi > u.lo and u.calib > 0
         assert "--d-range" not in scheduler.dfirst_args(u)
+    # the measured sums (ideas.md, "Measurements on the integrated binary"):
+    # with the shipped engine-3 laws, the cheaper mode measured
+    measured = [((10, 6, 4, 2, 1, 1), 838, False), ((12, 6, 3, 2, 1, 0, 1), 900, False),
+                ((12, 6, 3, 2, 1, 1), 988, True), ((12, 6, 3, 2, 1, 1), 1200, True),
+                ((11, 6, 4, 3, 2, 1), 2174, True), ((14, 7, 4, 4, 1, 0, 0, 1), 3648, True),
+                ((9, 6, 4, 3, 1, 1, 1, 1), 2700, True), ((13, 7, 4, 3, 1, 1), 2650, True)]
+    with tempfile.TemporaryDirectory() as state:
+        cands, sc, plan = make_v2([P for P, _, _ in measured], state)
+        sc.tm = am.time_prior(scheduler.ENGINE)
+        for a, (P, S, want) in enumerate(measured):
+            assert bool(sc.eval_modes(a, [float(S)])[5][0]) == want, (P, S, want)
     # upper bounds hold with d-first (and with --dfirst on)
     Ps = small_pool(60, seed=11)
     with tempfile.TemporaryDirectory() as state:
