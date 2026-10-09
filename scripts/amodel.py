@@ -456,7 +456,19 @@ TIME_SD_PSEUDO = 20.0
 # the 8k hinge did not help (slopes -1.9 +- 1.0, 0.3 +- 0.5). Below N 3k
 # (not in the fit) it runs above the measured sums (1.1-1.6x at N 2-3k),
 # where the plain search is chosen anyway. Online only the level is learned
-# (DFIRST_TIME_LAMBDA: intercept sd 0.2, the rest held).
+# (DFIRST_TIME_LAMBDA: intercept sd 0.2, the rest held; a part of a split
+# sum enters with weight its share of the d loop, so a sum weighs 1).
+# Back-test (engine 3, 16 distinct sums, mean prediction with
+# e^{sd^2/2}): obs/pred geometric mean 0.94, sd(ln) 0.23; by N': 0.71 below
+# 3k (outside the fit), 1.16 at 3-6k, 0.93 at 6-12k, 0.96 at 12-24k, 1.10
+# above 24k; 1.01 at 129-256 labels, 0.96 above. Out of sample: 13 7 4 3 1
+# 1 / 1950 1.24, / 2100 1.08, 12 6 3 2 1 1 / 950 0.96, six pool sums at N'
+# ~6.1k 0.68-1.27 (geometric mean 0.89); the prototype's engine-2 rows
+# 1.01 (sd 0.32). The scatter is mostly per P (+-25%): 13 7 4 3 1 1, 9 of
+# the 16 sums, runs ~1.05-1.1x, 14 7 4 4 1 0 0 1, 9 6 4 3 1 1 1 1 and 12 6
+# 3 2 1 0 1 0.6-0.75x; a label or x term on the residuals is not identified
+# (slopes -0.69 +- 1.0 and -0.69 +- 0.36). If a label term is ever added,
+# add the same to both laws, so that the mode choice stays label-free.
 DFIRST_TIME_PRIOR = {"th": [3.215, 3.576, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                      "sd": 0.25, "engine": 3}
 DFIRST_TIME_LAMBDA = (25.0, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6)
@@ -471,6 +483,22 @@ DFIRST_ENGINE_SHIFT = {}
 # from u). The yield per d was not measured (no pair in the samples): the
 # scheduler credits a part of a sum with the same fraction of its E.
 DFIRST_COST_PROFILE = (0.71, 1.08, 1.08, 1.21, 1.16, 1.21, 1.15, 1.15, 0.86, 0.39)
+
+# The mode of a sum (plain or d-first) is chosen by the measured d-first /
+# plain CPU ratio, not by the two time laws: ln r = a0 + a1 ln(N'/4000),
+# pooled over the perf verifier's 13 sums with both modes (research/ideas.md,
+# "Measurements on the integrated binary"; resid sd 0.17). The two laws
+# were fitted separately and their errors do not cancel: the plain law
+# under-predicts the plain search 1.35x at N' 5-8k (10 sums) and carries a
+# label term L^-3.46 that the d-first law has not, so their quotient put the
+# switch at N' ~ 9-10k (E-weighted) instead of the measured ~4.3k (with a 7%
+# calibration stream: (1 + 0.07) r < 1), and chose plain on 5 of 6 pool sums
+# at N' ~6.1k measured at d-first / plain 0.69-0.82. With this ratio the
+# choice has regret 1.00 on all 22 engine-3 sums measured in both modes.
+# Online the level a0 is learned (prior sd level_sd) from the pairs every
+# d-first sum with a calibration stream gives: its d-first CPU against the
+# stream's unbiased plain estimate (est_time).
+DFIRST_RATIO_PRIOR = {"a": (-0.028, -0.566), "sd": 0.17, "level_sd": 0.1, "engine": 3}
 
 # ln nodes = NODE_TH . [1, ln(N'/4000), ln(labels/150), max(0, ln(N'/8000))]
 NODE_TH = (17.375, 5.756, -5.765, 0.639)
@@ -536,6 +564,26 @@ def dfirst_cost_frac(lo, hi, nd):
     if nd <= 0:
         return 0.0
     return float(dfirst_cost_cum(hi / nd) - dfirst_cost_cum(lo / nd))
+
+
+def dfirst_log_ratio(lNp, a0=None):
+    """ln(d-first CPU / plain CPU) of a sum at the model's ln N'
+    (DFIRST_RATIO_PRIOR, level a0 if given)"""
+    a = DFIRST_RATIO_PRIOR["a"]
+    return (a[0] if a0 is None else a0) + a[1] * (np.asarray(lNp, float) - math.log(4000))
+
+
+def dfirst_ratio_level(st=None):
+    """the posterior mean of the ratio's level a0 from pairs st = [n, sum x,
+    sum y] (weighted; y = ln(d-first CPU / plain CPU), x = ln(N'/4000)),
+    the slope held: a normal prior at DFIRST_RATIO_PRIOR's a0 with sd
+    level_sd, residual sd sd"""
+    a0, a1 = DFIRST_RATIO_PRIOR["a"]
+    if not st or st[0] <= 0:
+        return a0
+    n, sx, sy = float(st[0]), float(st[1]), float(st[2])
+    shrink = (DFIRST_RATIO_PRIOR["sd"] / DFIRST_RATIO_PRIOR["level_sd"]) ** 2
+    return a0 + (sy - a1 * sx - n * a0) / (n + shrink)
 
 
 class TimeModel:
