@@ -331,6 +331,52 @@ def test_cli_weighted(tmp):
     print("calibrate.py csquare weights and dsquare records ok")
 
 
+def test_cli_star(tmp):
+    """dsquare records of msearch's star cover (--dfirst-star K): a pair on a
+    star d (its dvec has x*) weighs K in the estimates, one of a K = -1 run
+    (no star d searched) none"""
+    units = os.path.join(tmp, "units")
+    os.makedirs(units)
+    with open(os.path.join(units, "plain.jsonl"), "w") as f:
+        for r in SQUARES[1:]:
+            f.write(json.dumps({"type": "sum", "n": 6, "P": r["P"], "S": r["S"], "nvecs_raw": 1500,
+                                "squares": 1}) + "\n")
+            f.write(json.dumps(r) + "\n")
+    r0, r1 = SQUARES[0], SQUARES[1]
+    G = np.array(r1["grid"]).reshape(-1)
+    Pint = 1
+    for p_, e in zip(C.PRIMES, r1["P"]):
+        Pint *= int(p_) ** int(e)
+    dv = next([int(x) for x in G[c]] for c in C.CELLIDX
+              if sum(int(x) for x in G[c]) == r1["S"] and np.prod(np.array(G[c], dtype=object)) == Pint)
+    with open(os.path.join(units, "star.jsonl"), "w") as f:
+        # x* on the pair's d, K = 4, stride 1: weight 4; then the dsum
+        f.write(json.dumps(dict(r1, type="dsquare", d=7, dvec=dv, set_count=1, magic=0, partner=0)) + "\n")
+        f.write(json.dumps({"type": "dsum", "mode": "dfirst", "n": 6, "P": r1["P"], "S": r1["S"],
+                            "nvecs_raw": 1500, "d_stride": 1, "pairs": 1, "star_x": dv[2],
+                            "star_k": 4, "star_only": 0}) + "\n")
+    with open(os.path.join(units, "nostar.jsonl"), "w") as f:
+        # K = -1 (killed before its dsum: the star from the dchunk): no estimate
+        f.write(json.dumps(dict(r0, type="dsquare", d=3, dvec=dv, set_count=1, magic=1, partner=1,
+                                hash="ffffffffffffffff")) + "\n")
+        f.write(json.dumps({"type": "dchunk", "n": 6, "P": r0["P"], "S": r0["S"], "d_lo": 0, "d_hi": 256,
+                            "d_stride": 1, "nvecs_raw": 1600, "star_x": 5, "star_k": -1,
+                            "star_only": 0}) + "\n")
+    out = os.path.join(tmp, "out")
+    res = subprocess.run([sys.executable, os.path.join(HERE, "calibrate.py"), "--state", tmp, "--legacy",
+                          "none", "--boot", "20", "--jobs", "1", "--w-samples", "20000", "--no-heuristic",
+                          "--out", out], capture_output=True, text=True)
+    if res.returncode != 0:
+        print(res.stdout, res.stderr)
+        raise SystemExit("calibrate.py failed")
+    with open(os.path.join(out, "results.json")) as f:
+        ds = json.load(f)["dsquares"]
+    assert ds["pairs"] == 2 and ds["est_pairs"] == 4, ds
+    assert ds["star_records"] == 1 and ds["records_not_estimated"] == 1, ds
+    assert ds["magic_squares"] == 1 and ds["est_magic_squares"] == 0, ds
+    print("calibrate.py star-cover dsquare weights ok")
+
+
 if __name__ == "__main__":
     test_observe()
     test_moments()
@@ -342,4 +388,6 @@ if __name__ == "__main__":
         test_cli(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         test_cli_weighted(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        test_cli_star(tmp)
     print("all ok")

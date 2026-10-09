@@ -28,8 +28,9 @@ effective count, see summarize) and its bootstrap use the weights
 (--unweighted: weight 1). "dsquare" records ((square, SP diagonal) pairs of
 a d-first d loop) are not a sample of the semi-magic squares (each has an SP
 diagonal by construction), so they stay out of the ladder; they are listed
-in their own section (pairs, est. pairs = pairs x d_stride, partner flags,
-best_score) for the rungs above SP.
+in their own section (pairs, est. pairs = pairs x d_stride, x K on a star d
+of msearch's star cover --dfirst-star K, partner flags, best_score) for the
+rungs above SP.
 
 examples:
     python3 scripts/calibrate.py                       # data/sched/units
@@ -576,7 +577,7 @@ def load_records(specs, excludes, weighted=True):
     the sum / csum / dsum records; stats; the "dsquare" records, each with
     "d_stride" from its file's dsum record, else from its dchunk records)"""
     squares, sums = {}, {}
-    dsq, dstride, cstride = [], {}, {}
+    dsq, dstride, cstride, dstar, cstar = [], {}, {}, {}, {}
     stats = {"files": 0, "records": 0, "dups": 0, "not_n6": 0, "no_grid": 0, "per_label": {},
              "csquares": 0, "dsquares": 0}
     for label, path in specs:
@@ -601,12 +602,15 @@ def load_records(specs, excludes, weighted=True):
                     if t == "dchunk":
                         if r.get("n", 6) == 6 and "d_stride" in r:
                             cstride.setdefault((f, sch.norm_p(r["P"]), r["S"]), int(r["d_stride"]))
+                        if r.get("n", 6) == 6:
+                            cstar.setdefault((f, sch.norm_p(r["P"]), r["S"]), star_of(r))
                         continue
                     if t in ("sum", "csum", "dsum"):
                         if r.get("n") == 6 and "nvecs_raw" in r:
                             sums[(sch.norm_p(r["P"]), r["S"])] = r["nvecs_raw"]
                         if t == "dsum" and r.get("n") == 6:
                             dstride[(f, sch.norm_p(r["P"]), r["S"])] = int(r.get("d_stride", 1))
+                            dstar[(f, sch.norm_p(r["P"]), r["S"])] = star_of(r)
                         continue
                     if t == "dsquare":
                         if r.get("n") == 6 and "grid" in r:
@@ -640,7 +644,26 @@ def load_records(specs, excludes, weighted=True):
         # the dsum's d_stride; that of the sum's dchunk records when the run
         # was killed before its dsum; 1 when neither exists
         r["d_stride"] = dstride.get(key, cstride.get(key, 1))
+        # its weight in the estimates over every d (d_weight): d_stride, x K
+        # on a star d (its dvec has x*) of a star cover (msearch
+        # --dfirst-star K: the star d searched every K-th); None where the
+        # run estimates only some d (K = -1: no star d searched;
+        # --dfirst-star-only: only they are)
+        x, k, only = dstar.get(key, cstar.get(key, (None, 0, False)))
+        if only or k < 0:
+            r["d_weight"] = None
+        elif k >= 1 and x is not None and int(x) in [int(v) for v in r.get("dvec", ())]:
+            r["d_weight"] = float(r["d_stride"] * k)
+        else:
+            r["d_weight"] = float(r["d_stride"])
     return list(squares.values()), sums, stats, dsq
+
+
+def star_of(r):
+    """the star cover of a msearch "dsum" / "dchunk" record (--dfirst-star
+    K): (x*, K, star_only); (None, 0, False) without one"""
+    k = int(r.get("star_k", 0) or 0)
+    return (r.get("star_x"), k, bool(r.get("star_only"))) if k else (None, 0, False)
 
 
 # ---------------------------------------------------------------------------
@@ -1847,11 +1870,16 @@ def main():
     # from the record's own SP diagonal d and its 15 partners (d_rooted), so
     # a square with two SP diagonals is judged once per diagonal. A magic
     # square has two SP diagonals (two records at stride 1): magic squares
-    # are counted by unique hash, and estimated as sum(d_stride) / 2 over
+    # are counted by unique hash, and estimated as sum(d_weight) / 2 over
     # the records whose own d has an SP partner (each of its two (square, d)
-    # pairs is sampled with probability 1 / d_stride).
+    # pairs is sampled with probability 1 / d_weight: 1 / d_stride, and 1 /
+    # (d_stride K) on a star d of msearch's star cover, where the diagonal
+    # with x* is searched every K-th; load_records). Records of runs that
+    # estimate only some d (d_weight None) count in the pairs, not in the
+    # estimates (records_not_estimated).
     dr = d_rooted(dsquares)
-    ks = np.array([r["d_stride"] for r in dsquares], dtype=float)
+    ks = np.array([0.0 if r.get("d_weight", r["d_stride"]) is None else r.get("d_weight", r["d_stride"])
+                   for r in dsquares], dtype=float)
     lev = np.array([x["level"] for x in dr], dtype=int)
     magic_rec = np.array([(x["level"] == 14) or bool(r.get("magic")) or bool(r.get("partner"))
                           for x, r in zip(dr, dsquares)], dtype=bool)
@@ -1865,6 +1893,9 @@ def main():
                                   "SP+P": float(sum(k * x["nP"] for k, x in zip(ks, dr))),
                                   "SP+SP": float(sum(k * x["nSP"] for k, x in zip(ks, dr))) / 2},
             "partner_records": int(sum(1 for r in dsquares if r.get("partner"))),
+            "records_not_estimated": int(sum(1 for r in dsquares if r.get("d_weight", 0) is None)),
+            "star_records": int(sum(1 for r in dsquares
+                                    if r.get("d_weight") is not None and r["d_weight"] != r["d_stride"])),
             "magic_squares": len({r["hash"] for r, m in zip(dsquares, magic_rec) if m}),
             "est_magic_squares": float(ks[magic_rec].sum()) / 2}
     for r in dsquares:
@@ -1927,7 +1958,7 @@ def main():
            if SQW is not None else ""),
           "",
           f"d-first (square, SP diagonal) pairs (dsquare records, not in the ladder): {dsec['pairs']} "
-          f"(est. {dsec['est_pairs']:g} with the d strides) on {dsec['squares']} squares; by best pair "
+          f"(est. {dsec['est_pairs']:g} with the d strides and star weights) on {dsec['squares']} squares; by best pair "
           f"{dsec['by_best_score'] or '-'} (whole square); by the record's own SP diagonal "
           f"{dsec['by_own_d']}, partner pairs {dsec['partner_pairs']}; magic squares (unique hash) "
           f"{dsec['magic_squares']} (est. {dsec['est_magic_squares']:g}).", "",
