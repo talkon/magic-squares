@@ -73,28 +73,39 @@ search's semi-magic squares, for the models, below it. It does not
 enumerate the semi-magic squares:
 d-first sums write "dsquare" records (one per pair, with `set_count` =
 `sp_count`, `magic`, `partner`; dedupe magic squares by `hash`), "dchunk"
-checkpoint records every `--d-chunk` (256) indices of d and a "dsum"
+checkpoint records every `--d-chunk` (256) indices of d (`d_lo`, `d_hi`:
+with `d_stride` 1 every index in [d_lo, d_hi) was searched; `nvecs_raw`,
+the number of d of the sum; `truncated`: a V_d hit `--node-limit`; `time`:
+the chunk's process CPU) and a "dsum"
 record (`pairs`, `est_pairs`, `est_time` with `--d-stride`; `complete` when
 every d was searched; `time` is the process CPU of the index and the d
 loop, `est_time` its estimate for the whole d range, `cpu` that plus the
 reduction and the sum's share of the enumeration as in a "sum" record, and
 `vd_time` / `setup_time` / `search_time` are wall-clock sums over d), not
 "square" / "sum" records. The "done" record of a
-`--diag-first` run has `"mode":"dfirst"`; `scripts/scheduler.py` (both
-models: v1's Results, v2's Summary) keeps the d-first sums out of its fits
-(squares, traversals, time law), counts a complete one as searched and a
-part of one (a `--d-range` unit, a `--d-stride` sample) as not, and lists
-the magic squares found d-first. With `--d-range lo:hi`, only the unit with
-lo = 0 searches the plain sums of the range, and with `--d-stride k
---d-offset o` only the unit with o mod k = 0 (the others write a "skip"
-record). The parts of a sum split by `--d-range` (or `--d-offset`) are not
-merged: neither scheduler counts such a sum as searched (it would be
-planned again), and nothing reads the "dchunk" records yet (no resume from
-them). Scheduler v2 reads d-first output (for example `ingest`ed units) but
-does not launch d-first units itself.
+`--diag-first` run has `"mode":"dfirst"`. With `--d-range lo:hi`, only the
+unit with lo = 0 searches the plain sums of the range, and with `--d-stride
+k --d-offset o` only the unit with o mod k = 0 (the others write a "skip"
+record).
+
+Scheduler v2 (`scripts/scheduler.py`, default model) launches d-first units
+itself (research/scheduler-v2.md, "d-first units"): `msearch --diag-first
+--diag-first-min-n 0` on sums it chose to search d-first, a large sum split
+into `--d-range lo:hi` units, the first of them with `--calib-r1-stride k`.
+It merges the parts of a sum from their "dchunk" records (d_stride 1;
+duplicates, overlaps and killed units are fine) and counts the sum as
+searched once they cover every d, continues a sum searched in part from its
+first d not searched, fits a d-first time law to the "dsum" records, and
+puts the calibration streams' squares into its models. v1 (`--model
+regression`) keeps the d-first sums out of its fits, counts a complete one
+as searched and a part of one (a `--d-range` unit, a `--d-stride` sample) as
+not, and never launches d-first units. Both list the magic squares found
+d-first.
 `--calib-r1-stride k` adds a plain search of every k-th first row (a
-"csum" record with `est_squares`, `se_squares`, the traversal totals, and
-"csquare" records) for the models of semi-magic squares per sum.
+"csum" record with `"mode":"calib"`, `est_squares`, `se_squares`, the
+traversal totals, and "csquare" records) for the models of semi-magic
+squares per sum; it runs after the sum's d loop, in every d-first sum of
+the run (scheduler v2 passes it only to the first unit of a sum).
 
 ### r1 sampling (measurements)
 

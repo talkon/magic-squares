@@ -1980,7 +1980,8 @@ integration with issues; these were fixed:
   `fast_fuzz_dfirst_no_gfni`), and d-first in the portable build
   (`fast_fuzz_dfirst_portable`).
 
-Rejected or left open: the d-first parts of one sum (`--d-range` units,
+Rejected or left open (the first two since done in scheduler v2, see
+research/scheduler-v2.md, "d-first units"): the d-first parts of one sum (`--d-range` units,
 `--d-offset` units) are still never merged into coverage, and nothing reads
 the "dchunk" records (no resume): a split sum counts as unsearched and
 would be planned again (documented in src/c/README.md). V_d searches start

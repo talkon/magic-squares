@@ -22,8 +22,8 @@ bin/msearch --min-sum 320 --max-sum 340 10 4 3 2    # P = 2^10 3^4 5^3 7^2
 python3 scripts/scheduler.py import-legacy stats/stats_short.txt
 python3 scripts/scheduler.py profile           # once: the model of 378k P (~1 CPU-hour, niced)
 python3 scripts/scheduler.py plan              # what it would run next, and why
-python3 scripts/scheduler.py forecast --hours 1000
-python3 scripts/scheduler.py run --hours 24
+python3 scripts/scheduler.py forecast --hours 1000   # E with and without d-first
+python3 scripts/scheduler.py run --hours 24    # plain or d-first per sum (--dfirst auto|off|on)
 python3 scripts/scheduler.py report
 ```
 
@@ -91,9 +91,18 @@ class factors (squares, S and P traversals, by N band, number of primes,
 assignment ratio and S / S_min; quasi-Poisson, since counts of one P move
 together), the level of the time law (its shape stays fixed; msearch
 reports CPU time per sum), and per-P factors (empirical Bayes); `report`
-compares observed and predicted counts. The previous
+compares observed and predicted counts. Each sum is searched plain or
+diagonal-first (`msearch --diag-first`, which finds every magic square but
+not the other semi-magic squares), whichever its time laws predict to be
+cheaper (`--dfirst auto`, the default; in practice d-first from N' ~ 5-11k
+on). A d-first sum gets a plain calibration stream of ~7% of its CPU
+(`--calib-r1-stride`), whose sampled squares keep the class and per-P
+factors learning, and a sum of hours is split into units of d
+(`--d-range`) that are merged and resumed from msearch's checkpoint
+records (research/scheduler-v2.md, "d-first units"). The previous
 scheduler (a Poisson regression fitted to our runs, over non-increasing
-exponents) is still available as `--model regression --pool classic`.
+exponents) is still available as `--model regression --pool classic`; it
+runs the plain search only.
 
 ### Running on a cluster (SuperCloud)
 
@@ -186,9 +195,9 @@ the previous code is fdb77fc):
 * Time per sum, t = a (N / 4000)^b CPU-s fitted at N = 4.1-31.7k: the
   previous plain search a = 24.8, b = 4.5 (t(32k) ~ 280k CPU-s); now, the
   better of the two modes, a = 23, b = 3.5 (t(32k) ~ 35k).
-* Scheduler v2 runs only the plain search so far; it reads d-first output
-  but does not launch d-first units (research/ideas.md lists this as the
-  next step).
+* Scheduler v2 chooses the mode per sum from its two time laws and runs
+  large d-first sums as units of d (research/scheduler-v2.md, "d-first
+  units").
 
 ## Status (October 2026)
 
@@ -273,9 +282,13 @@ N = 5,000, d-first above, and a calibration stream costing 10% of each
 d-first sum (retrospective.md section 7). It lowers the exponent of N
 (t ~ N^3.5 against N^4.5), so the gain grows with the budget: E x1.11 at 1
 CPU-year, x1.24 at 1,000, and 2.3x less CPU to reach E = 1. Scheduler v2
-does not launch d-first units yet, so for now only the plain part applies
-(x1.07). Its time law also has to learn engine 3's level first: re-run
-`forecast` after some engine-3 units. The
+now launches d-first units. Under its own time laws, d-first adds
+x1.00 / 1.02 / 1.07 / 1.14 to its plan at 1 / 10 / 100 / 1,000 CPU-years (`forecast` prints
+E with and without d-first). That is less than the retrospective's x1.03 /
+1.07 / 1.13 / 1.16 for d-first on top of the plain search: v2's plan stays
+mostly below N' 6k, and its plain law is off for the integrated build at
+N' >= 6k (research/scheduler-v2.md, "d-first units"). Both laws also have to
+learn engine 3's level first: re-run `forecast` after some engine-3 units. The
 17-18x is measured speed; E at a fixed budget grows only ~3x because
 E(C) rises slowly with C. Search strategy multiplies with it: the first
 search's expected yield (1.1 CPU-years with the legacy code) is reached in
