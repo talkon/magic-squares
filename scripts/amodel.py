@@ -47,7 +47,9 @@ or before the last decrease of N along the grid.
 Time. TimeModel: CPU seconds per sum as a function of the model's N (bias
 corrected), L_raw and the label words, ln t = th . time_features (see
 TIME_PRIOR), refit online per msearch engine (Bayesian ridge that keeps the
-shape and learns an intercept, the label-word step and N' band offsets).
+shape and learns an intercept, the label-word step and N' band offsets);
+the d-first search has its own law (DFIRST_TIME_PRIOR, only its level
+learned) and a cost profile along d (DFIRST_COST_PROFILE).
 node_law(): predicted search nodes, used only for --node-limit.
 
 Needs numpy. AMODEL_VERSION changes whenever the numbers profile() returns
@@ -441,6 +443,35 @@ ENGINE_TIME_SHIFT = {3: {"labels>128": -0.227}}
 TIME_LAMBDA = (100.0, 1e6, 1e6, 1e6, 100.0, 16.0, 16.0, 16.0, 16.0)
 TIME_SD_PSEUDO = 20.0
 
+# The d-first search (msearch --diag-first; one semi-magic search per vector
+# d of the sum, on V_d = {v : |v & d| = 1}): ln t = th . time_features with
+# only the intercept and the N' slope, least squares on ln t over the perf
+# verifier's 11 sums at N 4.1-31.7k (process CPU per sum on the integrated
+# build, engine 3; research/ideas.md, "Measurements on the integrated
+# binary"), with the model's N' at each sum as the scheduler computes it:
+# 3.215 (se 0.15) + 3.576 (se 0.11) ln(N'/4000), residual sd 0.21
+# (leave-one-out 0.24), sum(t) / sum(pred) 1.03. The three sums with more
+# than 256 labels sit on the line (residuals -0.29, +0.18, +0.07; a step
+# for them fits -0.03 +- 0.19), so the law has none; adding ln(L/150) or
+# the 8k hinge did not help (slopes -1.9 +- 1.0, 0.3 +- 0.5). Below N 3k
+# (not in the fit) it runs above the measured sums (1.1-1.6x at N 2-3k),
+# where the plain search is chosen anyway. Online only the level is learned
+# (DFIRST_TIME_LAMBDA: intercept sd 0.2, the rest held).
+DFIRST_TIME_PRIOR = {"th": [3.215, 3.576, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                     "sd": 0.25, "engine": 3}
+DFIRST_TIME_LAMBDA = (25.0, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6)
+# per-engine shifts of the d-first law after DFIRST_TIME_PRIOR's engine
+DFIRST_ENGINE_SHIFT = {}
+# the CPU of the d loop is not uniform along d's index in the unreduced
+# list: mean CPU per d in the deciles of u = d / N relative to the sum's
+# mean, pooled over the perf verifier's 13 d logs (N 2-32k; the same shape
+# below and above N 6k, se 0.01-0.04 per decile; |V_d| is flat along u).
+# A range [lo, hi) of d costs W(hi / N) - W(lo / N) of the d loop, W the
+# cumulative of this profile (W(0.5) = 0.524, W(0.9) = 0.961; at most 0.075
+# from u). The yield per d was not measured (no pair in the samples): the
+# scheduler credits a part of a sum with the same fraction of its E.
+DFIRST_COST_PROFILE = (0.71, 1.08, 1.08, 1.21, 1.16, 1.21, 1.15, 1.15, 0.86, 0.39)
+
 # ln nodes = NODE_TH . [1, ln(N'/4000), ln(labels/150), max(0, ln(N'/8000))]
 NODE_TH = (17.375, 5.756, -5.765, 0.639)
 
@@ -466,31 +497,63 @@ def log_nodes(lNp, lLraw, k):
             + NODE_TH[3] * np.maximum(0.0, np.asarray(lNp, float) - math.log(8000)))
 
 
-def time_prior(engine, base=None):
-    """the prior of engine's time law: base (a TimeModel of an older engine,
-    default the shipped prior) with the ENGINE_TIME_SHIFT of the engines
-    after it, up to engine"""
-    base = base or TimeModel()
+def time_prior(engine, base=None, mode="plain"):
+    """the prior of engine's time law for a search mode ("plain" or
+    "dfirst"): base (a TimeModel of an older engine, default the shipped
+    prior of the mode) with the ENGINE_TIME_SHIFT (DFIRST_ENGINE_SHIFT) of
+    the engines after it, up to engine"""
+    if base is None:
+        base = TimeModel(mode=mode)
+    shifts = DFIRST_ENGINE_SHIFT if mode == "dfirst" else ENGINE_TIME_SHIFT
     th = base.th.copy()
     for e in range(int(base.engine) + 1, int(engine) + 1):
-        for f, d in ENGINE_TIME_SHIFT.get(e, {}).items():
+        for f, d in shifts.get(e, {}).items():
             th[TIME_FEATURES.index(f)] += d
-    return TimeModel(th, base.sd, engine, 0)
+    return TimeModel(th, base.sd, engine, 0, mode)
+
+
+def _cost_knots():
+    prof = np.asarray(DFIRST_COST_PROFILE, float)
+    return np.linspace(0, 1, len(prof) + 1), np.concatenate([[0.0], np.cumsum(prof) / prof.sum()])
+
+
+def dfirst_cost_cum(u):
+    """W(u): the share of a d-first sum's d-loop CPU in the d with index
+    below u N (DFIRST_COST_PROFILE, piecewise linear)"""
+    x, w = _cost_knots()
+    return np.interp(np.clip(u, 0.0, 1.0), x, w)
+
+
+def dfirst_cost_inv(w):
+    """the inverse of dfirst_cost_cum"""
+    x, wk = _cost_knots()
+    return np.interp(np.clip(w, 0.0, 1.0), wk, x)
+
+
+def dfirst_cost_frac(lo, hi, nd):
+    """the share of a d-first sum's d-loop CPU (and of its E) in the d with
+    index in [lo, hi) of nd"""
+    if nd <= 0:
+        return 0.0
+    return float(dfirst_cost_cum(hi / nd) - dfirst_cost_cum(lo / nd))
 
 
 class TimeModel:
     """CPU seconds per sum from the model's N' and L_raw; one coefficient
-    vector per msearch engine (and search mode). fit() is a Bayesian ridge
-    towards the prior: b = (A + Lam0)^-1 (c + Lam0 b0) with A = F'F / s^2,
-    c = F'y / s^2 and Lam0 = diag(TIME_LAMBDA); s^2 is pooled with
+    vector per msearch engine and search mode ("plain"; "dfirst": msearch
+    --diag-first, whole-sum CPU). fit() is a Bayesian ridge towards the
+    prior: b = (A + Lam0)^-1 (c + Lam0 b0) with A = F'F / s^2, c = F'y / s^2
+    and Lam0 = diag(TIME_LAMBDA) (DFIRST_TIME_LAMBDA); s^2 is pooled with
     TIME_SD_PSEUDO pseudo-sums at the prior sd."""
 
-    def __init__(self, th=None, sd=None, engine=None, n=0):
-        self.th = np.array(TIME_PRIOR["th"] if th is None else th, float)
+    def __init__(self, th=None, sd=None, engine=None, n=0, mode="plain"):
+        prior = DFIRST_TIME_PRIOR if mode == "dfirst" else TIME_PRIOR
+        self.mode = mode
+        self.th = np.array(prior["th"] if th is None else th, float)
         if self.th.shape != (NT,):
             raise ValueError(f"time law with {self.th.size} coefficients, expected {NT}")
-        self.sd = float(TIME_PRIOR["sd"] if sd is None else sd)
-        self.engine = TIME_PRIOR["engine"] if engine is None else engine
+        self.sd = float(prior["sd"] if sd is None else sd)
+        self.engine = prior["engine"] if engine is None else engine
         self.n = n  # rows in the last fit
 
     def log_time(self, lNp, lLraw, k):
@@ -510,9 +573,9 @@ class TimeModel:
     def fit(self, st, prior=None, iters=4):
         """posterior from sufficient statistics st (see stats), starting from
         prior (a TimeModel; default the shipped prior)"""
-        prior = prior or TimeModel()
+        prior = prior or TimeModel(mode=self.mode)
         b0, s0_ = prior.th, prior.sd
-        lam = np.diag(TIME_LAMBDA)
+        lam = np.diag(DFIRST_TIME_LAMBDA if self.mode == "dfirst" else TIME_LAMBDA)
         s2 = s0_ ** 2
         th = b0.copy()
         for _ in range(iters):
@@ -521,11 +584,12 @@ class TimeModel:
             th = np.linalg.solve(A, c)
             rss = st["yy"] - 2 * th @ st["Fy"] + th @ st["FF"] @ th
             s2 = (max(rss, 0.0) + TIME_SD_PSEUDO * s0_ ** 2) / (st["n"] + TIME_SD_PSEUDO)
-        return TimeModel(th, math.sqrt(s2), self.engine, st["n"])
+        return TimeModel(th, math.sqrt(s2), self.engine, st["n"], self.mode)
 
     def to_json(self):
-        return {"th": [float(v) for v in self.th], "sd": self.sd, "engine": self.engine, "n": self.n}
+        return {"th": [float(v) for v in self.th], "sd": self.sd, "engine": self.engine, "n": self.n,
+                "mode": self.mode}
 
     @staticmethod
     def from_json(d):
-        return TimeModel(d["th"], d["sd"], d.get("engine"), d.get("n", 0))
+        return TimeModel(d["th"], d["sd"], d.get("engine"), d.get("n", 0), d.get("mode", "plain"))
