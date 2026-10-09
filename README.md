@@ -94,7 +94,7 @@ reports CPU time per sum), and per-P factors (empirical Bayes); `report`
 compares observed and predicted counts. Each sum is searched plain or
 diagonal-first (`msearch --diag-first`, which finds every magic square but
 not the other semi-magic squares), by the measured d-first / plain CPU
-ratio (`--dfirst auto`, the default: d-first from N' ~ 4.3k on; the ratio's
+ratio (`--dfirst auto`, the default: d-first from N' ~ 3.5k on with engine 4; the ratio's
 level is learned online). A d-first sum gets a plain calibration stream of
 ~7% of its CPU (`--calib-r1-stride`), whose sampled squares keep the class
 and per-P factors learning and whose plain-time estimate teaches the plain

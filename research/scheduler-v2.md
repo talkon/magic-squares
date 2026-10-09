@@ -292,7 +292,9 @@ arguments.
 (`amodel.DFIRST_RATIO_PRIOR`, pooled over the perf verifier's 13 sums with
 both modes, resid sd 0.17; ideas.md "Measurements on the integrated
 binary"). With the prior level `auto` switches at N' = 4.29k for every P.
-The level a0 is learned online from pairs (below), the slope held.
+The level a0 is learned online from pairs (below), the slope held. (This
+is engine 3's ratio; engine 4's, with the class support and the star
+cover, is lower and steeper and switches at N' ~3.49k: "Engine 4" below.)
 
 * The first version compared the two time laws instead, t_d + t_cal < t_p.
   That put the switch at N' ~ 9-10k weighted by E, where the
@@ -365,6 +367,23 @@ per engine, mode "dfirst"):
   1 0 1 at 0.6-0.75. A label or x term on the residuals is not identified.
   With the switch at ~4.3k this law sets the density of every sum above
   it.
+
+**Engine 4** (round 2: the gated class support in the V_d searches and
+the star cover, msearch `ENGINE_VERSION` 4; research/ideas.md,
+"Integration of the round-2 d-first changes"). The d-first CPU per sum is
+e^-0.138 (N/4000)^-0.162 times engine 3's (paired on one binary, 12 sums
+at N 3.1-31.7k, resid sd 0.073; the c2 verifiers' class-support and
+star-cover factors multiply to -0.161 - 0.162 ln(N/4000)), the plain
+search unchanged. So engine 4's d-first law starts at
+`DFIRST_TIME_PRIOR` + `DFIRST_ENGINE_SHIFT[4]`, 3.077 + 3.414 ln(N'/4000),
+and its ratio at `DFIRST_RATIO_PRIOR` + `DFIRST_RATIO_ENGINE_SHIFT[4]`,
+ln r = -0.166 - 0.728 ln(N'/4000): `--dfirst auto` switches at N' ~3.49k
+(engine 3: 4.29k). As for the time laws, an older engine's posterior
+stands in, shifted, until the newer engine has data: engine 3's ratio
+pairs give engine 4's level plus the shift (`amodel.dfirst_ratio_level`,
+`current_ratio_level`), and the d-first law of engine 3's records is
+handed over by `time_prior`. The d-first law learns from engine-4 records
+with v2's own star K only (above, "The star cover").
 
 **The cost along d is not uniform.** In the perf verifier's 13 d logs
 (N 2-32k), the mean CPU per d by decile of d's index u = d / N, relative

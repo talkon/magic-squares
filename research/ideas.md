@@ -2782,3 +2782,66 @@ d-first CPU at N <= 3k), and v2 may run d-first from N' ~3.4k on (and from
   849 (102 labels: no class support, the nodes of `--no-class-support`)
   and d 0-100 of 13 7 4 3 1 1 / 1900 (V_d of 129-137 labels: some d with
   it; the gated nodes between off and on; the same pairs in all runs).
+
+### Engine 4: the d-first time law and the ratio
+
+msearch's `ENGINE_VERSION` and scheduler v2's `ENGINE` are now 4: the
+d-first search changed (the gated class support and the star cover K = 4,
+both on by default), the plain search did not (bench nodes and hashes
+unchanged). Each engine's laws start from the previous engine's posterior
+plus a shift (`amodel.time_prior`, and now `dfirst_ratio_level` for the
+ratio: the pairs of an older engine stand in, shifted, until engine 4 has
+pairs of its own).
+
+**Paired measurement** (`integ2/e4/`): one binary, engine 3's settings
+(`--no-class-support --dfirst-star 0`) against engine 4's (defaults; gate
+at 129 labels in this run, which differs from 137 only on s4031 and s4111,
+by ~1-3%), the same d (`--d-stride`, offset 7; whole d loops below 4k),
+min of 2 alternating rounds, d-first CPU per sum (dsum `time`: the index
+and the d loop), pairs equal in all arms:
+
+| sum | N | labels | d searched | engine 3 s | engine 4 s | 4 / 3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 5 4 2 / 849 | 1,515 | 102 | 1,515 | 0.55 | 0.51 | 0.933 |
+| 10 6 4 2 1 1 / 855 | 2,444 | 110 | 2,444 | 3.42 | 3.07 | 0.899 |
+| 12 6 3 2 1 0 1 / 900 | 2,994 | 121 | 2,994 | 6.07 | 5.19 | 0.854 |
+| 10 6 3 2 1 / 1360 | 3,066 | 194 | 3,066 | 1.96 | 1.66 | 0.846 |
+| 10 6 3 2 1 / 900 | 3,626 | 154 | 3,626 | 6.11 | 5.09 | 0.833 |
+| 12 6 3 2 1 0 1 / 939 | 4,032 | 133 | 4,032 | 25.65 | 24.64 | 0.961 |
+| 13 7 4 3 1 1 / 1900 | 4,111 | 137 | 2,055 | 15.40 | 14.07 | 0.914 |
+| 12 6 3 2 1 1 / 950 | 5,704 | 149 | 1,426 | 22.37 | 18.49 | 0.826 |
+| 13 7 4 3 1 1 / 1950 | 5,896 | 153 | 1,179 | 22.35 | 19.00 | 0.850 |
+| 13 7 4 3 1 1 / 2000 | 7,593 | 168 | 633 | 22.01 | 17.79 | 0.808 |
+| 12 6 3 2 1 1 / 1200 | 11,698 | 199 | 293 | 23.91 | 15.27 | 0.639 |
+| 13 7 4 3 1 1 / 2200 | 15,199 | 211 | 102 | 24.33 | 17.50 | 0.719 |
+| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 252 | 103 | 25.31 | 15.83 | 0.625 |
+| 13 7 4 3 1 1 / 2400 | 22,993 | 245 | 58 | 30.37 | 21.46 | 0.707 |
+| 13 7 4 3 1 1 / 2650 | 31,743 | 279 | 32 | 31.85 | 20.18 | 0.634 |
+
+* Below 3k the star cover alone (the class support is gated off there)
+  gives 0.85-0.93; with the gated class support alone (third arm, no star)
+  the sums up to 5.9k were 0.90-1.04x engine 3 (0.96-1.04 where no V_d
+  passes the gate: the run-to-run noise), and the star cover on top
+  0.84-0.95x.
+* **Fit**, N >= 3k (12 sums): ln(engine 4 / engine 3) = -0.138 (+- 0.029)
+  - 0.162 (+- 0.027) ln(N/4000), residual sd 0.073 (N >= 4k: -0.097 -
+  0.191 x; >= 5.5k: -0.138 - 0.164 x).
+* **The c2 verifiers' numbers give the same law**: the class support's
+  0.924 (N/4000)^-0.180 (11 sums, 5.9-31.7k; verify-classsup) times the
+  star cover's 1 - 0.75 s with s = 0.107 (N/4000)^-0.28 (its prediction,
+  measured 2-4% lower; verify-star's end-to-end 1.045-1.065x), linearised
+  over 4-32k: -0.161 - 0.162 ln(N/4000).
+* **Shipped**: `amodel.DFIRST_E4` = (-0.138, -0.162), from the direct
+  pairs, as the shift of both the d-first time law
+  (`DFIRST_ENGINE_SHIFT[4]`: intercept 3.215 -> 3.077, slope 3.576 ->
+  3.414) and the ratio (`DFIRST_RATIO_ENGINE_SHIFT[4]`: a0 -0.028 ->
+  -0.166, a1 -0.566 -> -0.728), since the plain search is unchanged
+  (`ENGINE_TIME_SHIFT` has no entry for 4). With the 7% calibration stream
+  `--dfirst auto` now switches to d-first at N' ~3.49k (engine 3: 4.29k).
+* The scorer carries its engine (`AnalyticScorer.engine`), so that the
+  slope matches the level; `current_ratio_level` gives the level of the
+  newest engine with pairs, shifted to the current one.
+* The calibration search in the target region measured engine 3's ratio
+  level at about -0.08 (14 d-first sums, research/calibration-target.md
+  3.6). It is not folded into the prior: the scheduler learns the level
+  online from the streams, as before.

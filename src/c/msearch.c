@@ -104,7 +104,7 @@
  *   {"type":"sum","n":6,"P":[13,6,3,2],"Pval":...,"S":506,"nvecs":831,
  *    "nvecs_raw":831,"labels":77,"nodes":890845,"squares":0,
  *    "time":0.23,"setup_time":..,"enum_time":0.001,"cpu":0.24,"truncated":0,
- *    "engine":3}
+ *    "engine":4}
  * (time, setup_time, enum_time: wall seconds of the search, of the reduction
  * and setup, and this sum's share of the enumeration; cpu: the process CPU
  * seconds of all three, which the scheduler fits its time law to) and one
@@ -191,9 +191,11 @@
  * version of this pipeline, without the field; 2 = support and cross
  * filters, carried bitsets, October 2026; 3 = per-r1 widths, carried
  * bitsets up to 512 labels, the pretest (cx/integrated, October 2026):
- * 0.66-0.89x engine 2's CPU at 129-256 labels, 0.26x above; keep
- * scripts/scheduler.py ENGINE in step) */
-#define ENGINE_VERSION 3
+ * 0.66-0.89x engine 2's CPU at 129-256 labels, 0.26x above; 4 = the
+ * d-first search's class support (gated) and star cover (round 2, October
+ * 2026): d-first CPU per sum x e^-0.138 (N/4000)^-0.162, the plain search
+ * unchanged; keep scripts/scheduler.py ENGINE in step) */
+#define ENGINE_VERSION 4
 
 static double wall_time(void) {
   struct timeval t;

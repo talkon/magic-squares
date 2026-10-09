@@ -46,7 +46,8 @@ below stops growing at N ~ 5.5k). On top of it:
     with a plain calibration stream of ~7% (--calib-r1-stride k, whose
     sampled squares enter the class and per-P factors, weighted, and
     whose plain-time estimate the plain law and the ratio) is below 1:
-    from N' ~ 4.3k on. The d-first time law (amodel.DFIRST_TIME_PRIOR, its
+    from N' ~ 3.5k on (engine 4; 4.3k with engine 3). The d-first time
+    law (amodel.DFIRST_TIME_PRIOR with the engine's shift, its
     level learned) prices them. A d-first sum longer than 1.5 units is
     split into units of d (--d-range lo:hi); the summary merges their
     "dchunk" records and the planner continues a sum from its first d not
@@ -526,8 +527,11 @@ UNIT_DROP = 0.5
 # version 1): the time model uses only timings of the newest version (v2:
 # each engine's law starts from the previous engine's posterior, see
 # fit_time_models). 3 = cx/integrated (per-r1 widths, carried bitsets up to
-# 512 labels, the pretest)
-ENGINE = 3
+# 512 labels, the pretest); 4 = round 2 of the d-first search (the class
+# support in the V_d searches, gated, and the star cover K = 4; the plain
+# search unchanged): its d-first law and ratio start from engine 3's with
+# amodel.DFIRST_ENGINE_SHIFT / DFIRST_RATIO_ENGINE_SHIFT
+ENGINE = 4
 
 
 def engine_of(r):
@@ -1402,7 +1406,8 @@ EXPLORE_V2 = 0.0            # optimism: posterior mean + EXPLORE * sd
 # units"). --dfirst auto: a sum is searched d-first where the measured
 # d-first / plain ratio (amodel.DFIRST_RATIO_PRIOR, its level learned
 # online) with the calibration stream is below 1, (1 + CALIB_FRAC) r(N') <
-# 1, i.e. N' >= ~4.3k, and its N' >= --dfirst-min-n. The two time laws
+# 1, i.e. N' >= ~3.5k with engine 4 (~4.3k with engine 3), and its N' >=
+# --dfirst-min-n. The two time laws
 # only price the sums (their quotient is not label-free and the plain law
 # under-predicts at 5-8k: it put the switch at ~9-10k).
 DFIRST_POLICIES = ("auto", "off", "on")
@@ -1647,18 +1652,32 @@ def fit_time_models(stats, prior=None):
     return out
 
 
-def current_ratio_stats(ratio, engine=None):
+def current_ratio_stats(ratio, engine=None, with_engine=False):
     """the d-first / plain ratio pairs [n, sum x, sum y, sum y^2] of the
     newest engine that has any (at least ENGINE; an older engine's pairs
-    stand in until the current one has some, like the time laws' priors)"""
-    if not ratio:
-        return None
-    engines = sorted(int(e) for e in ratio)
-    engine = max([ENGINE] + engines) if engine is None else engine
-    if str(engine) in ratio:
-        return ratio[str(engine)]
-    older = [e for e in engines if e < engine]
-    return ratio[str(max(older))] if older else None
+    stand in until the current one has some, like the time laws' priors);
+    with_engine: (pairs, their engine)"""
+    out = (None, None)
+    if ratio:
+        engines = sorted(int(e) for e in ratio)
+        engine = max([ENGINE] + engines) if engine is None else engine
+        if str(engine) in ratio:
+            out = (ratio[str(engine)], engine)
+        else:
+            older = [e for e in engines if e < engine]
+            if older:
+                out = (ratio[str(max(older))], max(older))
+    return out if with_engine else out[0]
+
+
+def current_ratio_level(ratio, engine=None):
+    """(the ratio's level a0 for engine, default the newest at least ENGINE,
+    and its pairs): the posterior of the newest engine's pairs, an older
+    engine's shifted to this one (amodel.dfirst_ratio_level)"""
+    engs = [int(e) for e in (ratio or {})]
+    engine = max([ENGINE] + engs) if engine is None else engine
+    st, st_engine = current_ratio_stats(ratio, engine, with_engine=True)
+    return _am().dfirst_ratio_level(st, engine, st_engine), st
 
 
 def _prior_engine(mode):
@@ -2122,9 +2141,10 @@ class Summary:
         self.files = {}      # basename (without .gz) -> per-file stats
         self.cover = {}      # 'e_e_e' -> merged [[lo, hi], ...]
         # the d-first sums searched in part: 'e_e_e' -> {"S": {"nd": number
-        # of d or None, "iv": merged [[lo, hi), ...] of d searched}}, from
-        # the "dchunk" records (d_stride 1); a sum leaves it for cover once
-        # its parts cover [0, nd)
+        # of d or None, "g": {star cover "x:K" or "-": {"x", "k", "iv":
+        # merged [[lo, hi), ...] of d searched, "pairs", "est"}}}}, from the
+        # "dchunk" records (d_stride 1; _dcover); a sum leaves it for cover
+        # once one group covers [0, nd)
         self.dcov = {}
         # 'e_e_e' -> {"o": [sq, S, P, SP], "cpu", "nsums", "cells": {c: [9]},
         #  "pcov": merged [[lo, hi]] of the plain sums with a "sum" record,
@@ -2921,8 +2941,10 @@ class AnalyticScorer:
         self.policy = policy
         self.calib_frac = float(calib_frac)
         self.ldmin = math.log(max(float(dmin), 1.0))
-        # the level of ln(d-first / plain CPU) (amodel.dfirst_log_ratio)
-        self.lr0 = _am().DFIRST_RATIO_PRIOR["a"][0] if lr0 is None else float(lr0)
+        # the level of ln(d-first / plain CPU) (amodel.dfirst_log_ratio) of
+        # msearch engine self.engine (its slope)
+        self.engine = ENGINE
+        self.lr0 = _am().dfirst_ratio_coefs(self.engine)[0] if lr0 is None else float(lr0)
         self.set_calibration(calib)
         self.lnfsq = np.zeros(len(cands))
         self.lnFm = np.zeros(len(cands))
@@ -2990,7 +3012,7 @@ class AnalyticScorer:
 
     def log_ratio(self, lNp):
         """ln(d-first CPU / plain CPU) of a sum at ln N'"""
-        return _am().dfirst_log_ratio(lNp, self.lr0)
+        return _am().dfirst_log_ratio(lNp, self.lr0, self.engine)
 
     def _choose(self, lNp, tp, td):
         """per sum: d-first?, and the calibration stream's predicted CPU
@@ -3681,8 +3703,7 @@ class SchedulerV2:
         self.time_models = fit_time_models(self.summary.time_stats())
         self.tm = current_time_model(self.time_models)
         self.tmd = current_time_model(self.time_models, mode="dfirst")
-        self.ratio_st = current_ratio_stats(self.summary.ratio)
-        self.lr0 = _am().dfirst_ratio_level(self.ratio_st)
+        self.lr0, self.ratio_st = current_ratio_level(self.summary.ratio)
         explore = self.args.explore if self.args.explore is not None else EXPLORE_V2
         if not hasattr(self, "scorer"):
             a = self.args
@@ -3705,7 +3726,7 @@ class SchedulerV2:
         with open(os.path.join(self.dir, f"time_{self.n}.json"), "w") as f:
             json.dump({k: v.to_json() for k, v in self.time_models.items()}
                       | {"current": self.tm.to_json(), "current_dfirst": self.tmd.to_json(),
-                         "dfirst_ratio": {"a0": self.lr0, "a1": _am().DFIRST_RATIO_PRIOR["a"][1],
+                         "dfirst_ratio": {"a0": self.lr0, "a1": _am().dfirst_ratio_coefs(ENGINE)[1],
                                           "pairs": self.ratio_st}},
                       f, indent=1)
         self.summary.save()
@@ -3857,7 +3878,7 @@ def describe_calib(calib, tm, tmd=None, lr0=None, rst=None):
         out += (f"; d-first law: {tmd.th[0]:.3f} + {tmd.th[1]:.3f} ln(N'/4000), sd {tmd.sd:.3f} "
                 f"({tmd.n:.1f} sums, parts weighted)")
     if lr0 is not None:
-        a1 = _am().DFIRST_RATIO_PRIOR["a"][1]
+        a1 = _am().dfirst_ratio_coefs(ENGINE)[1]
         sw = math.exp((math.log(1 + CALIB_FRAC) + lr0) / -a1) * 4000
         out += (f"; d-first/plain ratio: {lr0:+.3f} {a1:+.3f} ln(N'/4000) "
                 f"({int(rst[0]) if rst else 0} pairs; auto switches at N' {sw:.0f})")
@@ -4110,7 +4131,7 @@ def v2_forecast(args):
         sch.calib = Calibration()
         sch.tm = _am().time_prior(ENGINE)
         sch.tmd = _am().time_prior(ENGINE, mode="dfirst")
-        sch.lr0 = _am().dfirst_ratio_level(None)
+        sch.lr0 = _am().dfirst_ratio_level(None, ENGINE)
         sch.scorer.set_calibration(sch.calib)
         sch.scorer.tm = sch.tm
         sch.scorer.tmd = sch.tmd

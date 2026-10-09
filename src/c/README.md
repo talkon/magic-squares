@@ -23,9 +23,11 @@ of the pretest below, 0 = off; the same squares and nodes), and the
 d-first and r1-sampling options below. Malformed values, a `--d-range`
 with lo >= hi, d-first options without `--diag-first`, more than 8
 `--r1-strata` and log files that cannot be opened are refused (exit 2).
-Every record of a search carries `"engine":3` (the version of the search,
-whose time per sum the scheduler fits per engine; 3 = this code, with the
-per-r1 widths, the carried bitsets up to 512 labels and the pretest).
+Every record of a search carries `"engine":4` (the version of the search,
+whose time per sum the scheduler fits per engine; 3 = the per-r1 widths,
+the carried bitsets up to 512 labels and the pretest; 4 = this code, with
+the d-first search's class support and star cover, the plain search
+unchanged).
 
 Output is JSON lines, flushed as it goes: one `square` record per semi-magic
 square (with its traversal counts, the best pair of diagonals, and the square

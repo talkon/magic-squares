@@ -432,6 +432,10 @@ TIME_PRIOR = {"th": [3.8587, 5.4575, -3.4622, 0.9458, 0.3934, 0.0, 0.0, 0.0, 0.0
 # step starts 0.227 lower (0.39 -> 0.17); above 256 labels it ran at
 # 0.26x, which no feature of the law describes (3 sums at N 21-32k; refit
 # the shape when engine-3 data arrives there; research/ideas.md).
+# Engine 4 (round 2: the class support in the V_d searches and the star
+# cover of the d loop) changes only the d-first search: the plain search's
+# nodes and hashes are unchanged and bench prod's CPU is within noise, so
+# its plain law starts at engine 3's posterior unshifted.
 ENGINE_TIME_SHIFT = {3: {"labels>128": -0.227}}
 # prior precision of th for the online refit. The shape (N, L and hinge
 # slopes) is fixed: refitting it on the thousands of cheap sums at N' < 3k
@@ -472,8 +476,21 @@ TIME_SD_PSEUDO = 20.0
 DFIRST_TIME_PRIOR = {"th": [3.215, 3.576, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                      "sd": 0.25, "engine": 3}
 DFIRST_TIME_LAMBDA = (25.0, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6, 1e6)
-# per-engine shifts of the d-first law after DFIRST_TIME_PRIOR's engine
-DFIRST_ENGINE_SHIFT = {}
+# per-engine shifts of the d-first law after DFIRST_TIME_PRIOR's engine.
+# Engine 4 (the class support in the V_d searches, gated to the V_d of >= 137
+# labels, and the star cover with K = 4): ln(engine 4 / engine 3 d-first
+# CPU per sum) = c0 + c1 ln(N/4000), DFIRST_E4 = (-0.138 +- 0.029, -0.162 +-
+# 0.027), resid sd 0.073: paired on one binary (--no-class-support
+# --dfirst-star 0 against the defaults), the same d (d-stride samples at N
+# >= 4k), min of 2 alternating rounds, 12 sums at N = 3.1-31.7k
+# (research/ideas.md, "Integration of the round-2 d-first changes"). The
+# c2 verifiers' numbers give the same law: the class support's 0.924
+# (N/4000)^-0.180 (11 sums, 5.9-31.7k) times the star cover's 1 - 0.75 s,
+# s = 0.107 (N/4000)^-0.28 (measured 2-4% below its prediction): -0.161 -
+# 0.162 ln(N/4000). The same shift goes into the ratio
+# (DFIRST_RATIO_ENGINE_SHIFT), the plain search being unchanged.
+DFIRST_E4 = (-0.138, -0.162)
+DFIRST_ENGINE_SHIFT = {4: {"intercept": DFIRST_E4[0], "ln N'/4000": DFIRST_E4[1]}}
 # the CPU of the d loop is not uniform along d's index in the unreduced
 # list: mean CPU per d in the deciles of u = d / N relative to the sum's
 # mean, pooled over the perf verifier's 13 d logs (N 2-32k; the same shape
@@ -499,6 +516,9 @@ DFIRST_COST_PROFILE = (0.71, 1.08, 1.08, 1.21, 1.16, 1.21, 1.15, 1.15, 0.86, 0.3
 # d-first sum with a calibration stream gives: its d-first CPU against the
 # stream's unbiased plain estimate (est_time).
 DFIRST_RATIO_PRIOR = {"a": (-0.028, -0.566), "sd": 0.17, "level_sd": 0.1, "engine": 3}
+# per-engine shifts (a0, a1) of the ratio after DFIRST_RATIO_PRIOR's engine
+# (engine 4: the d-first law's shift, DFIRST_E4)
+DFIRST_RATIO_ENGINE_SHIFT = {4: DFIRST_E4}
 
 # ln nodes = NODE_TH . [1, ln(N'/4000), ln(labels/150), max(0, ln(N'/8000))]
 NODE_TH = (17.375, 5.756, -5.765, 0.639)
@@ -566,24 +586,40 @@ def dfirst_cost_frac(lo, hi, nd):
     return float(dfirst_cost_cum(hi / nd) - dfirst_cost_cum(lo / nd))
 
 
-def dfirst_log_ratio(lNp, a0=None):
-    """ln(d-first CPU / plain CPU) of a sum at the model's ln N'
-    (DFIRST_RATIO_PRIOR, level a0 if given)"""
-    a = DFIRST_RATIO_PRIOR["a"]
-    return (a[0] if a0 is None else a0) + a[1] * (np.asarray(lNp, float) - math.log(4000))
-
-
-def dfirst_ratio_level(st=None):
-    """the posterior mean of the ratio's level a0 from pairs st = [n, sum x,
-    sum y] (weighted; y = ln(d-first CPU / plain CPU), x = ln(N'/4000)),
-    the slope held: a normal prior at DFIRST_RATIO_PRIOR's a0 with sd
-    level_sd, residual sd sd"""
+def dfirst_ratio_coefs(engine=None):
+    """the prior (a0, a1) of an msearch engine's d-first / plain ratio:
+    DFIRST_RATIO_PRIOR (its engine, the default) plus the
+    DFIRST_RATIO_ENGINE_SHIFT of the engines after it, up to engine"""
     a0, a1 = DFIRST_RATIO_PRIOR["a"]
+    base = DFIRST_RATIO_PRIOR["engine"]
+    for e in range(base + 1, int(base if engine is None else engine) + 1):
+        d0, d1 = DFIRST_RATIO_ENGINE_SHIFT.get(e, (0.0, 0.0))
+        a0, a1 = a0 + d0, a1 + d1
+    return a0, a1
+
+
+def dfirst_log_ratio(lNp, a0=None, engine=None):
+    """ln(d-first CPU / plain CPU) of a sum at the model's ln N' (the
+    ratio of engine, default DFIRST_RATIO_PRIOR's; level a0 if given)"""
+    p0, a1 = dfirst_ratio_coefs(engine)
+    return (p0 if a0 is None else a0) + a1 * (np.asarray(lNp, float) - math.log(4000))
+
+
+def dfirst_ratio_level(st=None, engine=None, st_engine=None):
+    """the posterior mean of engine's ratio level a0 from pairs st = [n,
+    sum x, sum y] (weighted; y = ln(d-first CPU / plain CPU), x =
+    ln(N'/4000)) of engine st_engine (default engine), the slope held: a
+    normal prior at st_engine's a0 (dfirst_ratio_coefs) with sd level_sd,
+    residual sd sd; pairs of an older engine stand in for a newer one's
+    with the shift between their priors (as time_prior hands a time law
+    over)"""
+    a0, a1 = dfirst_ratio_coefs(st_engine if st_engine is not None else engine)
+    shift = dfirst_ratio_coefs(engine)[0] - a0
     if not st or st[0] <= 0:
-        return a0
+        return a0 + shift
     n, sx, sy = float(st[0]), float(st[1]), float(st[2])
     shrink = (DFIRST_RATIO_PRIOR["sd"] / DFIRST_RATIO_PRIOR["level_sd"]) ** 2
-    return a0 + (sy - a1 * sx - n * a0) / (n + shrink)
+    return a0 + (sy - a1 * sx - n * a0) / (n + shrink) + shift
 
 
 class TimeModel:

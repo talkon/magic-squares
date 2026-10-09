@@ -590,9 +590,14 @@ def test_time_model():
     assert np.allclose(scheduler.current_time_model(m2, engine=2).th, tm2.th)
     # engine 3 data after engine 2's: fitted from engine 2's shifted posterior
     m23 = scheduler.fit_time_models({"2:plain": am.TimeModel.stats(F2, y2), "3:plain": st})
-    tm23 = scheduler.current_time_model(m23)
-    assert tm23.engine == scheduler.ENGINE == 3 and tm23.n == 50
+    tm23 = scheduler.current_time_model(m23, engine=3)
+    assert tm23.engine == 3 and tm23.n == 50
     assert np.abs(tm23.th[1:4] - tm2.th[1:4]).max() < 1e-3
+    # engine 4 (the d-first search changed, the plain search not): its plain
+    # law is engine 3's posterior, unshifted, until engine-4 sums arrive
+    assert scheduler.ENGINE == 4 and not am.ENGINE_TIME_SHIFT.get(4)
+    tm4 = scheduler.current_time_model(m23)
+    assert tm4.engine == 4 and tm4.n == 0 and np.allclose(tm4.th, tm23.th)
     assert np.allclose(scheduler.current_time_model({}).th, prior3.th)
     assert np.allclose(scheduler.current_time_model({}, engine=2).th, prior.th)
     print("time model ok")
@@ -1050,10 +1055,19 @@ def test_dfirst_plan():
     part, and the upper bounds of the lazy planner with d-first"""
     import numpy as np
     import amodel as am
-    # the d-first prior, and a level learned online (the slope held)
+    # the d-first prior (engine 3's, shifted to engine 4 by the class support
+    # and the star cover), and a level learned online (the slope held)
     tmd = scheduler.current_time_model({}, mode="dfirst")
-    assert tmd.mode == "dfirst" and tmd.engine == 3
-    assert np.allclose(tmd.th, am.DFIRST_TIME_PRIOR["th"]) and tmd.sd == am.DFIRST_TIME_PRIOR["sd"]
+    tmd3 = scheduler.current_time_model({}, engine=3, mode="dfirst")
+    assert tmd3.mode == "dfirst" and tmd3.engine == 3
+    assert np.allclose(tmd3.th, am.DFIRST_TIME_PRIOR["th"]) and tmd3.sd == am.DFIRST_TIME_PRIOR["sd"]
+    c0, c1 = am.DFIRST_E4
+    assert tmd.engine == scheduler.ENGINE == 4 and tmd.sd == tmd3.sd
+    assert np.allclose(tmd.th, tmd3.th + np.r_[c0, c1, np.zeros(am.NT - 2)])
+    assert am.dfirst_ratio_coefs(4) == (am.DFIRST_RATIO_PRIOR["a"][0] + c0,
+                                        am.DFIRST_RATIO_PRIOR["a"][1] + c1)
+    assert am.dfirst_ratio_coefs() == am.dfirst_ratio_coefs(3) == am.DFIRST_RATIO_PRIOR["a"]
+    tmd = tmd3
     rng = np.random.default_rng(7)
     lNp = np.log(rng.uniform(5000, 30000, 40))
     lL = np.log(rng.uniform(150, 280, 40))
@@ -1062,13 +1076,16 @@ def test_dfirst_plan():
     y -= 0.5 * np.mean(lNp - math.log(4000))   # the same mean level, another slope
     st = am.TimeModel.stats(am.time_features(lNp, lL, 6), y)
     models = scheduler.fit_time_models({"3:dfirst": st, "3:plain": st})
-    td2 = scheduler.current_time_model(models, mode="dfirst")
+    td2 = scheduler.current_time_model(models, engine=3, mode="dfirst")
     assert td2.mode == "dfirst" and td2.n == 40
     assert abs(td2.th[1] - tmd.th[1]) < 1e-3 and np.allclose(td2.th[2:], tmd.th[2:], atol=1e-3)
     assert abs(td2.th[0] - tmd.th[0] - math.log(0.6)) < 0.1, td2.th
     # the plain law of the same data is fitted from the plain prior
     assert np.allclose(models["3:plain"].th[1:4], am.time_prior(3).th[1:4], atol=1e-3)
-    assert scheduler.current_time_model(models, engine=4, mode="dfirst").th[0] == td2.th[0]
+    # (engine 4 without data of its own: engine 3's posterior, shifted)
+    td4 = scheduler.current_time_model(models, engine=4, mode="dfirst")
+    assert td4.engine == 4 and abs(td4.th[0] - td2.th[0] - c0) < 1e-12
+    assert abs(td4.th[1] - td2.th[1] - c1) < 1e-12
     P = (13, 7, 4, 3, 1, 1)
     with tempfile.TemporaryDirectory() as state:
         cands, sc, plan = make_v2([P], state, unit_time=600.0)
@@ -1080,17 +1097,28 @@ def test_dfirst_plan():
         assert np.allclose(tp, tm.time(lNp, lL, 6), rtol=1e-6)
         assert np.allclose(td, tmd.time(lNp, lL, 6), rtol=1e-6)
         assert np.allclose(tc, scheduler.CALIB_FRAC * td)
-        r = np.exp(am.dfirst_log_ratio(lNp))
+        r = np.exp(am.dfirst_log_ratio(lNp, engine=scheduler.ENGINE))
         assert (dm == (((1 + scheduler.CALIB_FRAC) * r < 1)
                        & (lNp >= math.log(scheduler.DFIRST_MIN_NP)))).all()
-        # (label-free: the switch is at one N', ~4.3k, whatever the laws)
-        assert abs(math.exp(lNp[dm].min()) / 4290 - 1) < 0.03, math.exp(lNp[dm].min())
+        # (label-free: the switch is at one N', whatever the laws; engine 4
+        # switches below engine 3's ~4.3k)
+        a0, a1 = am.dfirst_ratio_coefs(scheduler.ENGINE)
+        sw = 4000 * math.exp((math.log(1 + scheduler.CALIB_FRAC) + a0) / -a1)
+        assert sc.lr0 == a0 and 3300 < sw < 3700, sw
+        assert abs((1 + scheduler.CALIB_FRAC)
+                   * math.exp(float(am.dfirst_log_ratio(math.log(sw), engine=4))) - 1) < 1e-9
+        inside = lNp >= math.log(scheduler.DFIRST_MIN_NP)
+        assert (dm[inside] == (lNp[inside] >= math.log(sw))).all() and dm.any() and not dm.all()
         sc.tm = am.TimeModel(am.time_prior(scheduler.ENGINE).th + np.r_[2.0, np.zeros(8)])
         assert (sc.eval_modes(0, S)[5] == dm).all()
         sc.tm = am.time_prior(scheduler.ENGINE)
-        # (measured: plain at N 4.1k, S = 1900; d-first at 5.9k, S = 1950,
-        # and at 15.2k, S = 2200)
-        assert not dm[S == 1900][0] and dm[S == 1950][0] and dm[S >= 1950].all()
+        # engine 3's ratio: the switch at ~4.3k (measured: plain at N 4.1k,
+        # S = 1900; d-first at 5.9k, S = 1950, and at 15.2k, S = 2200)
+        sc.engine, sc.lr0 = 3, am.dfirst_ratio_coefs(3)[0]
+        dm3 = sc.eval_modes(0, S)[5]
+        assert abs(math.exp(lNp[dm3].min()) / 4290 - 1) < 0.03, math.exp(lNp[dm3].min())
+        assert not dm3[S == 1900][0] and dm3[S == 1950][0] and dm3[S >= 1950].all()
+        sc.engine, sc.lr0 = scheduler.ENGINE, a0
         t_eff = sc.eval_sums(0, S)[2]
         assert np.allclose(t_eff, np.where(dm, td + tc, tp))
         # grid_density agrees with eval_sums at the grid points
@@ -1116,7 +1144,7 @@ def test_dfirst_plan():
             plan.advance_unit(u)
             assert len(units) < 100
         k, tcal = sc.calib_stride(lNp[S == 2400][0], td1, 600.0)
-        r1 = math.exp(float(am.dfirst_log_ratio(lNp[S == 2400][0])))
+        r1 = math.exp(float(am.dfirst_log_ratio(lNp[S == 2400][0], engine=scheduler.ENGINE)))
         assert k == max(round(1 / (scheduler.CALIB_FRAC * r1)), math.ceil(td1 / r1 / 600))
         assert abs(tcal - td1 / r1 / k) < 1e-9 and tcal <= 600 * scheduler.DFIRST_STREAM_MAX
         n_exp = (td1 + tcal) / 600
@@ -1221,7 +1249,7 @@ def test_dfirst_plan():
         assert u.mode == "plain" and u.lo == Sg0 - 17 and u.hi >= Sg0 and u.score > 0, u
         sc.policy = "auto"
     # the measured sums (ideas.md, "Measurements on the integrated binary"):
-    # with the shipped engine-3 laws, the cheaper mode measured
+    # with the shipped engine-3 ratio, the cheaper mode measured with engine 3
     # and the crossover sums along 13 7 4 3 1 1 (1850: 1.21, 1950: 0.78)
     # and six pool sums at N ~6.1k measured at d-first / plain 0.69-0.82
     # (the review of the d-first scheduler; the quotient of the two laws
@@ -1237,6 +1265,7 @@ def test_dfirst_plan():
     with tempfile.TemporaryDirectory() as state:
         cands, sc, plan = make_v2([P for P, _, _ in measured], state)
         sc.tm = am.time_prior(scheduler.ENGINE)
+        sc.engine, sc.lr0 = 3, am.dfirst_ratio_coefs(3)[0]
         for a, (P, S, want) in enumerate(measured):
             assert bool(sc.eval_modes(a, [float(S)])[5][0]) == want, (P, S, want)
     # upper bounds hold with d-first (and with --dfirst on)
@@ -1451,9 +1480,19 @@ def test_dfirst_learning():
         n, sx, sy, syy = s.ratio["3"]
         y = math.log(loop + ovh) - math.log(16000 + 20)
         assert n == 1 and abs(sy - y) < 1e-6, (s.ratio, y)
-        a = sc_a0 = am.dfirst_ratio_level(s.ratio["3"])
+        a = sc_a0 = am.dfirst_ratio_level(s.ratio["3"], 3)
         res = y - am.dfirst_log_ratio(sx + math.log(4000))
         assert (a - am.DFIRST_RATIO_PRIOR["a"][0]) * res > 0 and abs(a - sc_a0) < 1e-12
+        # engine 4 without pairs of its own: engine 3's level, shifted (as
+        # the time laws are handed over)
+        a4 = am.dfirst_ratio_level(s.ratio["3"], 4, 3)
+        assert abs(a4 - a - am.DFIRST_E4[0]) < 1e-12
+        assert scheduler.current_ratio_level(s.ratio) == (a4, s.ratio["3"])
+        # ... and with pairs of its own, those (from engine 4's prior)
+        st4 = [1.0, sx, sy + 0.3, (sy + 0.3) ** 2]
+        a4b = scheduler.current_ratio_level(dict(s.ratio, **{"4": st4}))[0]
+        assert abs(a4b - am.dfirst_ratio_level(st4, 4)) < 1e-12
+        assert a4b > am.dfirst_ratio_coefs(4)[0]
         # (the same from scratch)
         whole = scheduler.Summary(state, 6)
         whole.update(units, store)
@@ -1463,7 +1502,7 @@ def test_dfirst_learning():
                                   unit_time=120.0, unit_drop=0.5, dfirst="auto", calib_frac=0.07,
                                   dfirst_min_n=2000.0)
         sch = scheduler.SchedulerV2(args, quiet=True)
-        assert abs(sch.scorer.lr0 - a) < 1e-12 and sch.lr0 == a
+        assert abs(sch.scorer.lr0 - a4) < 1e-12 and sch.lr0 == a4
     # (3) records after a sum is covered; incremental == full parse
     P2, key2, S2, raw2 = (12, 6, 3, 2, 1, 1), "12_6_3_2_1_1", 890, 1000
     with tempfile.TemporaryDirectory() as state:
