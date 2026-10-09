@@ -16,8 +16,20 @@ usage:
 
 PATH: msearch JSON-lines output (files, or directories searched recursively
 for *.jsonl); default <state>/units. Squares are deduplicated by hash (the
-first LABEL that has a square gets it). N comes from the "sum" records in the
-same files, S_min from the scheduler's pinfo cache (or bin/enumerate).
+first LABEL that has a square gets it). N comes from the "sum" (or "csum",
+"dsum") records in the same files, S_min from the scheduler's pinfo cache (or
+bin/enumerate).
+
+Calibration streams and d-first sums (msearch --diag-first): a "csquare"
+record (the stream's plain search of every k-th first row) is a square with
+weight k (its "weight" field), so that weighted totals estimate the whole
+sum's; every sum, rung and sub-event total, its Poisson interval (on the
+effective count, see summarize) and its bootstrap use the weights
+(--unweighted: weight 1). "dsquare" records ((square, SP diagonal) pairs of
+a d-first d loop) are not a sample of the semi-magic squares (each has an SP
+diagonal by construction), so they stay out of the ladder; they are listed
+in their own section (pairs, est. pairs = pairs x d_stride, partner flags,
+best_score) for the rungs above SP.
 
 examples:
     python3 scripts/calibrate.py                       # data/sched/units
@@ -557,11 +569,16 @@ def iter_files(path):
         yield path
 
 
-def load_records(specs, excludes):
+def load_records(specs, excludes, weighted=True):
     """specs: [(label, path)]. Returns (unique 6x6 squares with a grid, in
-    first-seen order; {(P, S): nvecs_raw} from the sum records; stats)"""
+    first-seen order, each with "weight": 1 for a "square", the stream's
+    stride for a "csquare" (1 with weighted=False); {(P, S): nvecs_raw} from
+    the sum / csum / dsum records; stats; the "dsquare" records, each with
+    "d_stride" from its file's dsum record)"""
     squares, sums = {}, {}
-    stats = {"files": 0, "records": 0, "dups": 0, "not_n6": 0, "no_grid": 0, "per_label": {}}
+    dsq, dstride = [], {}
+    stats = {"files": 0, "records": 0, "dups": 0, "not_n6": 0, "no_grid": 0, "per_label": {},
+             "csquares": 0, "dsquares": 0}
     for label, path in specs:
         for f in iter_files(path):
             if any(fnmatch.fnmatch(f, ex) for ex in excludes):
@@ -571,19 +588,30 @@ def load_records(specs, excludes):
                 for line in fh:
                     if not line.endswith("\n"):
                         break   # partially written line of a running unit
-                    if '"square"' not in line and '"sum"' not in line:
-                        continue    # quick filter: other record types
+                    if 'square"' not in line and 'sum"' not in line:
+                        continue    # quick filter: other record types (square, csquare,
+                        # dsquare; sum, csum, dsum pass)
                     try:
                         r = json.loads(line)
                     except json.JSONDecodeError:
                         continue
                     if not isinstance(r, dict):
                         continue
-                    if r.get("type") == "sum":
+                    t = r.get("type")
+                    if t in ("sum", "csum", "dsum"):
                         if r.get("n") == 6 and "nvecs_raw" in r:
                             sums[(sch.norm_p(r["P"]), r["S"])] = r["nvecs_raw"]
+                        if t == "dsum" and r.get("n") == 6:
+                            dstride[(f, sch.norm_p(r["P"]), r["S"])] = int(r.get("d_stride", 1))
                         continue
-                    if r.get("type") != "square":
+                    if t == "dsquare":
+                        if r.get("n") == 6 and "grid" in r:
+                            r["P"] = sch.norm_p(r["P"])
+                            r["source"], r["file"] = label, f
+                            dsq.append(r)
+                            stats["dsquares"] += 1
+                        continue
+                    if t not in ("square", "csquare"):
                         continue
                     stats["records"] += 1
                     if r.get("n") != 6:
@@ -598,9 +626,14 @@ def load_records(specs, excludes):
                     r["P"] = sch.norm_p(r["P"])
                     r["source"] = label
                     r["file"] = f
+                    r["kind"] = "calib" if t == "csquare" else "plain"
+                    r["weight"] = float(r.get("weight", 1)) if (t == "csquare" and weighted) else 1.0
+                    stats["csquares"] += t == "csquare"
                     squares[r["hash"]] = r
                     stats["per_label"][label] = stats["per_label"].get(label, 0) + 1
-    return list(squares.values()), sums, stats
+    for r in dsq:
+        r["d_stride"] = dstride.get((r["file"], r["P"], r["S"]), 1)
+    return list(squares.values()), sums, stats, dsq
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +714,7 @@ class SquareData:
         self.k = np.array([sum(1 for e in P if e) for P in self.P], dtype=np.int64)
         self.ratio = self.S / self.smin
         self.source = np.array([r["source"] for r in squares])
+        self.w = np.array([float(r.get("weight", 1.0)) for r in squares])
         order = {s: i for i, s in enumerate(dict.fromkeys(self.source.tolist()))}
         first = {}
         for P, s in zip(self.P, self.source.tolist()):
@@ -1041,15 +1075,25 @@ def bin_labels(data):
     return out
 
 
+# per-square weights (SquareData.w) of the summaries; None = all 1
+SQW = None
+
+
 def summarize(obs, preds, mask, events, conf=0.90):
     """per event: observed total and, per predictor, E, O/E, Poisson interval
     and tail probabilities. Squares where a predictor is NaN are left out of
-    its comparison (O is then recomputed on the rest; "n_missing")."""
+    its comparison (O is then recomputed on the rest; "n_missing").
+    With weights (SQW): O and E are weighted totals, and the interval and
+    tails are those of the effective count O / s against E / s, where
+    s = sum w^2 E / sum w E is the scale of one event (Var(sum w o) =
+    sum w^2 E under the predictor), so a csquare of weight k counts as ~k
+    squares but carries the uncertainty of one."""
     res = {}
+    wt = np.ones(len(mask)) if SQW is None else SQW
     for e in events:
         if e not in obs:
             continue
-        O = float(obs[e][mask].sum())
+        O = float((wt * obs[e])[mask].sum())
         row = {"obs": O, "pred": {}}
         for name, ev in preds.items():
             if e not in ev:
@@ -1058,12 +1102,16 @@ def summarize(obs, preds, mask, events, conf=0.90):
             ok = mask & np.isfinite(v)
             if not ok.any():
                 continue
-            Op = float(obs[e][ok].sum())
-            Ev = float(v[ok].sum())
-            lo, hi = poisson_ci(int(round(Op)), conf)
-            ge, le = poisson_tail(int(round(Op)), Ev)
+            Op = float((wt * obs[e])[ok].sum())
+            Ev = float((wt * v)[ok].sum())
+            sc = float((wt * wt * v)[ok].sum() / Ev) if (SQW is not None and Ev > 0) else 1.0
+            sc = sc if sc > 0 else 1.0
+            lo, hi = poisson_ci(int(round(Op / sc)), conf)
+            ge, le = poisson_tail(int(round(Op / sc)), Ev / sc)
             p = {"E": Ev, "ratio": (Op / Ev) if Ev > 0 else None,
-                 "ci": [lo / Ev, hi / Ev] if Ev > 0 else None, "p_ge": ge, "p_le": le}
+                 "ci": [lo * sc / Ev, hi * sc / Ev] if Ev > 0 else None, "p_ge": ge, "p_le": le}
+            if sc != 1.0:
+                p["event_scale"] = sc
             if ok.sum() < mask.sum():
                 p.update({"obs": Op, "n_missing": int(mask.sum() - ok.sum())})
             row["pred"][name] = p
@@ -1076,6 +1124,8 @@ def bootstrap(obs, preds, events, B=1000, conf=0.90, seed=7):
     n = len(next(iter(obs.values())))
     rng = np.random.default_rng(seed)
     Wt = rng.multinomial(n, np.full(n, 1.0 / n), size=B).astype(float)
+    if SQW is not None:
+        Wt = Wt * SQW[None, :]
     out = {}
     for e in events:
         if e not in obs:
@@ -1536,11 +1586,13 @@ def main():
                          "a 'hash' field, e.g. a per_square.jsonl): to repeat an analysis on a fixed set")
     ap.add_argument("--boot", type=int, default=1000, help="bootstrap replicates (0 = none)")
     ap.add_argument("--no-per-square", action="store_true", help="do not write per_square.jsonl")
+    ap.add_argument("--unweighted", action="store_true",
+                    help="csquare records with weight 1 instead of their stride")
     ap.add_argument("--w-samples", type=int, default=200000,
                     help="Monte Carlo samples for the partner-graph table (a quarter of them above y = 6)")
     args = ap.parse_args()
 
-    global W_TAB, W_SE
+    global W_TAB, W_SE, SQW
     t0 = time.time()
     os.makedirs(args.out, exist_ok=True)
     specs = []
@@ -1551,7 +1603,7 @@ def main():
             ap_ = os.path.abspath(p)
             lab, path = (os.path.relpath(ap_, ROOT) if ap_.startswith(ROOT + os.sep) else p), p
         specs.append((lab, path))
-    squares, sums, lstats = load_records(specs, args.exclude)
+    squares, sums, lstats, dsquares = load_records(specs, args.exclude, weighted=not args.unweighted)
     print(f"loaded {len(squares)} unique 6x6 squares from {lstats['files']} files "
           f"({lstats['records']} records, {lstats['dups']} duplicates)", file=sys.stderr)
     if not squares:
@@ -1574,6 +1626,10 @@ def main():
     pinfo = PInfoLite([os.path.join(args.state, "pinfo_6.json")] + args.pinfo, args.out)
     data = SquareData(squares, sums, pinfo)
     pinfo.save()
+    SQW = data.w if np.any(data.w != 1.0) else None
+    if SQW is not None:
+        print(f"weighted: {int((data.w != 1).sum())} csquares of weight {data.w[data.w != 1].min():g}-"
+              f"{data.w.max():g} (total weight {data.w.sum():.0f} for {len(squares)} squares)", file=sys.stderr)
     use_legacy = bool(args.legacy and args.legacy != "none" and os.path.exists(args.legacy))
     if use_legacy:
         data.set_legacy_range(parse_legacy(args.legacy))
@@ -1640,22 +1696,22 @@ def main():
             bins_out[bname][b] = summarize(obs, preds, mask, events)
             nsq_bins[bname][b] = int(mask.sum())
 
-    magic = {name: {"total": float(np.nansum(ev["SP+SP"])),
-                    "by_source": {s: float(np.nansum(np.asarray(ev["SP+SP"])[data.source == s]))
+    magic = {name: {"total": float(np.nansum(data.w * ev["SP+SP"])),
+                    "by_source": {s: float(np.nansum((data.w * np.asarray(ev["SP+SP"]))[data.source == s]))
                                   for s in dict.fromkeys(data.source.tolist())}}
              for name, ev in preds.items() if "SP+SP" in ev}
 
-    s_, p_, sp_ = obs["S"], obs["P"], obs["SP"]
+    s_, p_, sp_ = data.w * obs["S"], data.w * obs["P"], data.w * obs["SP"]
     groups = {}
     for i, P in enumerate(data.P):
         groups.setdefault(P, []).append(i)
-    indep_own = float(np.sum((s_ * p_ - sp_) / (NT - 1)))
+    indep_own = float(np.sum(data.w * (obs["S"] * obs["P"] - obs["SP"]) / (NT - 1)))
     rho_est = {"observed_SP": float(sp_.sum()),
                "own_square": float(sp_.sum() / indep_own) if indep_own > 0 else None,
                "own_square_expected_indep": indep_own,
-               "per_P_pooled": float(sp_.sum() / sum(s_[ix].sum() * p_[ix].sum() / (NT * len(ix))
+               "per_P_pooled": float(sp_.sum() / sum(s_[ix].sum() * p_[ix].sum() / (NT * data.w[ix].sum())
                                                      for ix in map(np.array, groups.values()))),
-               "model_rates": float(sp_.sum() / np.sum(preds["regression"]["_pS"] * preds["regression"]["_pP"] * NT)),
+               "model_rates": float(sp_.sum() / np.sum(data.w * preds["regression"]["_pS"] * preds["regression"]["_pP"] * NT)),
                "model_rho": float(reg0.coef["rho"]),
                "ci90_SP_count": list(poisson_ci(int(sp_.sum())))}
     legacy = None
@@ -1691,6 +1747,8 @@ def main():
     sub, beta = None, float("nan")
     if hp is not None and not args.no_sub_events:
         skeys, SA = sub_event_arrays(hp.sub_rows(data))
+        if SQW is not None:
+            SA = {q: a * SQW[:, None] for q, a in SA.items()}
         sub = {"all": sub_event_summary(skeys, SA, allmask, B=args.boot)}
         for bname in ("P source", "first search", "source"):
             if bname in binlab:
@@ -1723,18 +1781,35 @@ def main():
                      f"{max([d for d, v in rk.items() if v[1]] or [0])})"] = H["SP+SP"] * fac
         variants["heuristic, pairs given the counts independent except for the congruences"] = H["SP+SP"] / kc
         for lab, v in variants.items():
-            magic[lab] = {"total": float(np.nansum(v)),
-                          "by_source": {s: float(np.nansum(v[data.source == s]))
+            magic[lab] = {"total": float(np.nansum(data.w * v)),
+                          "by_source": {s: float(np.nansum((data.w * v)[data.source == s]))
                                         for s in dict.fromkeys(data.source.tolist())}}
             magic_corr[lab] = v
         pair_corr["kappa_c_overall"] = float(np.nansum(H["SP+SP"]) / np.nansum(H["SP+SP"] / kc))
         pair_corr["pair_factor_overall"] = float(np.nansum(H["SP+SP"]) / np.nansum(iid))
         pair_corr["congruence_factor_overall"] = float(np.nansum(H["SP+SP"] / kc) / np.nansum(iid))
 
+    # d-first (square, SP diagonal) pairs: the rungs above SP (each pair's
+    # SP diagonal d and its 15 partners; partner = an SP partner, i.e. magic)
+    dsec = {"records": len(dsquares), "pairs": len(dsquares),
+            "est_pairs": float(sum(r["d_stride"] for r in dsquares)),
+            "squares": len({r["hash"] for r in dsquares}),
+            "by_best_score": {}, "partner_sp": int(sum(1 for r in dsquares if r.get("partner"))),
+            "magic": int(sum(1 for r in dsquares if r.get("magic")))}
+    for r in dsquares:
+        b = LEVEL_NAME.get(int(r.get("best_score", 0)), str(r.get("best_score")))
+        dsec["by_best_score"][b] = dsec["by_best_score"].get(b, 0) + 1
+    if dsquares:
+        g = observe([dict(r, grid=r["grid"]) for r in dsquares])[0]
+        dsec["recomputed"] = {k: float(g[k].sum()) for k in ("SP", "SP+0", "SP+S", "SP+P", "SP+SP")}
+        dsec["est"] = {k: float((np.array([r["d_stride"] for r in dsquares]) * g[k]).sum())
+                       for k in ("SP+S", "SP+P", "SP+SP")}
+
     if not args.no_per_square:
         with open(os.path.join(args.out, "per_square.jsonl"), "w") as f:
             for i, r in enumerate(squares):
-                row = {"hash": r["hash"], "source": r["source"], "P_source": str(data.psource[i]),
+                row = {"hash": r["hash"], "source": r["source"], "kind": r.get("kind", "plain"),
+                       "weight": float(data.w[i]), "P_source": str(data.psource[i]),
                        "first_search": (None if data.searched is None else
                                         ("searched" if data.searched[i] else "new")),
                        "P": list(r["P"]), "S": int(r["S"]),
@@ -1754,7 +1829,9 @@ def main():
                  "N_from_sum_records": int(len(squares) - data.n_from_pinfo),
                  "N_from_pinfo_or_enumerate": int(data.n_from_pinfo), "mismatch_vs_records": mism,
                  "invalid_grids": bad, "specs": specs, "restricted": restricted, "excludes": args.exclude,
-                 "values_of_P": len(groups)},
+                 "values_of_P": len(groups), "csquares": lstats["csquares"],
+                 "weights": {"total": float(data.w.sum()), "max": float(data.w.max())}},
+        "dsquares": dsec,
         "predictors": notes,
         "heuristic_errors": hp.errors if hp else {},
         "w_table": {"xmax": W_XMAX, "ymax": W_YMAX, "max_se": float(W_SE.max()),
@@ -1774,7 +1851,13 @@ def main():
     md = ["# Calibration ladder (generated by scripts/calibrate.py)", "",
           f"{len(squares):,} unique squares ({len(groups)} values of P) from {lstats['files']} files; "
           "sources: " + ", ".join(f"{s} {n:,}" for s, n in summary["data"]["per_source"].items()) +
-          f". Recomputed counts vs the records: mismatches {mism}, invalid grids {len(bad)}.", "",
+          f". Recomputed counts vs the records: mismatches {mism}, invalid grids {len(bad)}." +
+          (f" {lstats['csquares']:,} of them are calibration-stream csquares, weighted by their stride "
+           f"(total weight {data.w.sum():,.0f}); intervals use the effective counts." if SQW is not None else ""),
+          "",
+          f"d-first (square, SP diagonal) pairs (dsquare records, not in the ladder): {dsec['pairs']} "
+          f"(est. {dsec['est_pairs']:g} with the d strides) on {dsec['squares']} squares; by best pair "
+          f"{dsec['by_best_score'] or '-'}; SP partners (magic) {dsec['partner_sp']}.", "",
           "Predictors: " + "; ".join(f"**{k}**: {v}" for k, v in notes.items()) + ".", "",
           "## The ladder (sums over all squares)", "",
           "O/E with the exact 90% Poisson interval of O (E treated as exact). The null reproduces "

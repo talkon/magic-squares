@@ -256,6 +256,52 @@ def test_cli(tmp):
     print("calibrate.py end to end ok")
 
 
+def test_cli_weighted(tmp):
+    """csquare records (a calibration stream) count with their stride as weight;
+    dsquare records (d-first pairs) stay out of the ladder and are listed"""
+    units = os.path.join(tmp, "units")
+    os.makedirs(units)
+    with open(os.path.join(units, "plain.jsonl"), "w") as f:
+        for r in SQUARES[1:]:
+            f.write(json.dumps({"type": "sum", "n": 6, "P": r["P"], "S": r["S"], "nvecs_raw": 1500,
+                                "squares": 1}) + "\n")
+            f.write(json.dumps(r) + "\n")
+    r0 = SQUARES[0]
+    with open(os.path.join(units, "dfirst.jsonl"), "w") as f:
+        d = dict(SQUARES[1], type="dsquare", d=7, dvec=[1, 2, 3, 4, 5, 6], set_count=1, magic=0, partner=0)
+        f.write(json.dumps(d) + "\n")
+        f.write(json.dumps({"type": "dsum", "mode": "dfirst", "n": 6, "P": SQUARES[1]["P"], "S": SQUARES[1]["S"],
+                            "nvecs_raw": 1500, "d_stride": 4, "pairs": 1}) + "\n")
+        f.write(json.dumps(dict(r0, type="csquare", weight=5)) + "\n")
+        f.write(json.dumps({"type": "csum", "mode": "calib", "n": 6, "P": r0["P"], "S": r0["S"],
+                            "nvecs_raw": 1600, "r1_stride": 5, "squares": 1, "est_squares": 5}) + "\n")
+    out = os.path.join(tmp, "out")
+    base = [sys.executable, os.path.join(HERE, "calibrate.py"), "--state", tmp, "--legacy", "none",
+            "--boot", "20", "--jobs", "1", "--w-samples", "20000", "--no-heuristic"]
+    for extra, w0 in (([], 5), (["--unweighted"], 1)):
+        res = subprocess.run(base + ["--out", out] + extra, capture_output=True, text=True)
+        if res.returncode != 0:
+            print(res.stdout, res.stderr)
+            raise SystemExit("calibrate.py failed")
+        with open(os.path.join(out, "results.json")) as f:
+            d = json.load(f)
+        assert d["data"]["squares"] == len(SQUARES) and d["data"]["csquares"] == 1, d["data"]
+        ov = d["overall"]
+        assert ov["S"]["obs"] == w0 * r0["s_count"] + sum(r["s_count"] for r in SQUARES[1:])
+        assert ov["P"]["obs"] == w0 * r0["p_count"] + sum(r["p_count"] for r in SQUARES[1:])
+        assert ov["best>=10"]["obs"] == w0           # the SP+P square is the csquare
+        E = ov["S"]["pred"]["null"]["E"]
+        assert abs(E - ov["S"]["obs"]) < 1e-9        # the null reproduces the (weighted) S rung
+        assert ("event_scale" in ov["S"]["pred"]["regression"]) == (w0 != 1)
+        ds = d["dsquares"]
+        assert ds["pairs"] == 1 and ds["est_pairs"] == 4 and ds["by_best_score"] == {"SP+S": 1}, ds
+        assert ds["est"]["SP+S"] == 4 and ds["recomputed"]["SP"] == 1
+        with open(os.path.join(out, "per_square.jsonl")) as f:
+            ws = {json.loads(line)["hash"]: json.loads(line)["weight"] for line in f}
+        assert ws[r0["hash"]] == w0 and all(ws[r["hash"]] == 1 for r in SQUARES[1:])
+    print("calibrate.py csquare weights and dsquare records ok")
+
+
 if __name__ == "__main__":
     test_observe()
     test_moments()
@@ -265,4 +311,6 @@ if __name__ == "__main__":
         test_partner_graph(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         test_cli(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        test_cli_weighted(tmp)
     print("all ok")
