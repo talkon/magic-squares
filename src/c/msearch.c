@@ -80,6 +80,10 @@
  *   --dfirst-star-only   search only the star d that --dfirst-star K (>= 1;
  *                     here by default 1) searches (a measurement of their
  *                     cost; the sum is not complete)
+ *   --dfirst-star-x X  x* = X instead of msearch's choice (any number keeps
+ *                     the cover exact; scheduler v2 passes the x* and K of
+ *                     the parts already searched when it continues a sum,
+ *                     whose parts it merges only within one star cover)
  *
  * r1 sampling of the plain search (measurements; the squares and the sum
  * record become "csquare" / "csum" records with estimates):
@@ -145,8 +149,9 @@
  * searched star d K x (d_stride x K; with K = -1 they cover the d without
  * x* only, with --dfirst-star-only the star d only), and se_pairs /
  * se_time are those of the two strata (star d and the others), each
- * sampled at random. A dchunk record has star_k, nd_star_skipped and
- * pairs_star then. With --diag-first the "done" record has "mode":"dfirst" (and
+ * sampled at random. A dchunk record has star_x, star_k, star_only,
+ * nd_star_skipped, nd_other_skipped and pairs_star then (with d_stride 1
+ * every d of [d_lo, d_hi) was searched or skipped by the star filter). With --diag-first the "done" record has "mode":"dfirst" (and
  * diag_first_min_n): its range then also holds the d-first sums, which
  * have no "sum" record but are not empty, and with --d-range lo:hi, lo > 0,
  * the plain sums of the range get a "skip" record instead of a search
@@ -426,7 +431,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
                            size_t d_stride, int64_t d_offset, uint64_t seed,
                            size_t d_lo, size_t d_hi, size_t d_chunk,
                            FILE *d_log, uint32_t calib_stride, int top_root,
-                           int star_k, int star_only,
+                           int star_k, int star_only, uint64_t star_force,
                            double enum_share, double reduce_time,
                            double pre_cpu, double deadline) {
   const double c0 = cpu_time();
@@ -440,7 +445,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
   double t_star = 0;
   if (star) {
     const double cs = cpu_time();
-    sx = dfirst_star_choose(df);
+    sx = dfirst_star_choose_x(df, star_force);
     dfirst_set_star(df, sx.x, star_k, star_only);
     if (star_only && star_k == 0)
       star_k = 1;
@@ -508,11 +513,16 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
             (unsigned long)st.nd, raw, (unsigned long)st.nodes,
             (unsigned long)st.pairs, (unsigned long)st.partners,
             cpu_time() - cc, st.truncated);
+    /* (star_x and star_k: the scheduler merges only the chunks of one
+     * star cover into a sum's coverage) */
     if (star)
       fprintf(out,
-              ",\"star_k\":%d,\"star_only\":%d,\"nd_star_skipped\":%lu,"
+              ",\"star_x\":%lu,\"star_k\":%d,\"star_only\":%d,"
+              "\"nd_star_skipped\":%lu,\"nd_other_skipped\":%lu,"
               "\"pairs_star\":%lu",
-              star_k, star_only, (unsigned long)st.nd_star_skipped,
+              (unsigned long)sx.x, star_k, star_only,
+              (unsigned long)st.nd_star_skipped,
+              (unsigned long)st.nd_other_skipped,
               (unsigned long)st.pairs_star);
     fprintf(out, "}\n");
     fflush(out);
@@ -661,6 +671,7 @@ int main(int argc, char *argv[]) {
   /* --dfirst-star K (default: 4 for even n, 0 for odd n), and
    * --dfirst-star-only (default K then 1) */
   int star_k = 0, star_k_set = 0, star_only = 0;
+  uint64_t star_force = 0; /* --dfirst-star-x X (0: msearch chooses x*) */
   const char *dfirst_opt = NULL; /* a d-first option given (for the check) */
   /* r1 sampling of the plain search */
   uint32_t r1_stride = 0, r1_strata[8];
@@ -689,6 +700,7 @@ int main(int argc, char *argv[]) {
       {"no-class-support", no_argument, 0, 1014},
       {"dfirst-star", required_argument, 0, 1015},
       {"dfirst-star-only", no_argument, 0, 1016},
+      {"dfirst-star-x", required_argument, 0, 1017},
       {"vec-size", required_argument, 0, 'n'},
       {"min-sum", required_argument, 0, 'a'},
       {"max-sum", required_argument, 0, 'b'},
@@ -854,6 +866,15 @@ int main(int argc, char *argv[]) {
       star_only = 1;
       dfirst_opt = "dfirst-star-only";
       break;
+    case 1017:
+      star_force = arg_u64(optarg, "dfirst-star-x");
+      if (!star_force) {
+        fprintf(stderr, "msearch: bad value '%s' for --dfirst-star-x\n",
+                optarg);
+        return 2;
+      }
+      dfirst_opt = "dfirst-star-x";
+      break;
     default:
       return 2;
     }
@@ -870,7 +891,7 @@ int main(int argc, char *argv[]) {
             "  [--diag-first [--diag-first-min-n N0] [--d-stride k] "
             "[--d-offset o] [--d-range lo:hi] [--d-chunk C] [--d-log FILE] "
             "[--d-plain-root] [--no-class-support] [--calib-r1-stride k] "
-            "[--dfirst-star K] [--dfirst-star-only]]\n"
+            "[--dfirst-star K] [--dfirst-star-only] [--dfirst-star-x X]]\n"
             "  [--r1-stride k] [--r1-offset o] [--r1-strata k1,k2,..] "
             "[--r1-log FILE] [--sample-seed X]\n"
             "  e1 e2 ...   (P = 2^e1 3^e2 5^e3 ...; see the header of "
@@ -895,6 +916,11 @@ int main(int argc, char *argv[]) {
   }
   if (star_only && star_k < 0) {
     fprintf(stderr, "msearch: --dfirst-star-only needs --dfirst-star K >= 1\n");
+    return 2;
+  }
+  if (star_force && star_k == 0 && !star_only) {
+    fprintf(stderr, "msearch: --dfirst-star-x needs the star cover "
+                    "(--dfirst-star K != 0)\n");
     return 2;
   }
 
@@ -1012,6 +1038,7 @@ int main(int argc, char *argv[]) {
                                   raw, &red, &opts, d_stride, d_offset, seed,
                                   d_range_lo, d_range_hi, d_chunk, d_log,
                                   calib_stride, d_top_root, star_k, star_only,
+                                  star_force,
                                   enum_time * share,
                                   reduce_time, pre_cpu,
                                   time_limit > 0 ? t_start + time_limit : 0);

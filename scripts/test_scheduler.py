@@ -901,6 +901,16 @@ def _write(path, recs, tail=""):
         f.write("".join(json.dumps(r) + "\n" for r in recs) + tail)
 
 
+def _dv(s, key):
+    """dcov of P (key) as {S: {"nd", "iv"}}, iv that of the coverage group
+    the planner continues (one group without the star cover)"""
+    out = {}
+    for S in s.dcov.get(key, {}):
+        nd, iv, _, _ = s.dfirst_part(key, S)
+        out[S] = {"nd": nd, "iv": iv}
+    return out
+
+
 def test_dfirst_merge():
     """v2: the parts of a d-first sum (--d-range units: dchunk records with
     d_stride 1) merge into dcov, robust to duplicates, overlaps, killed units
@@ -956,8 +966,9 @@ def _test_dfirst_merge():
         s = scheduler.Summary(state, 6)
         s.update(units, store)
         assert not s.cover.get(key), s.cover
-        assert s.dcov[key] == {str(S): {"nd": raw, "iv": [[0, 800]]}}, s.dcov
-        nd, iv, frac = s.dfirst_part(key, S)
+        assert _dv(s, key) == {str(S): {"nd": raw, "iv": [[0, 800]]}}, s.dcov
+        nd, iv, frac, star = s.dfirst_part(key, S)
+        assert star == (None, 0)
         assert nd == raw and abs(frac - float(am.dfirst_cost_cum(0.8))) < 1e-12
         assert s.totals["dfirst_sums"] == 0 and s.totals["dfirst_partial"] == 4
         # the d-first time law: one row per part with d_stride 1 (a, b, c),
@@ -993,10 +1004,10 @@ def _test_dfirst_merge():
         S2 = 891
         _write(os.path.join(units, "h.jsonl"), [_dchunk(P, S2, 0, 500)])
         s.update(units, store)
-        assert s.dcov[key][str(S2)] == {"nd": None, "iv": [[0, 500]]}
+        assert _dv(s, key)[str(S2)] == {"nd": None, "iv": [[0, 500]]}
         _write(os.path.join(units, "i.jsonl"), [_dsum(P, S2, 0, 500, 600)])
         s.update(units, store)
-        assert s.dcov[key][str(S2)] == {"nd": 600, "iv": [[0, 500]]}
+        assert _dv(s, key)[str(S2)] == {"nd": 600, "iv": [[0, 500]]}
         _write(os.path.join(units, "j.jsonl"), [_dchunk(P, S2, 500, 600)])
         s.update(units, store)
         assert s.cover[key] == [[S, S2]] and key not in s.dcov
@@ -1021,7 +1032,7 @@ def _test_dfirst_merge():
         s = scheduler.Summary.load(state, 6)
         _write(os.path.join(units, "b.jsonl"), [_dchunk(P, S, 250, 600, raw)])
         s.update(units, store)
-        assert s.dcov[key][str(S)]["iv"] == [[0, 600]]
+        assert _dv(s, key)[str(S)]["iv"] == [[0, 600]]
         write_unit(os.path.join(units, "c.jsonl"), P, [(S, 2)], done=(S, S))
         s.update(units, store)
         assert key not in s.dcov and s.cover[key] == [[S, S]]
@@ -1138,17 +1149,33 @@ def test_dfirst_plan():
         assert 2400 not in plan.dpart.get(0, {})
         # resume from the records of a sum searched in part (nd known: the
         # unit is priced at the sum's own N)
-        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 5000], [9000, 9500]])}, {2400})
+        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 5000], [9000, 9500]], None)}, {2400})
         u = plan.unit(0)
         assert u.dlo == 5000 and 5000 < u.dhi <= 9000 and u.calib == 0 and u.nd == 23000
         tdx = am.SUM_OVERHEAD + (td1 - am.SUM_OVERHEAD) * (
             23000 / math.exp(lNp[S == 2400][0])) ** sc.tmd.th[1]
         assert abs(u.time - (u.frac * tdx + am.UNIT_OVERHEAD)) < 1e-6 * tdx
         assert abs(u.frac * tdx - 600) < 0.01 * 600 + tdx / 23000
+        chunk = str(max(8, -(-(u.dhi - 5000) // scheduler.DFIRST_CHUNKS)))
         assert scheduler.dfirst_args(u) == [
-            "--diag-first", "--diag-first-min-n", "0", "--d-range", f"5000:{u.dhi}", "--d-chunk",
-            str(max(8, -(-(u.dhi - 5000) // scheduler.DFIRST_CHUNKS)))]
-        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 8990], [9000, 9500]])}, set())
+            "--diag-first", "--diag-first-min-n", "0", "--dfirst-star", "4", "--d-range",
+            f"5000:{u.dhi}", "--d-chunk", chunk]
+        # the parts' star cover goes with the unit that continues them: x*
+        # and K of a star cover, K 0 for parts without one (engine 3)
+        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 5000], [9000, 9500]], (480, 4))},
+                       {2400})
+        u = plan.unit(0)
+        assert (u.star_k, u.star_x) == (4, 480) and scheduler.dfirst_args(u) == [
+            "--diag-first", "--diag-first-min-n", "0", "--dfirst-star", "4", "--dfirst-star-x",
+            "480", "--d-range", f"5000:{u.dhi}", "--d-chunk", chunk]
+        plan.advance_unit(u)
+        assert plan.dpart[0][2400][2] == (480, 4)
+        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 5000], [9000, 9500]], (None, 0))},
+                       {2400})
+        u = plan.unit(0)
+        assert (u.star_k, u.star_x) == (0, None) and scheduler.dfirst_args(u)[3:5] == [
+            "--dfirst-star", "0"] and "--dfirst-star-x" not in scheduler.dfirst_args(u)
+        plan.set_cover(0, [[f0, 2399]], {2400: (23000, [[0, 8990], [9000, 9500]], None)}, set())
         u = plan.unit(0)
         assert (u.dlo, u.dhi) == (8990, 9000) and u.calib > 0
         plan.advance_unit(u)
@@ -1186,7 +1213,7 @@ def test_dfirst_plan():
         # --dfirst off with a sum searched in part as the first sum in the
         # model's grid and sums below the grid: one plain unit through it
         Sg0 = int(math.ceil(sc.prof(0)[0][0] - 1e-9))
-        plan.set_cover(0, [[f0, Sg0 - 18]], {Sg0: (5000, [[0, 1000]])}, set())
+        plan.set_cover(0, [[f0, Sg0 - 18]], {Sg0: (5000, [[0, 1000]], None)}, set())
         u = plan.unit(0)
         assert u.mode == "dfirst" and u.lo == Sg0 and u.dlo == 1000
         sc.policy = "off"
@@ -1480,7 +1507,7 @@ def test_dfirst_learning():
             scheduler.DFIRST_TIME_MIN_N = saved
         f = am.dfirst_cost_frac(0, 300, raw2)
         assert abs(s.time["3:dfirst"]["n"] - f) < 1e-12
-        assert s.dcov[key2][str(S3)]["iv"] == [[0, 300]] and s.totals["dfirst_truncated"] == 1
+        assert _dv(s, key2)[str(S3)]["iv"] == [[0, 300]] and s.totals["dfirst_truncated"] == 1
         # (7) SP-type squares found d-first (twice: two SP traversals),
         # and a magic one
         sq = {"type": "dsquare", "n": 6, "P": list(P2), "S": S3, "d": 7, "set_count": 2,
@@ -1514,10 +1541,10 @@ def test_dfirst_learning():
                 _dsum(P, Sb, 0, nb, nb), dict(_done(P, Sa, Sb), complete=0)])
         s = scheduler.Summary(state, 6)
         s.update(units, store := scheduler.ProfileStore(state, None, 6))
-        assert s.cover[key] == [[Sa, Sa]] and s.dcov[key] == {str(Sb): {"nd": nb,
-                                                                         "iv": [[0, 512]]}}
+        assert s.cover[key] == [[Sa, Sa]] and _dv(s, key) == {str(Sb): {"nd": nb,
+                                                                        "iv": [[0, 512]]}}
         f0 = int(plan.f0[0])
-        dpart = {int(x): (e["nd"], e["iv"]) for x, e in s.dcov[key].items()}
+        dpart = {int(x): (e["nd"], e["iv"], None) for x, e in _dv(s, key).items()}
         calib = {int(x) for x in s.perP[key]["calS"]}
         plan.set_cover(0, [[f0, Sa]], dpart, calib)
         u = plan.unit(0)
@@ -1542,7 +1569,7 @@ def test_dfirst_e2e():
         opts = ("--only", "10 4 3 2", "--dfirst", "on", "--dfirst-min-n", "0",
                 "--unit-time", "0.004")
         out = run("--state", state, "emit", *opts, "--units", "6")
-        assert "--diag-first --diag-first-min-n 0 --d-range 0:" in out, out
+        assert "--diag-first --diag-first-min-n 0 --dfirst-star 4 --d-range 0:" in out, out
         assert "--calib-r1-stride" in out and "d0-" in out and "--d-chunk" in out, out
         run("--state", state, "run", *opts, "--workers", "1", "--hours", "0.0008")
         launched = [json.loads(l) for l in open(os.path.join(state, "launched_6.jsonl"))]
@@ -1567,12 +1594,23 @@ def test_dfirst_e2e():
                 str(S), {}).get("nd", rs[1]["nd"])
         # every sum the summary counts as d-first searched in full: its
         # chunks (over all unit files) are disjoint and cover [0, nvecs_raw)
-        chunks = {}
+        chunks, xstar = {}, {}
+        T0 = s.totals
         for name in os.listdir(units):
             for line in open(os.path.join(units, name)):
                 r = json.loads(line)
                 if r["type"] == "dchunk":
                     chunks.setdefault(r["S"], []).append((r["d_lo"], r["d_hi"], r["nvecs_raw"]))
+                    xstar.setdefault(r["S"], set()).add((r["star_x"], r["star_k"]))
+        # the star cover: K 4 on every unit, msearch's x* on the first unit
+        # of a sum, the same x* passed to the units that continue it, so
+        # that all the chunks of a sum have one (x*, K)
+        assert all(r["star_k"] == 4 for r in launched), launched
+        for S, rs in split.items():
+            (x, k), = xstar[S]
+            assert rs[0]["star_x"] is None and all(r["star_x"] == x for r in rs[1:]), (rs, x)
+        assert T0["dfirst_sums"] == len(s.perP[key].get("dfirst_S", []))
+        assert T0["dfirst_star_sums"] == T0["dfirst_sums"] == T0["dfirst_est_sums"], T0
         fin = s.perP[key].get("dfirst_S", [])
         assert any(len(chunks.get(S, ())) >= 2 for S in fin), (fin, chunks)
         for S in fin:
@@ -1594,6 +1632,315 @@ def test_dfirst_e2e():
                   "--truth", "anchored")
         assert "under the 'anchored' truth" in out, out
     print("d-first end to end ok")
+
+
+def test_dfirst_star():
+    """the star cover (msearch --dfirst-star K): a d-first sum searched in
+    full with it has every magic square, found once when x* is on one of
+    its diagonals, and its (square, SP traversal) pairs estimated as those
+    of the d without x* plus K x those of the searched star d (est_pairs).
+    Both schedulers count a sum once, take its pairs from the estimate (not
+    pairs, not pairs_star x K again), leave out the records that do not
+    estimate every d (K = -1, --dfirst-star-only), count a magic square
+    once whether it came once or twice, and keep the plain fits on the
+    plain sums; the d-first time law learns only from v2's own K (engine
+    4: K = 4); msearch's units of one sum agree on x* and add up, K = 4 is
+    its default for even n (none for odd n), and --dfirst-star-x forces
+    x*"""
+    P = (12, 6, 3, 2, 1, 1)
+    key = "12_6_3_2_1_1"
+    sums = [(S, S % 3) for S in range(880, 886)]
+    grid = [[1] * 6] * 6
+
+    def dsum(S, pairs, est, k, complete=1, **kw):
+        r = {"type": "dsum", "mode": "dfirst", "n": 6, "P": list(P), "S": S, "nvecs": 6000,
+             "nvecs_raw": 6100, "labels": 160, "d_lo": 0, "d_hi": 6100, "d_stride": 1,
+             "nd": 6100 - (375 if k > 0 else 500 if k < 0 else 0),
+             "nodes": 10 ** 7, "pairs": pairs, "est_pairs": est, "time": 50.0, "cpu": 51.0,
+             "truncated": 0, "complete": complete, "engine": 4}
+        if k:
+            r.update({"star_x": 420, "star_k": k, "star_only": 0, "nd_star": 500,
+                      "nd_star_skipped": 375 if k > 0 else 500,
+                      "nd_star_searched": 125 if k > 0 else 0, "pairs_star": 0,
+                      "cpu_star": 3.0, "pred_star_share": 0.08, "star_time": 0.01})
+        r.update(kw)
+        return r
+
+    def dsq(S, h, d, partner):
+        return {"type": "dsquare", "n": 6, "P": list(P), "S": S, "d": d, "set_count": 2,
+                "s_count": 9, "p_count": 9, "sp_count": 2, "best_score": 14 if partner else 7,
+                "magic": int(partner), "partner": int(partner), "hash": h, "grid": grid}
+    extra = [
+        # 886, K = 4: a magic square found once (x* on its other diagonal),
+        # 2 pairs on d without x*, 1 on a searched star d: est 2 + 4 x 1
+        dsq(886, "00000000000000ab", 3, 1), dsq(886, "0000000000000001", 9, 0),
+        dsq(886, "0000000000000002", 11, 0),
+        {"type": "dchunk", "n": 6, "P": list(P), "S": 886, "d_lo": 0, "d_hi": 6100,
+         "d_stride": 1, "nd": 5725, "nvecs_raw": 6100, "nodes": 10 ** 7, "pairs": 3,
+         "partners": 1, "time": 50.0, "truncated": 0, "star_x": 420, "star_k": 4,
+         "star_only": 0, "nd_star_skipped": 375, "nd_other_skipped": 0, "pairs_star": 1},
+        dsum(886, 3, 6.0, 4, pairs_star=1),
+        # 886 searched again (K = 0, all d): counted once, the first record
+        dsq(886, "00000000000000ab", 3, 1), dsq(886, "00000000000000ab", 40, 1),
+        dsum(886, 6, 6.0, 0),
+        # 887, K = -1: covered, its magic squares all found, but est_pairs
+        # covers the d without x* only
+        dsum(887, 2, 2.0, -1),
+        # 888: the star d only (a measurement): a part, no estimate
+        dsum(888, 1, 4.0, 4, complete=0, star_only=1, nd_other_skipped=5600, nd=125),
+        # 889, K = 4: a magic square found twice (x* on neither diagonal)
+        dsq(889, "00000000000000cd", 5, 1), dsq(889, "00000000000000cd", 77, 1),
+        dsum(889, 2, 2.0, 4),
+        {"type": "done", "n": 6, "P": list(P), "min_sum": 880, "last_sum": 889,
+         "complete": 1, "time": 60.0, "mode": "dfirst", "diag_first_min_n": 5000},
+    ]
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        ref_path = os.path.join(state, "ref.jsonl")
+        write_unit(ref_path, P, sums, done=(880, 885))
+        ref = scheduler.Summary(state, 6)
+        ref.update_file(ref_path, store)
+        text = write_unit(os.path.join(state, "plain.jsonl"), P, sums)
+        full = text + "".join(json.dumps(r) + "\n" for r in extra)
+        path = os.path.join(units, "u.jsonl")
+        # two incremental reads, cut inside the records of 886
+        cut = full.index('"S": 887')
+        cut = full.rindex("\n", 0, full.rindex("\n", 0, cut)) + 1
+        with open(path, "w") as f:
+            f.write(full[:cut])
+        inc = scheduler.Summary(state, 6)
+        inc.update(units, store)
+        with open(path, "w") as f:
+            f.write(full)
+        inc.update(units, store)
+        whole = scheduler.Summary(state, 6)
+        whole.update(units, store)
+        assert summary_state(whole) == summary_state(inc)
+        for s in (inc, whole):
+            T = s.totals
+            assert s.cover[key] == [[880, 887], [889, 889]], s.cover
+            assert (T["dfirst_sums"], T["dfirst_partial"]) == (3, 1), T
+            # pairs: 886's first records (3) + 887 (2) + 889 (2); the
+            # estimate: 886 (6) + 889 (2), not 887 (K = -1)
+            assert T["dfirst_pairs"] == 7, T
+            assert abs(T["dfirst_est_pairs"] - 8.0) < 1e-12 and T["dfirst_est_sums"] == 2, T
+            assert T["dfirst_star_sums"] == 3, T
+            assert T["dfirst_magic"] == 2, T
+            # (the magic squares once each, and the SP-type squares)
+            assert sorted(q["hash"] for q in s.notable) == [
+                "0000000000000001", "0000000000000002", "00000000000000ab",
+                "00000000000000cd"], s.notable
+            # the plain fits as without the d-first records; the d-first
+            # law: the two K = 4 sums (886's first dsum, 889), whole sums
+            # (weight 1 each), not K = 0, K = -1 or the star-only part
+            assert s.time.get("3:plain") == ref.time.get("3:plain")
+            assert s.perP[key]["cells"] == ref.perP[key]["cells"]
+            assert abs(s.time["4:dfirst"]["n"] - 2.0) < 1e-12, s.time["4:dfirst"]
+            assert T["sums"] == len(sums) and T["cpu"] == ref.totals["cpu"]
+        sch = SimpleNamespace(summary=inc, calib=scheduler.Calibration(), dir=state, n=6,
+                              time_models={}, tm=scheduler._am().TimeModel(engine=2))
+        import io
+        buf = io.StringIO()
+        scheduler.report_v2(sch, out=buf)
+        assert ("7 found, 8.0 estimated over every d of 2 sums (3 with the star cover)"
+                in buf.getvalue()), buf.getvalue()
+        # v1 agrees
+        res = scheduler.Results(6)
+        res.add_file(path)
+        assert sorted(res.dmagic) == ["00000000000000ab", "00000000000000cd"]
+        assert {S for _, S in res.dsums} == {886, 887, 888, 889}
+        import contextlib
+
+        class PI:
+            def smin(self, P):
+                return 880
+        assert res.frontier(P, PI()) == 888, res.covered
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scheduler.report(res, PI(), None)
+        assert ("2 magic squares, 8.0 (square, SP traversal) pairs estimated over 2 sums"
+                in buf.getvalue()), buf.getvalue()
+    assert scheduler.dsum_est_pairs({"pairs": 2}) == 2.0
+    assert scheduler.dsum_est_pairs({"pairs": 2, "est_pairs": 5.0, "star_k": 4}) == 5.0
+    assert scheduler.dsum_est_pairs({"pairs": 2, "est_pairs": 2.0, "star_k": -1}) is None
+    # the span of a part: its d searched or skipped (d_hi of a stopped
+    # unit is beyond it)
+    assert scheduler.dsum_span({"d_lo": 100, "nd": 80, "nd_star_skipped": 20, "d_hi": 900,
+                                "nvecs_raw": 1000}) == (100, 200)
+    assert scheduler.dsum_span({"d_lo": 100, "nd": 80, "d_hi": 900}) == (100, 180)
+    # msearch: --d-range units of one sum choose the same x*, and their star
+    # d, pairs and estimates add up to those of the whole sum; K = 1 is the
+    # full search (the same pairs, nodes and estimate as without the star
+    # cover); odd n is refused; --dfirst-star-x forces x*
+    msearch = os.path.join(os.path.dirname(HERE), "bin", "msearch")
+
+    def ms(*a, sums=("849", "16", "5", "4", "2")):
+        out = subprocess.run([msearch, "--diag-first", "--diag-first-min-n", "0", *a,
+                              "--sums", *sums], check=True, capture_output=True, text=True).stdout
+        return [json.loads(l) for l in out.splitlines()]
+    dsum_of = lambda recs: [r for r in recs if r["type"] == "dsum"][0]  # noqa: E731
+    whole = dsum_of(ms("--dfirst-star", "4"))
+    runs = [ms("--dfirst-star", "4", "--d-range", rg) for rg in ("0:500", "500:1100", "1100:")]
+    parts = [dsum_of(r) for r in runs]
+    assert whole["complete"] == 1 and not any(r["complete"] for r in parts)
+    assert {r["star_x"] for r in parts} == {whole["star_x"]} and whole["star_k"] == 4
+    for f in ("nd", "nd_star", "nd_star_skipped", "nd_star_searched", "pairs",
+              "pairs_star", "nodes", "nodes_star"):
+        assert sum(r[f] for r in parts) == whole[f], f
+    assert abs(sum(r["est_pairs"] for r in parts) - whole["est_pairs"]) < 1e-9
+    assert whole["est_pairs"] == whole["pairs"] - whole["pairs_star"] + 4 * whole["pairs_star"]
+    assert whole["nd_star_searched"] == -(-whole["nd_star"] // 4)
+    assert whole["nd"] + whole["nd_star_skipped"] == whole["nvecs_raw"]
+    assert 0 < whole["pred_star_share"] < 1 and whole["star_time"] >= 0
+    # the chunks carry x* and K, and their estimates add up to est_pairs
+    chunks = [r for rr in runs for r in rr if r["type"] == "dchunk"]
+    assert {(r["star_x"], r["star_k"]) for r in chunks} == {(whole["star_x"], 4)}
+    est = sum(scheduler.dchunk_est_pairs(r, scheduler.dchunk_star(r)) for r in chunks)
+    assert abs(est - whole["est_pairs"]) < 1e-9
+    assert all(scheduler.dsum_span(r) == (r["d_lo"], r["d_hi"]) for r in parts)
+    off, k1 = ms("--dfirst-star", "0"), ms("--dfirst-star", "1")
+    # (the default is K = 4)
+    assert dsum_of(ms())["star_k"] == 4 and dsum_of(ms())["est_pairs"] == whole["est_pairs"]
+    assert [r for r in off if r["type"] == "dsquare"] == [r for r in k1 if r["type"] == "dsquare"]
+    for f in ("nd", "nodes", "pairs", "est_pairs", "complete"):
+        assert dsum_of(off)[f] == dsum_of(k1)[f], f
+    assert "star_k" not in dsum_of(off)
+    assert all("star_x" not in r for r in off if r["type"] == "dchunk")
+    # x* forced: the same as chosen when it is msearch's choice; another x
+    # is another star cover (its own star d)
+    forced = dsum_of(ms("--dfirst-star", "4", "--dfirst-star-x", str(whole["star_x"])))
+    for f in ("star_x", "nd", "nd_star", "nodes", "pairs", "est_pairs", "complete"):
+        assert forced[f] == whole[f], f
+    other = ms("--dfirst-star", "4", "--dfirst-star-x", "50")
+    assert dsum_of(other)["star_x"] == 50 and dsum_of(other)["nd_star"] != whole["nd_star"]
+    assert {r["star_x"] for r in other if r["type"] == "dchunk"} == {50}
+    for a in (["--dfirst-star", "0", "--dfirst-star-x", "50"], ["--dfirst-star-x", "0"]):
+        bad = subprocess.run([msearch, "--diag-first", *a, "--sums", "849", "16", "5", "4", "2"],
+                             capture_output=True)
+        assert bad.returncode == 2, a
+    bad = subprocess.run([msearch, "--vec-size", "5", "--diag-first", "--dfirst-star", "4",
+                          "--sums", "849", "16", "5", "4", "2"], capture_output=True)
+    assert bad.returncode == 2
+    # odd n: no star cover by default (the diagonals share the center)
+    ds5 = [r for r in ms("--vec-size", "5", sums=("320", "10", "4", "3", "2"))
+           if r["type"] == "dsum"]
+    assert ds5 and "star_k" not in ds5[0], ds5
+    print("d-first star cover ok")
+
+
+def _schunk(P, S, lo, hi, raw, x, k, pairs=0, pairs_star=0, only=0, **kw):
+    """a dchunk record of a star cover (x, k) (k 0: none)"""
+    r = _dchunk(P, S, lo, hi, raw)
+    r.update(pairs=pairs, engine=4)
+    if k or only:
+        r.update(star_x=x, star_k=k, star_only=only, nd_star_skipped=0, nd_other_skipped=0,
+                 pairs_star=pairs_star)
+    r.update(kw)
+    return r
+
+
+def test_dfirst_star_cover():
+    """v2's coverage of d-first sums under the star cover: the chunks of a
+    sum merge only within one (x*, K) (two x* could each skip one diagonal
+    of a magic square), the --dfirst-star-only chunks and star chunks
+    without star_x count towards no coverage, the planner continues the
+    group with the most of the sum's d loop and passes its x* and K, a sum
+    is covered (once) when one group covers every d, and its pairs and
+    their estimate come from that group, one pass over its d (duplicates
+    and overlaps count once)"""
+    P = (12, 6, 3, 2, 1, 1)
+    key = "12_6_3_2_1_1"
+    S, raw = 890, 1000
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        s = scheduler.Summary(state, 6)
+        # x* 48, K 4 on [0, 400); x* 50, K 4 on [400, 1000): two partial
+        # coverages, not a covered sum
+        _write(os.path.join(units, "a.jsonl"),
+               [_schunk(P, S, 0, 200, raw, 48, 4, pairs=2, pairs_star=1),
+                _schunk(P, S, 200, 400, raw, 48, 4, pairs=1)])
+        _write(os.path.join(units, "b.jsonl"),
+               [_schunk(P, S, 400, 1000, raw, 50, 4, pairs=5)])
+        # K 2 with x* 48 on [400, 1000), no star cover on [0, 1000) but
+        # only to 900, star-only chunks over everything, a star chunk
+        # without star_x: none of them completes a coverage
+        _write(os.path.join(units, "c.jsonl"),
+               [_schunk(P, S, 400, 1000, raw, 48, 2), _schunk(P, S, 0, 900, raw, None, 0),
+                _schunk(P, S, 0, 1000, raw, 48, 4, only=1),
+                _schunk(P, S, 400, 1000, raw, 48, 4, star_x=None)])
+        s.update(units, store)
+        assert not s.cover.get(key) and s.totals["dfirst_sums"] == 0, s.cover
+        assert s.totals["dfirst_star_skipped"] == 2, s.totals
+        g = s.dcov[key][str(S)]["g"]
+        assert sorted(g) == ["-", "48:2", "48:4", "50:4"], g
+        assert g["48:4"]["iv"] == [[0, 400]] and g["50:4"]["iv"] == [[400, 1000]]
+        # the planner continues the group with the most of the d loop: no
+        # star cover [0, 900); then 50:4 (600 d) over 48:4 (400 d)
+        nd, iv, frac, star = s.dfirst_part(key, S)
+        assert (nd, iv, star) == (raw, [[0, 900]], (None, 0)), (nd, iv, star)
+        sch = SimpleNamespace(summary=s)
+        assert scheduler.SchedulerV2.dpart_of(sch, key) == {S: (raw, [[0, 900]], (None, 0))}
+        g.pop("-")
+        nd, iv, frac, star = s.dfirst_part(key, S)
+        assert (iv, star) == ([[400, 1000]], (50, 4)), (iv, star)
+        # the planner's unit continues it with x* 50 and K 4
+        assert scheduler.dfirst_star_k(6) == 4 and scheduler.dfirst_star_k(5) == 0
+        u = scheduler.UnitV2((12,), S, S, 0, 1, 0, 0, 0, None, None, None, "dfirst", 0, 400,
+                             raw, 0, 0.4, 4, 50)
+        assert scheduler.dfirst_args(u)[3:7] == ["--dfirst-star", "4", "--dfirst-star-x", "50"]
+        # the 48:4 group completes with [400, 1000), a duplicate and an
+        # overlap: covered, counted once; its pairs and estimate: [0, 200)
+        # 2 (1 star: 1 + 4 x 1 = 5), [200, 400) 1, [400, 700) 4 (2 star:
+        # 2 + 4 x 2 = 10), [700, 1000) from the overlap's new half: 3 x 0.5
+        _write(os.path.join(units, "d.jsonl"),
+               [_schunk(P, S, 0, 200, raw, 48, 4, pairs=2, pairs_star=1),
+                _schunk(P, S, 400, 700, raw, 48, 4, pairs=4, pairs_star=2),
+                _schunk(P, S, 400, 700, raw, 48, 4, pairs=4, pairs_star=2),
+                _schunk(P, S, 400, 1000, raw, 48, 4, pairs=3)])
+        s.update(units, store)
+        assert s.cover[key] == [[S, S]] and key not in s.dcov, (s.cover, s.dcov)
+        T = s.totals
+        assert T["dfirst_sums"] == 1 and T["dfirst_star_sums"] == 1, T
+        assert abs(T["dfirst_pairs"] - (2 + 1 + 4 + 1.5)) < 1e-12, T
+        assert abs(T["dfirst_est_pairs"] - (5 + 1 + 10 + 1.5)) < 1e-12, T
+        # a chunk of another group after the sum is covered: nothing
+        _write(os.path.join(units, "e.jsonl"), [_schunk(P, S, 0, 1000, raw, 50, 4, pairs=9)])
+        s.update(units, store)
+        assert T["dfirst_sums"] == 1 and key not in s.dcov
+        # from scratch: the same
+        whole = scheduler.Summary(state, 6)
+        whole.update(units, store)
+        assert summary_state(whole) == summary_state(s)
+    # K = -1: covered, no estimate; a group of K = -1 covers its sum
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        _write(os.path.join(units, "a.jsonl"),
+               [_schunk(P, S, 0, 500, raw, 48, -1, pairs=1),
+                _schunk(P, S, 500, 1000, raw, 48, -1, pairs=2)])
+        s = scheduler.Summary(state, 6)
+        s.update(units, scheduler.ProfileStore(state, None, 6))
+        T = s.totals
+        assert s.cover[key] == [[S, S]] and T["dfirst_pairs"] == 3 and T["dfirst_est_sums"] == 0
+    # no star cover (engine 3 chunks) and K 4 chunks: separate coverages
+    # (the scheduler continues the larger one with its own K)
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        _write(os.path.join(units, "a.jsonl"),
+               [_dchunk(P, S, 0, 600, raw), _schunk(P, S, 600, 1000, raw, 48, 4)])
+        s = scheduler.Summary(state, 6)
+        s.update(units, scheduler.ProfileStore(state, None, 6))
+        assert not s.cover.get(key) and s.dfirst_part(key, S)[3] == (None, 0)
+        assert s.dfirst_part(key, S)[1] == [[0, 600]]
+        _write(os.path.join(units, "b.jsonl"), [_dchunk(P, S, 600, 1000, raw)])
+        s.update(units, scheduler.ProfileStore(state, None, 6))
+        assert s.cover[key] == [[S, S]] and s.totals["dfirst_star_sums"] == 0
+    print("d-first star coverage ok")
 
 
 def test_no_enumerate():
@@ -1702,6 +2049,12 @@ def test_commands_v2():
 
 if __name__ == "__main__":
     t0 = time.time()
+    if len(sys.argv) > 1:
+        # (only the tests named, e.g. test_dfirst_star)
+        for name in sys.argv[1:]:
+            globals()[name]()
+        print(f"ok ({time.time() - t0:.0f} s)")
+        raise SystemExit(0)
     test_fit_poisson()
     test_fit_model()
     test_coverage()
@@ -1720,6 +2073,8 @@ if __name__ == "__main__":
     test_calib_cells()
     test_dfirst_learning()
     test_dfirst_e2e()
+    test_dfirst_star()
+    test_dfirst_star_cover()
     test_no_enumerate()
     test_commands_v2()
     test_commands()

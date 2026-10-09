@@ -136,6 +136,10 @@ typedef struct {
   double seconds;      /* thread CPU of the choice */
 } dfirst_star_t;
 dfirst_star_t dfirst_star_choose(dfirst_t *df);
+/* the same stats for the given number x (x* forced, msearch
+ * --dfirst-star-x: a scheduler continuing a sum whose parts were searched
+ * with that x*); x = 0: dfirst_star_choose */
+dfirst_star_t dfirst_star_choose_x(dfirst_t *df, uint64_t x);
 
 /*
  * The star filter of dfirst_search, with x the star number: the star d

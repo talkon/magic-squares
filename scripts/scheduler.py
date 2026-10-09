@@ -1971,6 +1971,81 @@ def _in_cover(cov, S):
     return any(lo <= S <= hi for lo, hi in cov)
 
 
+def _uncovered_len(iv, lo, hi):
+    """the length of [lo, hi) outside the merged half-open intervals iv"""
+    n = max(hi - lo, 0)
+    for a, b in iv:
+        n -= max(0, min(b, hi) - max(a, lo))
+    return max(n, 0)
+
+
+# the star cover of d-first sums (msearch --dfirst-star K, research/ideas.md
+# "The star cover of the d loop"): v2 passes K = DFIRST_STAR_K to every
+# d-first unit of an even n (0, no star cover, for odd n), and the K and x*
+# of a sum's parts to the units that continue it (--dfirst-star-x)
+DFIRST_STAR_K = 4
+
+
+def dfirst_star_k(n):
+    """the star cover's K of v2's d-first units for vec size n"""
+    return DFIRST_STAR_K if n % 2 == 0 else 0
+
+
+def dchunk_star(r):
+    """the star cover of a "dchunk" or "dsum" record as (x*, K): (None, 0)
+    without one (K 0, or a record of engine 3); None for records that
+    cannot count towards a sum's coverage: --dfirst-star-only (only the
+    star d), or a star cover without star_x (the c2/star prototype's
+    chunks)"""
+    k = int(r.get("star_k", 0) or 0)
+    if r.get("star_only"):
+        return None
+    if k == 0:
+        return (None, 0)
+    if r.get("star_x") is None:
+        return None
+    return (int(r["star_x"]), k)
+
+
+def dchunk_est_pairs(r, star):
+    """the estimated (square, SP traversal) pairs of every d of a d_stride-1
+    "dchunk" record's range, under its star cover star = (x*, K): the d
+    without x* as found plus K x the pairs of the star d it searched (the
+    star d of rank % K == 0, ranked over the whole sum, so the chunks of a
+    sum add up to msearch's est_pairs of the whole sum); None with K = -1
+    (no star d searched, no estimate)"""
+    k = star[1]
+    p = float(r.get("pairs", 0))
+    if k == 0:
+        return p
+    if k < 0:
+        return None
+    ps = float(r.get("pairs_star", 0))
+    return p - ps + k * ps
+
+
+def dfirst_law_star(r, n):
+    """does a "dsum" record teach the d-first time law (learnt as run)? Not
+    with --dfirst-star-only, and from engine 4 on only with v2's own K
+    (dfirst_star_k); engine 3 had no star cover"""
+    if r.get("star_only"):
+        return False
+    k = int(r.get("star_k", 0) or 0)
+    return k == (dfirst_star_k(n) if engine_of(r) >= 4 else 0)
+
+
+def _dgroup_key(star):
+    return "-" if star[1] == 0 else f"{star[0]}:{star[1]}"
+
+
+def dsum_span(r):
+    """[d_lo, end) of the d a d_stride-1 "dsum" record went through: its nd
+    searched plus the d the star filter skipped (msearch stops between
+    chunks under --time-limit, so d_hi can be beyond)"""
+    end = r["d_lo"] + r.get("nd", 0) + r.get("nd_star_skipped", 0) + r.get("nd_other_skipped", 0)
+    return r["d_lo"], min(end, r.get("nvecs_raw", end))
+
+
 def open_text(path):
     if path.endswith(".gz"):
         import gzip
@@ -1996,8 +2071,9 @@ SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
 # merged (dcov), the d-first time law, the calibration streams in the cells;
 # 5 = parts weighted in the d-first law, the streams in the plain law and
 # the d-first / plain ratio pairs, the CPU of killed d-first units, SP-type
-# squares found d-first
-SUMMARY_VERSION = 5
+# squares found d-first; 6 = the star cover: parts merged per (x*, K), the
+# d-first pairs and their estimates, the span of a part with skipped d
+SUMMARY_VERSION = 6
 
 
 def dsum_est_pairs(r):
@@ -2077,6 +2153,14 @@ class Summary:
                        # the distinct magic squares found
                        "dfirst_sums": 0, "dfirst_partial": 0, "dfirst_cpu": 0.0,
                        "dfirst_magic": 0, "dfirst_truncated": 0,
+                       # of the d-first sums searched in full: the (square,
+                       # SP traversal) pairs found, their estimate over
+                       # every d (the star cover searches every K-th d
+                       # through x*) and the sums it covers, the sums with
+                       # the star cover; chunks left out of the coverage
+                       # (--dfirst-star-only, a star cover without star_x)
+                       "dfirst_pairs": 0.0, "dfirst_est_pairs": 0.0, "dfirst_est_sums": 0,
+                       "dfirst_star_sums": 0, "dfirst_star_skipped": 0,
                        # CPU seconds of the sampled records ("csum" of an
                        # --r1-* run), in no fit
                        "sampled_cpu": 0.0,
@@ -2341,7 +2425,8 @@ class Summary:
         dsums = [r for r in rs if r["type"] == "dsum" and r.get("d_stride", 1) == 1
                  and not r.get("truncated") and "cpu" in r
                  and r.get("nvecs_raw", 0) >= DFIRST_TIME_MIN_N
-                 and r.get("nd", 0) >= min(DFIRST_TIME_MIN_ND, r["nvecs_raw"])]
+                 and r.get("nd", 0) >= min(DFIRST_TIME_MIN_ND, r["nvecs_raw"])
+                 and dfirst_law_star(r, self.n)]
         calibs = [r for r in rs if r["type"] == "csum" and "_csq" in r]
         if not sums and not sqs and not dsums and not calibs:
             self._pair_ratio(ps, rs)
@@ -2408,7 +2493,8 @@ class Summary:
                 self._time_row(f"{engine_of(r)}:{r.get('mode', 'plain')}", F[i], math.log(t),
                                band, r["labels"])
         if dsums:
-            # the whole-sum CPU of a part [d_lo, d_lo + nd) of a d-first sum:
+            # the whole-sum CPU of a part [d_lo, end) of a d-first sum
+            # (dsum_span: its d searched or skipped by the star filter):
             # its overhead (reduction, enumeration share, the d index) plus
             # its d loop scaled by the cost profile along d; the row's
             # weight is the part's share of the d loop (a sum split into m
@@ -2421,7 +2507,7 @@ class Summary:
                 if not a["inside"][i]:
                     continue
                 raw = r["nvecs_raw"]
-                frac = am.dfirst_cost_frac(r["d_lo"], min(r["d_lo"] + r["nd"], raw), raw)
+                frac = am.dfirst_cost_frac(*dsum_span(r), raw)
                 if frac <= 0:
                     continue
                 loop = max(r["time"] - r.get("index_time", 0.0), 0.0)
@@ -2590,11 +2676,25 @@ class Summary:
     def _dcover(self, key, ps, rs):
         """merge the d-first records of one P into dcov; returns the sums
         newly searched in full (a complete "dsum", or parts covering every
-        d of the sum, duplicates and overlaps merged; only d_stride 1)"""
+        d of the sum, duplicates and overlaps merged; only d_stride 1).
+
+        The parts of a sum merge only within one star cover (x*, K) of
+        msearch --dfirst-star: two parts with different x* could each skip
+        one diagonal of a magic square, so the chunks of each (x*, K) are a
+        coverage of their own ("g": key "x:K", or "-" without a star cover),
+        and the sum is covered once one of them covers every d. The planner
+        continues the group with the most of the sum's d-loop CPU
+        (dfirst_part), passing its x* and K. --dfirst-star-only chunks
+        (only the star d) and star chunks without star_x count towards no
+        coverage. Each group also adds up the pairs of its chunks and their
+        estimate over every d (dchunk_est_pairs), each chunk weighted by
+        the share of its range not yet covered in the group (a duplicate
+        adds nothing), so a sum's estimate is that of one pass over its d."""
         dc = self.dcov.get(key, {})
         done = []
         fin = set(ps.get("dfirst_S", ()))
         cov = self.cover.get(key, ())
+        T = self.totals
         for r in rs:
             t = r["type"]
             if t not in ("dchunk", "dsum"):
@@ -2603,32 +2703,52 @@ class Summary:
             # (records of a sum searched in full already, d-first or plain:
             # a duplicate unit, or the dsum of the unit whose chunks
             # completed the sum, read after them; no dcov entry again)
-            if S in fin or _in_cover(cov, S):
+            if S in fin or _in_cover(cov, S) or S in [x[0] for x in done]:
                 if t == "dchunk":
-                    self.totals["dfirst_truncated"] += int(r.get("truncated", 0))
+                    T["dfirst_truncated"] += int(r.get("truncated", 0))
                 continue
             if t == "dsum" and r.get("complete"):
-                done.append(S)
+                e = dsum_est_pairs(r)
+                done.append((S, float(r.get("pairs", 0)), e, int(r.get("star_k", 0) or 0)))
                 continue
             if r.get("d_stride", 1) != 1:
                 continue
-            e = dc.setdefault(str(S), {"nd": None, "iv": []})
+            e = dc.setdefault(str(S), {"nd": None, "g": {}})
             if r.get("nvecs_raw"):
                 e["nd"] = int(r["nvecs_raw"])
-            if t == "dchunk":
-                e["iv"] = _merge_half(e["iv"] + [[r["d_lo"], r["d_hi"]]])
-                # (a V_d that hit --node-limit: counted as searched, like a
-                # truncated plain sum)
-                self.totals["dfirst_truncated"] += int(r.get("truncated", 0))
-            if _covers(e["iv"], e["nd"]):
-                done.append(S)
+            if t != "dchunk":
+                continue
+            # (a V_d that hit --node-limit: counted as searched, like a
+            # truncated plain sum)
+            T["dfirst_truncated"] += int(r.get("truncated", 0))
+            star = dchunk_star(r)
+            if star is None:
+                T["dfirst_star_skipped"] += 1
+                continue
+            g = e["g"].setdefault(_dgroup_key(star), {"x": star[0], "k": star[1], "iv": [],
+                                                       "pairs": 0.0, "est": 0.0})
+            lo, hi = int(r["d_lo"]), int(r["d_hi"])
+            if hi > lo:
+                w = _uncovered_len(g["iv"], lo, hi) / (hi - lo)
+                g["pairs"] += w * float(r.get("pairs", 0))
+                ce = dchunk_est_pairs(r, star)
+                g["est"] = None if (ce is None or g["est"] is None) else g["est"] + w * ce
+            g["iv"] = _merge_half(g["iv"] + [[lo, hi]])
+            if _covers(g["iv"], e["nd"]):
+                done.append((S, g["pairs"], g["est"], g["k"]))
         out = []
-        for S in done:
+        for S, pairs, est, k in done:
             dc.pop(str(S), None)
             fin = ps.setdefault("dfirst_S", [])
             if S not in fin:
                 fin.append(S)
-                self.totals["dfirst_sums"] += 1
+                T["dfirst_sums"] += 1
+                T["dfirst_pairs"] += pairs
+                if est is not None:
+                    T["dfirst_est_pairs"] += est
+                    T["dfirst_est_sums"] += 1
+                if k:
+                    T["dfirst_star_sums"] += 1
                 out.append(S)
         if dc:
             self.dcov[key] = dc
@@ -2636,15 +2756,33 @@ class Summary:
             self.dcov.pop(key, None)
         return out
 
-    def dfirst_part(self, key, S):
-        """(nd, merged d intervals, share of the sum's d-loop CPU searched)
-        of a d-first sum searched in part, or None"""
+    def _dgroup(self, key, S):
+        """the coverage group of d-first sum S of P (key) that the planner
+        continues: the one with the most of the sum's d-loop CPU searched
+        (the first of equals), as (nd, group) or None"""
         e = self.dcov.get(key, {}).get(str(S))
         if not e:
             return None
-        nd = e["nd"]
-        frac = (sum(_am().dfirst_cost_frac(lo, hi, nd) for lo, hi in e["iv"]) if nd else 0.0)
-        return nd, e["iv"], frac
+        nd, best, bf = e["nd"], None, -1.0
+        for g in e["g"].values():
+            f = (sum(_am().dfirst_cost_frac(lo, hi, nd) for lo, hi in g["iv"]) if nd
+                 else float(sum(hi - lo for lo, hi in g["iv"])))
+            if f > bf:
+                best, bf = g, f
+        return nd, best
+
+    def dfirst_part(self, key, S):
+        """(nd, merged d intervals, share of the sum's d-loop CPU searched,
+        star cover (x* or None, K) or None) of a d-first sum searched in
+        part, by its group that the planner continues (_dgroup), or None"""
+        e = self._dgroup(key, S)
+        if e is None:
+            return None
+        nd, g = e
+        if g is None:
+            return nd, [], 0.0, None
+        frac = (sum(_am().dfirst_cost_frac(lo, hi, nd) for lo, hi in g["iv"]) if nd else 0.0)
+        return nd, g["iv"], frac, (g["x"], g["k"])
 
     def _ingest_dfirst(self, P, rs, fst=None):
         """d-first records (msearch --diag-first): a "dsum" per sum (or part
@@ -2710,11 +2848,13 @@ class Summary:
 # the end of the sum, nd only predicted), the share frac of the sum's
 # d-loop CPU and E; calib: the stride of its calibration stream (0: none);
 # time: predicted CPU, score: magic / CPU with the sum's calibration stream
-# spread over its parts
+# spread over its parts; star_k, star_x: the star cover of a d-first unit
+# (msearch --dfirst-star K, and --dfirst-star-x x* when it continues a sum
+# searched in part with that x*; None: msearch chooses)
 UnitV2 = collections.namedtuple(
     "UnitV2", Unit._fields + ("a", "nodes", "cells", "mvec", "mode", "dlo", "dhi", "nd", "calib",
-                              "frac"),
-    defaults=(None, 0.0, None, None, "plain", None, None, 0, 0, 1.0))
+                              "frac", "star_k", "star_x"),
+    defaults=(None, 0.0, None, None, "plain", None, None, 0, 0, 1.0, 0, None))
 
 
 class Cands:
@@ -2982,8 +3122,8 @@ class AnalyticScorer:
         CPU-second stay >= drop x the best of the unit so far (see
         Scorer.next_unit); None if lo > hi_max. A d-first sum predicted to
         take more than DFIRST_SPLIT x unit_time, or searched in part before
-        (dpart: S -> (nd or None, merged d intervals)), gets a unit of d
-        (_drange_unit). calib_done: the sums whose calibration stream has
+        (dpart: S -> (nd or None, merged d intervals, its star cover (x*,
+        K) or None)), gets a unit of d (_drange_unit). calib_done: the sums whose calibration stream has
         run (or is planned)."""
         np = _np()
         am = _am()
@@ -3065,17 +3205,22 @@ class AnalyticScorer:
         return UnitV2(self.c.P(a), lo, hi, acc_m / tot_t, tot_t, acc_sq, acc_m, a, None,
                       np.concatenate(cells) if detail else None,
                       np.concatenate(mv) if detail else None,
-                      "dfirst" if dfirst else "plain", None, None, 0, k, 1.0)
+                      "dfirst" if dfirst else "plain", None, None, 0, k, 1.0,
+                      dfirst_star_k(self.n) if dfirst else 0, None)
 
     def _drange_unit(self, a, S, unit_time, part, cal_done, sq, m, tp, td, tc, lNp, cell, detail):
         """a unit of d of the d-first sum S: from the first d not searched
-        yet (part: (nd or None, merged d intervals)) for about unit_time
-        (the d loop by the cost profile along d, plus the calibration
-        stream), to the end of the gap; the sum's calibration stream goes
-        with the first unit that runs"""
+        yet (part: (nd or None, merged d intervals, star cover)) for about
+        unit_time (the d loop by the cost profile along d, plus the
+        calibration stream), to the end of the gap; the sum's calibration
+        stream goes with the first unit that runs. Its star cover is that of
+        the parts (their x* and K, so that its chunks merge with theirs),
+        else v2's K with msearch's x*"""
         np = _np()
         am = _am()
-        nd, iv = part if part else (None, [])
+        nd, iv, star = part if part else (None, [], None)
+        if star is None:
+            star = (None, dfirst_star_k(self.n))
         # the number of d: known from the records, else predicted (N' is
         # the model's prediction of nvecs_raw)
         ndp = nd if nd else max(int(round(math.exp(float(lNp)))), 1)
@@ -3121,7 +3266,8 @@ class AnalyticScorer:
         open_end = dhi >= ndp and not nd
         return UnitV2(self.c.P(a), S, S, score, time_, sq / k if k else 0.0, magic, a, None,
                       np.array([cell]) if detail else None, np.array([magic]) if detail else None,
-                      "dfirst", g0, None if open_end else dhi, ndp, k, frac)
+                      "dfirst", g0, None if open_end else dhi, ndp, k, frac, star[1],
+                      star[0] if star[1] else None)
 
     def unit_nodes(self, u):
         """predicted search nodes of the unit's largest (last) sum"""
@@ -3256,7 +3402,7 @@ class Planner:
             self.advance(a, u.hi)
             return
         dp = self.dpart.setdefault(a, {})
-        nd, iv = dp.get(u.lo, (None, []))
+        nd, iv, star = dp.get(u.lo, (None, [], None))
         end = u.dhi if u.dhi is not None else max(u.nd, nd or 0)
         iv = _merge_half([list(x) for x in iv] + [[u.dlo, end]])
         if u.dhi is None or _covers(iv, nd or u.nd):
@@ -3264,7 +3410,8 @@ class Planner:
             self.cover[a] = _merge([tuple(x) for x in self.cover.get(a, [])] + [(u.lo, u.lo)])
             self.frontier[a] = self._walk(a, self.frontier[a])
         else:
-            dp[u.lo] = (nd, iv)
+            # (the simulated parts keep the unit's K; x* stays as known)
+            dp[u.lo] = (nd, iv, star if star is not None else (u.star_x, u.star_k))
 
     def hi_max(self, a):
         f = int(self.frontier[a])
@@ -3363,10 +3510,15 @@ def dfirst_args(u):
     scheduler chose the mode of every sum of the unit), its d range with
     DFIRST_CHUNKS checkpoints (--d-chunk; msearch's default 256 d would make
     a unit of < 256 d one chunk, without a checkpoint or a --time-limit
-    stop inside it), its calibration stream"""
+    stop inside it), its calibration stream, and its star cover, always
+    explicit (--dfirst-star K, so that a unit's cost and records do not
+    depend on the binary's default, and --dfirst-star-x x* for a unit that
+    continues the parts of a sum searched with that x*)"""
     if u.mode != "dfirst":
         return []
-    out = ["--diag-first", "--diag-first-min-n", "0"]
+    out = ["--diag-first", "--diag-first-min-n", "0", "--dfirst-star", str(u.star_k)]
+    if u.star_k and u.star_x is not None:
+        out += ["--dfirst-star-x", str(u.star_x)]
     if u.dlo is not None:
         end = u.dhi if u.dhi is not None else max(u.nd, u.dlo + 1)
         chunk = max(8, -(-(end - u.dlo) // DFIRST_CHUNKS))
@@ -3386,6 +3538,8 @@ def describe_dunit(u):
         out += f" d {u.dlo}..{end} of {u.nd} ({100 * u.frac:.0f}%)"
     if u.calib:
         out += f" +calib 1/{u.calib}"
+    if u.star_x is not None:
+        out += f" star x*={u.star_x} K={u.star_k}"
     return out
 
 
@@ -3498,9 +3652,14 @@ class SchedulerV2:
         return {idx[k]: v for k, v in self.summary.cover.items() if k in idx}
 
     def dpart_of(self, key):
-        """the d-first sums of P (key) searched in part: {S: (nd, iv)}"""
-        return {int(S): (e["nd"], [list(x) for x in e["iv"]])
-                for S, e in self.summary.dcov.get(key, {}).items()}
+        """the d-first sums of P (key) searched in part: {S: (nd, iv, star)},
+        iv and star = (x* or None, K) those of the coverage group the
+        planner continues (Summary.dfirst_part)"""
+        out = {}
+        for S in self.summary.dcov.get(key, {}):
+            nd, iv, _, star = self.summary.dfirst_part(key, S)
+            out[int(S)] = (nd, [list(x) for x in iv], star)
+        return out
 
     def calib_of(self, key):
         """the sums of P (key) whose calibration stream has run"""
@@ -3640,7 +3799,8 @@ class SchedulerV2:
                         "file": os.path.basename(path), "P": list(u.P), "lo": u.lo, "hi": u.hi,
                         "time": u.time, "squares": u.squares, "magic": u.magic, "score": u.score,
                         "fresh": fresh, "t": time.time(), "mode": u.mode, "dlo": u.dlo,
-                        "dhi": u.dhi, "nd": u.nd, "calib": u.calib, "frac": u.frac}) + "\n")
+                        "dhi": u.dhi, "nd": u.nd, "calib": u.calib, "frac": u.frac,
+                        "star_k": u.star_k, "star_x": u.star_x}) + "\n")
                     launched.flush()
                     log(f"start P={p_str(u.P)} S={u.lo}..{u.hi}{describe_dunit(u)} (predicted "
                         f"{u.time:.0f}s, {u.squares:.1f} squares, {u.score * 3.15e7:.3g} "
@@ -3731,7 +3891,16 @@ def report_v2(sch, top=20, out=None):
            f"{T['dfirst_magic']} magic squares"
            + (f", {T['dfirst_truncated']} chunks with a V_d at --node-limit"
               if T.get("dfirst_truncated") else ""))
-        part = [(k, int(S)) + s.dfirst_part(k, S) for k, d in s.dcov.items() for S in d]
+        if T.get("dfirst_sums"):
+            pr(f"  (square, SP traversal) pairs of the sums searched in full: "
+               f"{T.get('dfirst_pairs', 0):.0f} found, {T.get('dfirst_est_pairs', 0.0):.1f} "
+               f"estimated over every d of {T.get('dfirst_est_sums', 0)} sums"
+               + (f" ({T['dfirst_star_sums']} with the star cover)"
+                  if T.get("dfirst_star_sums") else ""))
+        if T.get("dfirst_star_skipped"):
+            pr(f"  {T['dfirst_star_skipped']} chunks in no coverage (--dfirst-star-only, or a "
+               f"star cover without star_x)")
+        part = [(k, int(S)) + s.dfirst_part(k, S)[:3] for k, d in s.dcov.items() for S in d]
         if part:
             pr(f"  sums searched in part ({len(part)}, to be continued from their last d): "
                + ", ".join(f"P={p_str(parse_p(k))} S={S} {100 * f:.0f}% of {nd if nd else '?'} d"

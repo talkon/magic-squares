@@ -446,6 +446,44 @@ d, they are skipped, as `Planner._walk` already skipped such gaps.
 * While a unit of a P runs, the P is busy, so the units of one sum run one
   after the other, each planned from the records of the previous ones.
 
+**The star cover** (msearch `--dfirst-star K`, research/ideas.md "The star
+cover of the d loop"; integrated with the units in round 2). A d-first sum
+may skip the d through one number x* except every K-th (by rank over the
+whole sum) and still find every magic square, because the two diagonals of
+an even square share no number. That holds for one x* only: two parts
+searched with different x* could each skip one diagonal of the same magic
+square. So:
+
+* Every d-first unit gets `--dfirst-star K` explicitly (K = 4 =
+  `DFIRST_STAR_K` for even n, 0 for odd n), so that its cost and records
+  do not depend on msearch's default.
+* msearch's "dchunk" records carry `star_x` and `star_k` (and `star_only`,
+  `nd_star_skipped`, `nd_other_skipped`, `pairs_star`).
+* `Summary._dcover` keeps one coverage per (x*, K) of a sum ("-" for
+  chunks without a star cover, e.g. engine 3's). Chunks of different
+  groups never merge; the sum is covered once one group covers every d.
+  `--dfirst-star-only` chunks (the star d only) and star chunks without
+  `star_x` (the c2/star prototype) count towards no coverage
+  (`dfirst_star_skipped` in the report).
+* The planner continues the group with the most of the sum's d loop (by
+  the cost profile; `Summary.dfirst_part`) and passes that group's K and,
+  with `--dfirst-star-x`, its x*, so that the new chunks join it even if
+  msearch would now choose another x*. Fresh sums get msearch's x*
+  (deterministic over the whole unreduced list, so every unit of a sum
+  agrees). The launched record has `star_k` and `star_x`.
+* The pairs of a covered sum and their estimate over every d come from its
+  group's chunks: a chunk's estimate is its pairs on d without x* plus K x
+  those of the star d it searched (none with K = -1: no estimate), each
+  chunk weighted by the share of its range not yet covered in the group
+  (a duplicate adds nothing). Disjoint chunks add up exactly to msearch's
+  own `est_pairs` of the whole sum (tested on msearch output). A sum
+  covered by one complete "dsum" takes its `est_pairs` (`dsum_est_pairs`).
+* The d-first time law learns "as run": from engine 4 on only from "dsum"
+  records with v2's K (engine 3 records have no star cover), never from
+  star-only ones. A part's share of the sum is that of [d_lo, end) with
+  end = d_lo + nd + the d the star filter skipped (`dsum_span`; nd alone
+  counts only the d searched, and d_hi of a stopped unit is beyond).
+
 **The calibration stream** (`--calib-r1-stride k`, `--calib-frac`, default
 0.07). msearch runs it after the d loop of every d-first sum of the run. v2
 passes it to one unit per sum: the first planned while the summary has no
@@ -642,12 +680,24 @@ adversarial review, and a live run with kills and restarts) found:
   `--time-limit` (nd < d_hi - d_lo); a truncated chunk; SP-type and magic
   dsquares in the notable list; a multi-sum unit stopped inside a sum
   resumed from its last chunk with the stream.
+* `test_dfirst_star`: synthetic star records through both schedulers
+  (a complete K = 4 sum's pairs by its estimate, a duplicate K = 0 run, K =
+  -1, a star-only part, magic squares found once and twice, the d-first law
+  from v2's K only) and msearch's units of one sum (one x*, chunks adding
+  up to the whole sum's est_pairs, `--dfirst-star-x`).
+* `test_dfirst_star_cover`: the coverage per (x*, K): two x* never cover a
+  sum together, star-only and star_x-less chunks count towards none, the
+  planner continues the largest group with its x* and K, duplicate and
+  overlapping chunks count once in the pairs and their estimate, K = -1
+  covers without an estimate, engine-3 chunks are a group of their own.
 * `test_dfirst_e2e`: `run` with msearch, `--dfirst on --dfirst-min-n 0` and
   tiny units, so that sums are split into 2 d-range units. The second unit
   starts where the first one's records stop and knows the sum's number of
   d, the stream comes with the first unit, and the sums are merged into
   coverage; the chunks of every covered sum are disjoint and cover [0,
-  nvecs_raw). Then `report`, `emit` and `forecast` with d-first.
+  nvecs_raw), with one (x*, K): K 4 on every unit, msearch's x* on the
+  first unit and the same x* passed to the units that continue the sum.
+  Then `report`, `emit` and `forecast` with d-first.
 
 **Not done.**
 

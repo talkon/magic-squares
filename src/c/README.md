@@ -98,8 +98,8 @@ itself (research/scheduler-v2.md, "d-first units"): `msearch --diag-first
 --diag-first-min-n 0` on sums it chose to search d-first, a large sum split
 into `--d-range lo:hi` units, the first of them with `--calib-r1-stride k`.
 It merges the parts of a sum from their "dchunk" records (d_stride 1;
-duplicates, overlaps and killed units are fine) and counts the sum as
-searched once they cover every d, continues a sum searched in part from its
+duplicates, overlaps and killed units are fine; per star cover, below) and
+counts the sum as searched once they cover every d, continues a sum searched in part from its
 first d not searched, fits a d-first time law to the "dsum" records, and
 puts the calibration streams' squares into its models. v1 (`--model
 regression`) keeps the d-first sums out of its fits, counts a complete one
@@ -131,9 +131,25 @@ instead of twice when x* is on one of its diagonals; the pairs of the star
 d are estimated (`est_pairs` = the others' pairs + K x the searched star
 d's), and the dsum record gets `star_x`, `star_k`, `nd_star`,
 `nd_star_skipped`, `nd_star_searched`, `pairs_star`, `cpu_star`,
-`pred_star_share`, `star_freq_rank`, `star_time` (see msearch.c). The
-schedulers count such a complete sum as searched and its pairs by
-`est_pairs`. `--dfirst-star-only` searches only the star d (measurements).
+`pred_star_share`, `star_freq_rank`, `star_time` (see msearch.c); a
+"dchunk" record gets `star_x`, `star_k`, `star_only`, `nd_star_skipped`,
+`nd_other_skipped` and `pairs_star` (with `d_stride` 1 every index of
+[d_lo, d_hi) was then searched or skipped by the star filter).
+`--dfirst-star-x X` takes x* = X instead (any number keeps the cover exact).
+`--dfirst-star-only` searches only the star d (measurements; such a part
+counts towards no coverage).
+
+Parts of one sum may be merged only within one star cover: with two x*, a
+magic square with x1* on one diagonal and x2* on the other could be skipped
+by both. Scheduler v2 therefore passes `--dfirst-star 4` (0 for odd n) to
+every d-first unit, merges the chunks of a sum per (x*, K) (a sum is
+covered once one of these groups covers every d; a chunk without star_x but
+with a star cover, and a star-only chunk, count towards none), continues the
+group that holds the most of the sum's d loop with its own K and
+`--dfirst-star-x` x*, and records K and x* in its launched records. It
+counts a sum's pairs and their estimate over every d from that group's
+chunks (each weighted by the share of its range not seen before in the
+group), and v1 a complete sum's from `est_pairs`.
 
 ### r1 sampling (measurements)
 

@@ -299,6 +299,10 @@ size_t dfirst_vd(dfirst_t *df, size_t i, vec_list_t *out) {
 /* ------------------------------------------------------------ star cover */
 
 dfirst_star_t dfirst_star_choose(dfirst_t *df) {
+  return dfirst_star_choose_x(df, 0);
+}
+
+dfirst_star_t dfirst_star_choose_x(dfirst_t *df, uint64_t force) {
   dfirst_star_t out;
   memset(&out, 0, sizeof(out));
   const double c0 = thread_cpu();
@@ -361,6 +365,15 @@ dfirst_star_t dfirst_star_choose(dfirst_t *df) {
     if (top < 0 || dcnt[x] > dcnt[top] ||
         (dcnt[x] == dcnt[top] && val[x] < val[top]))
       top = x;
+  }
+  if (force) {
+    /* the given number instead of the argmax (its stats; a number in no
+     * vector of the search: x only, no d of the set searched holds it) */
+    best = -1;
+    for (uint32_t x = 0; x < L; x++)
+      if (val[x] == force)
+        best = x;
+    out.x = force;
   }
   if (best >= 0) {
     out.x = val[best];
