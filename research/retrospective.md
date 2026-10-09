@@ -1,6 +1,6 @@
 # Retrospective: what each speed-up bought, in expected magic squares
 
-Written 2026-10-08.
+Written 2026-10-08; §7 adds the integrated build (engine 3) and §8 msearch engine 4.
 
 * Part 1 ([retrospective/timing.md](retrospective/timing.md)) timed 9 versions of the arrangement search on 33 common sums,
   N = 451-31,743. It gives each version's time ratio to the current code, R_v(N).
@@ -520,6 +520,105 @@ ideal order. fdb77fc still reproduces T1 exactly (0.156 / 0.338 / 0.641 / 1.09, 
 * The analytic variants are `python3 forecast_new.py tag=_anlow analytic_rev_args='[...]'`
   (with sens.py's arguments). They write `results_new_{anlow,anhigh,m20}.json`.
 * A run takes ~45 s, most of it loading the lens cache that gives the > 256-label share.
+
+## 8. Engine 4: the round-2 d-first search (2026-10-09)
+
+msearch engine 4 (integ/round2) changes only the d-first search: the class support in the V_d
+searches (gated to the V_d of at least 137 labels) and the star cover of the d loop (K = 4). The
+plain search is unchanged (bench nodes and hashes identical, time within noise). Its d-first CPU
+per sum is e^-0.103 (N'/4000)^-0.204 times engine 3's (research/ideas.md, "Integration of the
+round-2 d-first changes": 23 paired sums at N' 3.4-31.7k, residual sd 0.067).
+
+### 8.1 R(N)
+
+As §7, with the d-first column of each measured sum times its paired engine 4 / engine 3 factor
+(the perf verifier's 13 sums: 0.81 at 6.7k, 0.78 at 7.6k, 0.68-0.73 at 11.7-16.4k, 0.56-0.66 at
+20.5-31.7k; for 13 7 4 3 1 1 / 2500, not measured, the law's 0.61). The mode policy stays §7's
+(plain below N = 5,000, d-first above, a 10% calibration stream), so the sums below 5k keep
+their plain ratio:
+
+| N | 2k | 3k | 4k | 5k | 7k | 10k | 15k | 20k | 25k | >= 32k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| R used, engine 3 (§7) | 1.01 | 0.98 | 0.69 | 0.68 | 0.59 | 0.49 | 0.37 | 0.22 | 0.12 | 0.104 |
+| **R used, engine 4** | 1.01 | 0.98 | 0.69 | 0.63 | 0.48 | 0.36 | 0.25 | 0.14 | 0.074 | 0.063 |
+
+### 8.2 E at a fixed budget
+
+Analytic model, ideal frontier, all assignments (as T9 / T10; `integ2/forecast/` in
+`research/retrospective/scripts.tar.xz`):
+
+| | 1 CPU-yr | 10 | 100 | 1,000 | 10^4 |
+|---|---:|---:|---:|---:|---:|
+| E, engine 3 (§7, best mode) | 0.173 | 0.387 | 0.763 | 1.353 | 1.99 |
+| **E, engine 4** | **0.176** | **0.407** | **0.827** | **1.461** | 2.10 |
+| E_4 / E_3 | 1.02 | 1.05 | 1.08 | 1.08 | 1.06 |
+| E_4 / E_fdb77fc (engine 3: T10) | 1.13 (1.11) | 1.20 (1.14) | 1.29 (1.19) | 1.33 (1.24) | 1.30 (1.23) |
+
+| CPU to reach E | 0.03 | 0.1 | 0.3 | 0.5 | 1 | 2 |
+|---|---:|---:|---:|---:|---:|---:|
+| C_3 / C_4 | 1.00 | 1.01 | 1.11 | 1.21 | 1.37 | 1.55 |
+| C_fdb77fc / C_4 (engine 3: T10) | 1.02 (1.02) | 1.22 (1.21) | 1.66 (1.49) | 2.04 (1.69) | 3.21 (2.34) | 8.7 (5.6) |
+
+* E = 1 needs 19 / 202 / 6,800 CPU-years at F = 2 / 1 / 0.5 (engine 3: 23 / 280 / 10,000;
+  fdb77fc 39 / 650 / 59,000).
+* The cost per expected magic square by N band: 1,170 / 6,950 / 5.4x10^4 / 3.5x10^5 /
+  1.6x10^7 CPU-years at 2-4k / 4-8k / 8-16k / 16-32k / 32-64k (engine 3, T12: 1,200 / 8,400 /
+  7.7x10^4 / 5.8x10^5 / 2.6x10^7).
+* The E-weighted N of the sums taken: 3.2k / 4.6k / 6.7k / 9.5k at 1 / 10 / 100 / 1,000
+  CPU-years (engine 3: 3.2 / 4.4 / 6.3 / 9.0k).
+* As for engine 3, the gain grows with the budget because engine 4 lowers the exponent of N
+  (d-first CPU ~N^3.4 against ~N^3.6 for engine 3's d-first on the shipped laws). At 1 CPU-year
+  most of the frontier is below N = 5,000, where §7's policy runs the plain search; scheduler v2
+  switches to d-first from N' ~3.7k with engine 4, where the measured factor is 0.90-0.92, so
+  this table slightly understates engine 4 at 1 CPU-year.
+* Caveats as in §7.4. The engine-4 factors rest on 13 paired sums (6 of them 13 7 4 3 1 1),
+  sampled d, min of 2; the > 256-label ratio on three sums (0.56-0.65 of engine 3).
+
+### 8.3 The scheduler's forecast
+
+`scheduler.py forecast --shipped` on a copy of the calibration search's profiled state (the plan
+made with the shipped laws, E of the plan's units), 10% of the candidates at 1 and 10 CPU-years
+and 1% at 100, seed 1, 400 draws for the 90% band. "Before" is 189b49f (engine 3, the
+shipped calibration before the calibration search, its x0.8 selection discount not applied
+here, the "anchored" truth that its write-up used); "after" is integ/round2 (engine 4, the
+calibration search's refits, the "measured" truth now the default of `--shipped`):
+
+| E (90% band from 400 draws) | 0.1 CPU-yr | 1 | 10 | 100 |
+|---|---:|---:|---:|---:|
+| before: 189b49f, `--truth anchored` | 0.047 | 0.120 (0.047-0.38) | 0.254 (0.094-0.86) | 0.494 (0.19-1.71) |
+| before, as it was quoted (x0.8 selection discount) | 0.037 | 0.096 | 0.203 | 0.395 |
+| **after: integ/round2, default (measured) truth** | 0.043 | **0.120 (0.056-0.27)** | **0.283 (0.13-0.66)** | **0.601 (0.28-1.48)** |
+| after, `--truth anchored` (like for like with before) | 0.042 | 0.116 (0.054-0.26) | 0.269 (0.12-0.63) | 0.555 (0.25-1.36) |
+| after, but engine 3's laws (measured truth) | 0.043 | 0.118 (0.055-0.26) | 0.268 (0.12-0.63) | 0.558 (0.25-1.36) |
+| engine 4 / engine 3 at the same calibration | 1.00 | 1.02 | 1.06 | 1.08 |
+
+The 100 CPU-year column is a 1% sample (its E at 1 CPU-year comes out ~10% above the 10%
+sample's, the sampling noise of 1%).
+
+* The scheduler's E is not the ideal frontier's: its time laws are the scheduler's, and it
+  plans over the pool, not over every assignment.
+* Before and after differ in three things: engine 4, the calibration (the class-factor GLMs at
+  the calibration search's refit: squares at 6-12k x0.80 -> x0.93, S traversals lower at k <= 5,
+  ratio <= 1.1 and x < 0.1, P traversals higher at N' >= 3k; A_SQ 6), and the default truth.
+  * Engine 4 alone (same calibration and truth): x1.02 / 1.06 / 1.08 at 1 / 10 / 100
+    CPU-years, as the ideal frontier's x1.02 / 1.05 / 1.08 in 8.2. d-first's share of E at 10
+    CPU-years goes from 63% to 75%.
+  * The calibration alone (anchored truth, engine 4 divided out): ~0.95 / 1.00 / 1.04.
+  * The measured truth against the anchored one: x1.03 / 1.05 / 1.08 (it charges the plain
+    sums at 3-6k 0.97 of the law where the anchored truth charged ~1.5x, and the sums above 12k
+    0.16-0.62 of the laws, on 7 sums).
+* The band's SP term is the scheduler's lognormal(0, 0.2), not the calibration search's f_rho^2
+  (ln sd 0.47, median 1.12), so it is narrower than the honest band (calibration-target.md
+  section 5: x6 between 5% and 95%).
+
+### 8.4 Files
+
+* `integ2/forecast/forecast_e4.py` in `research/retrospective/scripts.tar.xz` imports §7's
+  `integ/forecast/forecast_new.py` (whose `RETRO` path points at the extracted `forecast/`
+  with its lens cache), replaces the d-first column of its 13 sums by the engine-4 values and
+  writes `integ/forecast/results_new_e4.json` (archived next to it, with `central_e4.out`).
+* The scheduler forecasts: `integ2/sched_forecast/` in the same archive (`*.out`; `fc3.sh` ran
+  them, `fc_variant.py` runs the current scheduler with engine 3's laws, `fcsum.py` tabulates).
 
 ## Generated tables
 

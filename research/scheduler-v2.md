@@ -21,21 +21,37 @@ diagonal-first where that is cheaper ("d-first units" below).
   grows with the budget, as in retrospective.md section 7, but is smaller
   there. The numbers in the bullet below are plain-only, from before this
   revision.
-* Forecast for the current build (`forecast --shipped`, a fresh state, model
-  at its shipped calibration):
+* **Forecast for the current build** (integ/round2: msearch engine 4, the
+  class-factor GLMs at the calibration search's refit, no selection
+  discount; `forecast --shipped` on the calibration search's profiled
+  state, its default "measured" truth; 10% of the candidates at 1 and 10
+  CPU-years, 1% at 100; seed 1):
 
-  | CPU time | 100 h | 1 CPU-yr | 10 CPU-yr | 100 CPU-yr |
+  | CPU time | 0.1 CPU-yr | 1 CPU-yr | 10 CPU-yr | 100 CPU-yr |
+  |---|---:|---:|---:|---:|
+  | E, point | 0.043 | **0.120** | **0.283** | **0.60** |
+  | 90% band from 400 draws | | 0.056-0.27 | 0.13-0.66 | 0.28-1.48 |
+  | under the anchored truth | 0.042 | 0.116 | 0.269 | 0.555 |
+  | before (189b49f, engine 3, earlier priors, anchored; quoted x0.8) | 0.047 | 0.120 (0.096) | 0.254 (0.203) | 0.494 (0.395) |
+
+  Engine 4 alone is x1.02 / 1.06 / 1.08 at 1 / 10 / 100 CPU-years
+  (retrospective.md section 8.3). The band's SP term is lognormal(0, 0.2);
+  the calibration search's honest SP term (f_rho^2, ln sd 0.47, median
+  1.12) widens it to about x6 and moves the point x1.12 (next bullet).
+  The table below is the earlier build's, for the record:
+
+  | CPU time (before the calibration search and engine 4) | 100 h | 1 CPU-yr | 10 CPU-yr | 100 CPU-yr |
   |---|---:|---:|---:|---:|
   | E, point | 0.016 | 0.119 | 0.25 | 0.39 |
   | 90% band from 50 draws | 0.005-0.053 | 0.038-0.32 | 0.075-0.62 | 0.10-1.0 |
-  | E x 0.8 (selection discount) | 0.013 | 0.095 | 0.20 | 0.31 |
+  | E x 0.8 (the selection discount then) | 0.013 | 0.095 | 0.20 | 0.31 |
   | v1's choices, scored by the same model | 0.0087 | 0.059 | 0.096 | (0.18 *) |
 
   10 and 100 CPU-years are simulated on 10% and 1% of the candidates with
   the budget scaled (on 1-3% samples the earlier version came out 5-7% lower
   than on 10%). (*) v1 at 100 CPU-years is the earlier time law's number.
-  On all existing data the learned calibration gives 0.122 at 1 CPU-year
-  (band 0.09-0.22), which matches the shipped prior.
+  On all existing data the learned calibration gave 0.122 at 1 CPU-year
+  (band 0.09-0.22), which matched the shipped prior then.
 * **Update (calibration search in the target region,
   [calibration-target.md](calibration-target.md)).** The GLMs are refit on
   321 pre-registered sums at N' 3-45k (A_SQ 6) and the SP coupling is taken
@@ -46,9 +62,11 @@ diagonal-first where that is cheaper ("d-first units" below).
   shrank from ln sd 0.56-0.59 to 0.10-0.12. Most of what is left is the
   SP coupling (f_rho^2 ln sd 0.47), and the 90% band is x6 wide. The
   shipped band's x8 had an SP term of only 0.2; with an honest one it would
-  have been x16. The text below is from before this update.
-* The quoted figure was the **discounted** one, about **0.1 in 1 CPU-year and
-  0.2 in 10**. Units that v2 itself ranks highest came in at 0.7-0.9 of their
+  have been x16. The scheduler now ships those refits (with engine 4: the
+  bullet above; "The calibration search's numbers in the shipped
+  calibration" below); the rest of this section is from before.
+* The quoted figure was then the **discounted** one, about **0.1 in 1
+  CPU-year and 0.2 in 10**. Units that v2 itself ranks highest came in at 0.7-0.9 of their
   predicted magic density on held-out data. This is a winner's curse, mostly
   through squares and P traversals (below).
 * Gain over v1 under the same model: x1.9 at 100 h, x2.0 at 1 CPU-year,
@@ -295,7 +313,7 @@ both modes, resid sd 0.17; ideas.md "Measurements on the integrated
 binary"). With the prior level `auto` switches at N' = 4.29k for every P.
 The level a0 is learned online from pairs (below), the slope held. (This
 is engine 3's ratio; engine 4's, with the class support and the star
-cover, is lower and steeper and switches at N' ~3.49k: "Engine 4" below.)
+cover, is lower and steeper and switches at N' ~3.68k: "Engine 4" below.)
 
 * The first version compared the two time laws instead, t_d + t_cal < t_p.
   That put the switch at N' ~ 9-10k weighted by E, where the
@@ -372,19 +390,28 @@ per engine, mode "dfirst"):
 **Engine 4** (round 2: the gated class support in the V_d searches and
 the star cover, msearch `ENGINE_VERSION` 4; research/ideas.md,
 "Integration of the round-2 d-first changes"). The d-first CPU per sum is
-e^-0.138 (N/4000)^-0.162 times engine 3's (paired on one binary, 12 sums
-at N 3.1-31.7k, resid sd 0.073; the c2 verifiers' class-support and
-star-cover factors multiply to -0.161 - 0.162 ln(N/4000)), the plain
-search unchanged. So engine 4's d-first law starts at
-`DFIRST_TIME_PRIOR` + `DFIRST_ENGINE_SHIFT[4]`, 3.077 + 3.414 ln(N'/4000),
-and its ratio at `DFIRST_RATIO_PRIOR` + `DFIRST_RATIO_ENGINE_SHIFT[4]`,
-ln r = -0.166 - 0.728 ln(N'/4000): `--dfirst auto` switches at N' ~3.49k
-(engine 3: 4.29k). As for the time laws, an older engine's posterior
-stands in, shifted, until the newer engine has data: engine 3's ratio
-pairs give engine 4's level plus the shift (`amodel.dfirst_ratio_level`,
-`current_ratio_level`), and the d-first law of engine 3's records is
-handed over by `time_prior`. The d-first law learns from engine-4 records
-with v2's own star K only (above, "The star cover").
+e^-0.103 (N'/4000)^-0.204 times engine 3's (`amodel.DFIRST_E4`, sds 0.023
+and 0.020, resid sd 0.067: the perf verifier's paired runs of the 189b49f
+and the integrated binary on 13 sums pooled with the integrator's 10 sums
+inside the model grid, N' 3.4-31.7k; the first shift, -0.138 - 0.162
+ln(N/4000), leaned on two sums outside the grid), the plain search
+unchanged. So engine 4's d-first law starts at `DFIRST_TIME_PRIOR` +
+`DFIRST_ENGINE_SHIFT[4]`, 3.112 + 3.372 ln(N'/4000) (sd 0.25), and its
+ratio at `DFIRST_RATIO_PRIOR` + `DFIRST_RATIO_ENGINE_SHIFT[4]`, ln r =
+-0.131 - 0.770 ln(N'/4000) (sd 0.17): `--dfirst auto` switches at N'
+~3.68k (engine 3: 4.29k). As for the time laws, an older engine's
+posterior stands in, shifted, until the newer engine has data, and is the
+prior of the newer engine's own data after that: `current_ratio_level`
+chains the engines' ratio pairs (each engine's level the posterior of its
+pairs under a prior at the previous engine's level plus the shift; a pair
+at that level leaves it unchanged), and the d-first law of engine 3's
+records is handed over by `time_prior`. The d-first law learns from
+engine-4 records with v2's own star K only (above, "The star cover"), and
+a ratio pair takes the parts of one engine only. The slope of the d-first
+law is engine 3's shifted and is held online: it fits the ladder but ran
+~2x high for the calibration search's pool P above 12k (7 sums), where
+the planner therefore overcharges d-first sums (2% of E at 1-10
+CPU-years).
 
 **The cost along d is not uniform.** In the perf verifier's 13 d logs
 (N 2-32k), the mean CPU per d by decile of d's index u = d / N, relative
@@ -498,6 +525,14 @@ square. So:
   (a duplicate adds nothing). Disjoint chunks add up exactly to msearch's
   own `est_pairs` of the whole sum (tested on msearch output). A sum
   covered by one complete "dsum" takes its `est_pairs` (`dsum_est_pairs`).
+  The planner makes only disjoint units (the gaps of a group); a hand-made
+  unit that partly overlaps its group adds its pairs by its new share, as
+  if they were spread evenly along d, so the sum's pairs and estimate are
+  then approximate (S = 589: 4.056 against msearch's 4).
+* msearch's `est_time` and `est_nodes` of a star run are those of the run
+  as made (the skipped star d cost nothing; `est_time_nostar` weighs the
+  searched star d K x). The scheduler does not use them: it learns from
+  `time` with `dsum_span`.
 * The d-first time law learns "as run": from engine 4 on only from "dsum"
   records with v2's K (engine 3 records have no star cover), never from
   star-only ones. A part's share of the sum is that of [d_lo, end) with
@@ -746,16 +781,23 @@ research/calibration-target/):
 
 | what | before | now | source |
 | --- | --- | --- | --- |
-| squares GLM prior, N' 6-12k | -0.22 (sd 0.15), x0.80 | -0.08 (sd 0.09), x0.93 | its GLM refit with A_SQ 6 (glm.out: -0.078 +- 0.085); 25 sums at 1.28 of x0.80 |
-| S traversals per square, N' >= 3k | +0.04 | -0.023 (x0.939 at 3-6k) | 3-6k: 5,408 / 5,759 = 0.939 [0.918, 0.960] |
-| S traversals, N' 6-12k | 0 | +0.036 (x0.973 overall) | 6-12k: 0.973 [0.89, 1.07] |
+| class-factor GLM priors (squares, S, P) | the review's and the live units' (`GLM_PRIORS_V2`) | the refit's posterior, every effect (means and sds) | its GLM refit with A_SQ 6 (glm.out, glm_update.json `calib_post`) |
+| of which squares, N' 6-12k | -0.22 (sd 0.15), x0.80 | -0.078 (sd 0.085), x0.93 | 25 sums at 1.28 of x0.80 |
+| of which S traversals | ln 0.86, N' >= 3k +0.04 | intercept -0.159, N' >= 3k +0.032, 6-12k -0.018, k <= 5 -0.041, ratio <= 1.1 -0.048, x < 0.1 -0.067 | raw: 0.939 [0.918, 0.960] at 3-6k, 0.973 at 6-12k |
+| of which P traversals | ln 0.64, N' >= 3k +0.06, x < 0.1 -0.04 | -0.422, +0.085, 6-12k +0.042, x < 0.1 -0.102 | raw: 1.02 at 3-6k, 1.08 at 6-12k |
 | A_SQ (between-P sd of squares) | 15 (sd 0.26) | 6 (sd 0.41) | between-sum sd 0.46, 0.40 after stratum means |
 | selection | E x0.8 quoted | no discount; lognormal(0, 0.12) in the band | top quartile 0.96 [0.82, 1.11], slope +0.020 +- 0.027 |
 | forecast truth (default with `--shipped`) | laws | "measured": the laws x the measured CPU / prediction per N' band | 3.6 and analyze.out "## Time" |
 
-* P traversals (1.02-1.08) and the SP coupling (f_rho, 7 pairs) are not
-  moved: neither was asked of the scheduler's prior, and f_rho is not
-  calibrated (calibration-target.md 6).
+* The refit's main effects (k, ratio, x) were learnt at 3-12k and also act
+  below 3k, where nothing was measured; the correlations of the posterior
+  are dropped (independent normal priors). The first integration shipped
+  only the squares' 6-12k effect and band-marginal S factors (one of them
+  of the opposite sign to the refit's); with the S refit alone E at 10
+  CPU-years came out 11% below the whole refit's, since the P refit
+  raises it.
+* The SP coupling (f_rho, 7 pairs) is not moved: it is not calibrated
+  (calibration-target.md 6).
 * **The measured truth** (`--truth measured`, `TIME_TRUTH_PLAIN` /
   `TIME_TRUTH_DFIRST`): plain sums at the plain law x 0.969 (3-6k, 289
   sums), 1.185 (6-12k, 18), 0.622 and 0.159 (12-24k and >= 24k: the
@@ -773,22 +815,25 @@ research/calibration-target/):
   and a few CPU-hours); they matter little at 1-10 CPU-years (2% of E above
   12k at 10).
 * Forecast with these (engine 4, `forecast --shipped`, 10% of the
-  candidates, seed 1, on the calibration search's profiled state; the
-  plan is made with the shipped laws, each unit charged under the truth):
+  candidates at 1 and 10 CPU-years, 1% at 100, seed 1, on the calibration
+  search's profiled state; the plan is made with the shipped laws, each
+  unit charged under the truth; 400 draws: class factors, pair and SP+SP
+  factors lognormal(0, 0.2), selection lognormal(0, 0.12)):
 
-  | truth | E 0.1 CPU-yr | E 1 | E 10 | E with / without d-first at 1 / 10 | CPU for the plain-only E of 10 |
-  | --- | ---: | ---: | ---: | --- | ---: |
-  | measured (default) | 0.045 | 0.119 | 0.269 | 0.998 / 1.069 | 1.23x less |
-  | anchored | 0.045 | 0.116 | 0.257 | 1.061 / 1.133 | 1.48x less |
+  | truth | E 0.1 CPU-yr | E 1 | E 10 | E 100 | E with / without d-first at 1 / 10 / 100 | CPU for the plain-only E of 10 |
+  | --- | ---: | ---: | ---: | ---: | --- | ---: |
+  | measured (default) | 0.043 | 0.120 (0.056-0.27) | 0.283 (0.13-0.66) | 0.601 (0.28-1.48) | 1.007 / 1.085 / 1.21 | 1.26x less |
+  | anchored | 0.042 | 0.116 | 0.269 | 0.555 | 1.068 / 1.144 / 1.22 | 1.49x less |
+  | measured, engine 3's laws | 0.043 | 0.118 | 0.268 | 0.558 | 0.989 / 1.029 / 1.12 | 1.24x less |
 
-  90% band at 10 CPU-years (measured truth, 400 draws: class factors,
-  pair and SP+SP factors lognormal(0, 0.2), selection lognormal(0, 0.12)):
-  0.090-0.88. The write-up's own forecast (engine 3, the updated class
-  factors, its measured truth) was 0.118 / 0.268 before its f_rho^2 median
-  1.12 (0.132 / 0.30 with it), the same as here: engine 4's d-first gain
-  moves E little at 1-10 CPU-years under the measured truth, which charges
-  the plain sums at 3-6k at the plain law (d-first holds 75% of E in 91% of
-  the CPU at 10 CPU-years).
+  The write-up's own forecast (engine 3, the same refit, its measured
+  truth) was 0.118 / 0.268 before its f_rho^2 median 1.12, which the third
+  row reproduces (0.118 / 0.268). Engine 4 then adds x1.02 / 1.06 / 1.08 at
+  1 / 10 / 100 CPU-years: its d-first gain grows with N', and d-first
+  holds 53% / 75% / 87% of E at 1 / 10 / 100 CPU-years (engine 3: 36% /
+  63% / 80%). (The first integration's 0.119 / 0.269 matched the
+  write-up's only by two ~5% effects cancelling: engine 4 up, its partial
+  priors down.) With the f_rho^2 median the points become 0.134 / 0.317.
 
 ## Fixes after verification
 

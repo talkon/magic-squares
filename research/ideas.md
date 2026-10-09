@@ -2359,6 +2359,7 @@ Fits of t = a (N / 4000)^b CPU-s on the same 11 sums (4.1-31.7k):
     fuller matchings), left out by the brief;
   * the matrix path (the V_d with more than 512 labels, or without
     AVX-512BW, get no class support).
+
 ## The star cover of the d loop (October 2026, branch c2/star)
 
 The two diagonals of an n x n square of even order have no cell in common.
@@ -2403,16 +2404,25 @@ other one.
   `pred_star_share`, `star_freq_rank`, `pred_share_top_freq` and
   `star_time`.
 * The estimates (`est_pairs`, `est_nodes`, `est_time`) weigh a searched
-  star d K x the d-stride weight.
+  star d K x the d-stride weight. (On integ/round2 only `est_pairs` does:
+  `est_nodes` and `est_time` are those of the run as made, and the
+  K-weighted ones are `est_nodes_nostar` and `est_time_nostar`;
+  "Integration of the round-2 d-first changes", "Fixes after the
+  verification".)
   * With K = -1 they cover the d without x* only, and the schedulers do not
     count them.
   * `se_*` come from two strata (star d and the others), each a simple
-    random sample of its d in the range.
+    random sample of its d in the range. (Approximate: the star d are
+    searched at a fixed rank % K, a systematic sample, which overweights
+    the star stratum of `est_pairs` by K ceil(n/K) / n - 1 <= (K - 1) / n
+    for n star d: 1.6x at n = 5, under 0.5% at the n of 600-1,150 of the
+    sums measured.)
 * `complete` still means that every magic square of the sum was found.
 * Scheduler (both models): a complete sum's pairs count through
   `est_pairs`, once per sum (`scheduler.dsum_est_pairs`: totals
   `dfirst_pairs`, `dfirst_est_pairs`, `dfirst_est_sums`,
-  `dfirst_star_sums`; SUMMARY_VERSION 4). A magic square is counted once,
+  `dfirst_star_sums`; SUMMARY_VERSION 4 in the prototype, 6 and then 7
+  on integ/round2). A magic square is counted once,
   whether it came once or twice.
 
 **Correctness.**
@@ -2773,7 +2783,10 @@ d-first CPU at N <= 3k), and v2 may run d-first from N' ~3.4k on (and from
   So no sum of the 20 is slower with the gate, the sums at N <= 3k are
   as without the class support, and nothing is lost above ~5k (all their
   V_d have more than 140 labels). The dsum record's `nd_class` counts the
-  d searched with it.
+  d whose search ran it (the gate passed, the top-label root on the
+  carried path, a V_d of at least 2n vectors: `search_stats_t.class_used`;
+  at first it counted every d that passed the gate, also under
+  `--d-plain-root`, where the class support cannot run).
 * Exactness: the class support is exact in any V_d, so any on/off pattern
   over the d gives the same pairs. `fuzz_arrange --dfirst` now runs the
   class support in every V_d on two seeds of three and, on the third, gates
@@ -2789,9 +2802,10 @@ msearch's `ENGINE_VERSION` and scheduler v2's `ENGINE` are now 4: the
 d-first search changed (the gated class support and the star cover K = 4,
 both on by default), the plain search did not (bench nodes and hashes
 unchanged). Each engine's laws start from the previous engine's posterior
-plus a shift (`amodel.time_prior`, and now `dfirst_ratio_level` for the
-ratio: the pairs of an older engine stand in, shifted, until engine 4 has
-pairs of its own).
+plus a shift (`amodel.time_prior`, and now `scheduler.current_ratio_level`
+for the ratio: the engines' pairs are chained, each engine's level the
+posterior of its own pairs under a prior at the previous engine's level
+plus the shift).
 
 **Paired measurement** (`integ2/e4/`): one binary, engine 3's settings
 (`--no-class-support --dfirst-star 0`) against engine 4's (defaults; gate
@@ -2825,22 +2839,70 @@ and the d loop), pairs equal in all arms:
   0.84-0.95x.
 * **Fit**, N >= 3k (12 sums): ln(engine 4 / engine 3) = -0.138 (+- 0.029)
   - 0.162 (+- 0.027) ln(N/4000), residual sd 0.073 (N >= 4k: -0.097 -
-  0.191 x; >= 5.5k: -0.138 - 0.164 x).
-* **The c2 verifiers' numbers give the same law**: the class support's
-  0.924 (N/4000)^-0.180 (11 sums, 5.9-31.7k; verify-classsup) times the
-  star cover's 1 - 0.75 s with s = 0.107 (N/4000)^-0.28 (its prediction,
-  measured 2-4% lower; verify-star's end-to-end 1.045-1.065x), linearised
-  over 4-32k: -0.161 - 0.162 ln(N/4000).
-* **Shipped**: `amodel.DFIRST_E4` = (-0.138, -0.162), from the direct
-  pairs, as the shift of both the d-first time law
-  (`DFIRST_ENGINE_SHIFT[4]`: intercept 3.215 -> 3.077, slope 3.576 ->
-  3.414) and the ratio (`DFIRST_RATIO_ENGINE_SHIFT[4]`: a0 -0.028 ->
-  -0.166, a1 -0.566 -> -0.728), since the plain search is unchanged
-  (`ENGINE_TIME_SHIFT` has no entry for 4). With the 7% calibration stream
-  `--dfirst auto` now switches to d-first at N' ~3.49k (engine 3: 4.29k).
+  0.191 x; >= 5.5k: -0.138 - 0.164 x). This was the first shipped shift.
+  Its verification found two flaws: the two P = 10 6 3 2 1 sums (S 900
+  and 1360) lie outside v2's model grid (S 368-729 for this P), where the
+  class support starts at a smaller N (154-194 labels at N 3.1-3.6k), and
+  the sampled runs' `time` holds the whole x* choice and index but only
+  1/d_stride of the loop (1.5-2.6% too high at 20-32k). Refit on N' over
+  the 10 sums inside the grid: -0.099 - 0.194 x.
+* **The c2 verifiers' numbers** (the class support's 0.924
+  (N/4000)^-0.180, 11 sums at 5.9-31.7k, times the star cover's 1 - 0.75 s
+  with s = 0.107 (N/4000)^-0.28) linearise over 4-32k to -0.161 - 0.162
+  ln(N/4000).
+* **The perf verifier's paired runs** (`integ2/perf/`): the 189b49f binary
+  (B, engine 3) against the integrated one (E), identical d samples
+  (`--d-stride k --d-offset 3`), whole-sum CPU = d_stride x the d loop +
+  the fixed costs (not `est_time`), min of 2 alternating rounds, 13 sums;
+  `N3` = the integrated binary with `--no-class-support --dfirst-star 0`,
+  `CG` = with `--dfirst-star 0` (the class support alone):
+
+  | sum | N | N' | E / B | N3 / B | CG / B |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | 13 7 4 3 1 1 / 1880 | 3,485 | 3,444 | 0.900 | 0.990 | 0.987 |
+  | 12 6 3 2 1 0 1 / 960 | 4,414 | 4,467 | 0.924 | 0.999 | 0.981 |
+  | 10 6 4 2 1 1 / 930 | 4,685 | 4,352 | 0.910 | 1.002 | 0.996 |
+  | 13 7 4 3 1 1 / 1950 | 5,896 | | 0.841 | | 0.891 |
+  | 12 6 3 2 1 1 / 988 | 6,671 | | 0.813 | | 0.890 |
+  | 13 7 4 3 1 1 / 2000 | 7,593 | | 0.780 | | 0.852 |
+  | 12 6 3 2 1 1 / 1200 | 11,698 | | 0.676 | | 0.717 |
+  | 13 7 4 3 1 1 / 2200 | 15,199 | | 0.701 | | 0.771 |
+  | 11 6 4 3 2 1 / 2174 | 16,424 | | 0.730 | | 0.791 |
+  | 14 7 4 4 1 0 0 1 / 3648 | 20,538 | | 0.589 | | 0.665 |
+  | 9 6 4 3 1 1 1 1 / 2700 | 20,896 | | 0.558 | | 0.609 |
+  | 13 7 4 3 1 1 / 2400 | 22,993 | | 0.662 | | 0.733 |
+  | 13 7 4 3 1 1 / 2650 | 31,743 | | 0.652 | | 0.652 |
+
+  N3 matches B within 0.99-1.03 with identical nodes on all 13 sums. Fit,
+  x = ln(N'/4000): ln(E / B) = -0.105 (+- 0.032) - 0.210 (+- 0.028) x,
+  residual sd 0.069; the class support alone -0.022 - 0.215 x. **Pooled**
+  with the integrator's 10 in-grid sums (23 pairs): **-0.103 (+- 0.023) -
+  0.204 (+- 0.020) x, residual sd 0.067.**
+* **Shipped** (after the verification): `amodel.DFIRST_E4` = (-0.103,
+  -0.204) (sds in `DFIRST_E4_SD`), the shift of both the d-first time law
+  (`DFIRST_ENGINE_SHIFT[4]`: intercept 3.215 -> 3.112, slope 3.576 ->
+  3.372, sd 0.25 kept) and the ratio (`DFIRST_RATIO_ENGINE_SHIFT[4]`: a0
+  -0.028 -> -0.131, a1 -0.566 -> -0.770, sd 0.17 kept), since the plain
+  search is unchanged (`ENGINE_TIME_SHIFT` has no entry for 4). With the
+  7% calibration stream `--dfirst auto` switches to d-first at N' ~3.68k
+  (engine 3: 4.29k; the first shift gave 3.49k). Against the verifier's
+  13 sums: their own d-first law 3.181 (0.15) + 3.331 (0.13) x, rms 0.29
+  around the shipped one (sum t / sum pred 1.00); ratio (E / plain)
+  -0.113 (0.072) - 0.805 (0.062) x, rms 0.15 around the shipped one.
+  Predicted engine 4 / 3: 0.927 at N' 3.5k, 0.831 at 6k, 0.599 at 30k
+  (the first shift: 0.890, 0.816, 0.629; measured at 4.4-4.5k: 0.91-0.92).
+* The d-first law's slope (engine 3's, shifted) fits the ladder (mostly 13
+  7 4 3 1 1) but ran about 2x high for the calibration search's pool P at
+  N' >= 12k (7 sums; joint fit of the 27 sums 3.37 + 3.23 x before the
+  shift). The online refit learns only the intercept, so above 12k the
+  planner charges pool P about 2x; that is 2% of E at 1-10 CPU-years and
+  the "measured" forecast truth corrects it in the forecast. Not refitted.
 * The scorer carries its engine (`AnalyticScorer.engine`), so that the
-  slope matches the level; `current_ratio_level` gives the level of the
-  newest engine with pairs, shifted to the current one.
+  slope matches the level. `current_ratio_level` chains the engines' pairs
+  (above); at first it restarted engine 4 from its shipped prior once it
+  had one pair, which dropped what engine 3's pairs had taught (a pair at
+  the handed-over level moved it by 0.03-0.08); a test now checks that
+  such a pair leaves the level unchanged.
 * The calibration search in the target region measured engine 3's ratio
   level at about -0.08 (14 d-first sums, research/calibration-target.md
   3.6). It is not folded into the prior: the scheduler learns the level
@@ -2862,27 +2924,110 @@ so that duplicates count once and disjoint chunks add up to msearch's own
 est_pairs; the d-first law takes a part's span as its d searched plus those
 the star filter skipped, and learns from engine 4 only with v2's K.
 
+The share weighting is exact for disjoint chunks and duplicates, which is
+all the planner makes (it plans only the gaps of a group). A chunk that
+partly overlaps its group (a hand-made unit) adds its pairs by the share of
+its range that is new, as if they were spread evenly along d; on S = 589,
+P = 12 6 3 2 1 with a duplicate unit 7 d longer the sum's est_pairs came
+out 4.056 against msearch's 4 (dchunk records carry no per-d pairs).
+
+### Fixes after the verification (integ/round2)
+
+Three verifiers (correctness, performance, adversarial) passed the
+integration with issues; one major, the rest minor. Each was checked first:
+
+* **S-traversal prior (major, holds).** The first integration shipped
+  band-marginal ratios (N' >= 3k +0.04 -> -0.023, a +0.036 6-12k effect)
+  and called them the write-up's refit; the refit (calibration-target.md
+  section 5, glm.out) has N' >= 3k +0.032 and 6-12k -0.018 and puts the
+  3-6k deficit into k <= 5, ratio <= 1.1 and x < 0.1. The S refit alone
+  would leave the shipped priors a mix (it lowers E; the P refit, not
+  shipped, raises it: E at 10 CPU-years 0.251 against 0.283 with the whole
+  refit), so now all three class-factor GLMs (squares, S, P) ship at the
+  refit's posterior, every effect (means and sds; the squares' 6-12k
+  effect is the same -0.078).
+* **Engine-4 shift (holds).** Set to the perf verifier's pooled fit,
+  (-0.103, -0.204), sds (0.023, 0.020) (above, "Engine 4"); the switch
+  moves from N' 3.49k to 3.68k.
+* **The ratio handoff (holds).** The ratio level is now chained across
+  engines like the time laws (above).
+* **`est_time` of a star run (holds; three verifiers).** It weighed a
+  searched star d K x, i.e. estimated the CPU without the star cover (1.04-
+  1.31x the run's own whole-sum CPU on d-stride samples). Now `est_time`
+  and `est_nodes` are those of the run as made (each searched d weighs
+  d_stride), with `se_time` over the star d actually searched (every K-th),
+  and `est_time_nostar` / `est_nodes_nostar` keep the K-weighted figures.
+  `est_pairs` is unchanged. Nothing in the scheduler used them;
+  calibration-target/analyze.py's `t_dfirst_whole` would have.
+* **calibrate.py and the star cover (holds; two verifiers).** Its d-first
+  section weighed a dsquare by d_stride only, so on engine-4 output it
+  undercounted the star d's pairs and the magic squares with x* on one
+  diagonal. It now reads star_x / star_k / star_only from the file's dsum
+  (or dchunk) records and weighs a dsquare whose dvec holds x* d_stride x
+  K; K = -1 and star-only records count in the pairs, not in the
+  estimates (`records_not_estimated`). New test `test_cli_star`; on
+  msearch's own output for S = 589, P = 12 6 3 2 1 the weight is 4, as its
+  est_pairs.
+* **`nd_class` (holds; two verifiers).** It counted every d that passed the
+  gate, also where the class support cannot run (`--d-plain-root`, the
+  matrices path, V_d under 2n vectors). Now `search_stats_t.class_used`
+  says whether it ran; `class_gate_test.sh` checks `--d-plain-root` (0).
+* **Mixed engines in one ratio pair (holds).** A sum's d-first CPU for its
+  ratio pair now takes only the parts of the engine of its first part
+  (SUMMARY_VERSION 7).
+* **A vacuous e2e assertion (holds).** `"3:dfirst" not in s.time` became
+  vacuous with the engine bump; it now checks that no `:dfirst` key exists.
+* **Partial overlaps in `_dcover` (documented, not changed).** The share
+  weighting is exact for disjoint chunks and duplicates, which is all the
+  planner makes; for a hand-made partly overlapping unit it is
+  approximate (above). An exact count would need per-d pairs in the
+  dchunk records.
+* **Systematic star sample (documented).** The star d are searched at a
+  fixed rank % K; the stratum's weight K overweights it by at most (K -
+  1) / n for n star d (< 0.5% at the sums measured), and `se_*` are
+  approximate. Left as is: a weight of n / ceil(n / K) per unit would
+  make the units' estimates no longer add up to the whole sum's.
+* **The d-first slope above 12k (documented).** Not refitted (above).
+* **Measured truth on a learned state (documented)** in `--truth`'s help
+  and `forecast_truth`: the online refit learns only the d-first level and
+  one plain offset at N' >= 6k, so a learned state's "laws" stay above the
+  measured CPU at N' >= 12k.
+* **A_SQ 6 and PHI_SUM (documented)** next to `A_SQ`: the measured 0.41 is
+  the spread beyond Poisson, so it also holds the per-sum overdispersion
+  that PHI_SUM models (A ~8-9 without it); 6 is the refit's choice.
+* **Docs**: the stale "0.12 / 0.25 / 0.39" forecast and "engine 3" text in
+  README and scheduler-v2.md, the version number in the star section, the
+  blank line before its heading, the gate default in a fuzz_arrange
+  comment, the `--truth anchored` pointer of `forecast` (now `measured`),
+  and the claim that engine 4's forecast equals the write-up's.
+* **Plain-path timing (re-measured).** One verifier saw full at 1.016
+  (contended); see the gates below.
+
 ### Gates of the integrated build (integ/round2)
 
-* Build: `cmake -S . -B build-r2 -D CMAKE_BUILD_TYPE=Release`; dfirst.c and
-  msearch.c also compile with `-Wall -Wextra -Werror -std=c17
-  -pedantic-errors`.
-* `ctest -R fast_`: 51 of 51 pass (new: `fast_msearch_class_gate`; the
-  star test also checks a forced x* and star_x on the chunks; 7 more
-  refusals in `fast_msearch_bad_args`).
-* `fuzz_arrange`, fresh seeds, 0 fails: `--dfirst` 600 (9100000-), `--dfirst
-  --n 6` 500 (planted 6x6 magic pairs), `--dfirst --mode 7` 500 (257-500
-  labels), plain mixed modes 600, `--mode 7` 500, and `--dfirst` 300 each on
-  the matrices, portable and no-GFNI builds. The d-first runs check every
-  seed without class support, with it in every V_d or gated at a random
-  label count, and a rotating variant, and the star cover (K = -1, a random
-  K, star-only, stride splits, planted magic pairs with x* on one
-  diagonal): 274k (square, d) pairs, 5,904 planted magic pairs with x* on
-  a diagonal found and flagged, 36k star runs with 1.0M kept pairs checked.
-* bench quick / full / prod: 1,770,779 / 14,958,507 / 50,375,738 nodes,
-  hashes ok; against 189b49f's build (alternating, min of 3) 0.994 /
-  0.981 / 0.991 of its time: the plain search is unchanged (c2/classsup's
-  verifier had seen +0.8% on prod, within noise).
-* `python3 scripts/test_scheduler.py` and `test_calibrate.py`: all ok.
-* The paired engine 3 / engine 4 runs found the same pairs in every arm.
+After the verification fixes (the first integration's gates, on 6bc3124,
+had the same outcome: 51/51, fuzz 0 fails on 3,900 seeds, bench nodes ok):
 
+* Build: `cmake -S . -B build-r2 -D CMAKE_BUILD_TYPE=Release`; dfirst.c,
+  msearch.c and arrange.c also compile with `-Wall -Wextra -Werror
+  -std=c17 -pedantic-errors`.
+* `ctest -R fast_`: 51 of 51 pass (`fast_msearch_class_gate` now also
+  checks `nd_class` 0 under `--d-plain-root`).
+* `fuzz_arrange`, fresh seeds (9600000-9670500), 0 fails: `--dfirst` 600,
+  `--dfirst --n 6` 500, `--dfirst --mode 7` 500, `--variants cls` 500,
+  plain mixed modes 600, `--mode 7` 500, and `--dfirst` 500 each on the
+  matrices, portable and no-GFNI builds (3 seeds skipped by the harness).
+  The d-first runs check every seed without the class support, with it in
+  every V_d or gated at a random label count, and the star cover (K = -1,
+  a random K, star-only, stride splits, planted magic pairs with x* on one
+  diagonal): 326k (square, d) pairs, 44k star runs, 7,260 planted magic
+  pairs with x* on a diagonal found and flagged.
+* bench quick / full / prod: 1,770,779 / 14,958,507 / 50,375,738 nodes,
+  hashes ok. Against 189b49f's build on an idle machine (alternating, 6
+  rounds): min 0.992 / 0.982 / 0.998, median 1.045 / 1.000 / 1.002 of its
+  time; the plain search is unchanged (a verifier's full at 1.016 was
+  contended; the new `class_used` field of `search_stats_t` costs nothing
+  measurable).
+* `python3 scripts/test_scheduler.py` (48 s) and `test_calibrate.py`: all
+  ok (new: `test_cli_star`, the chained ratio level, the refit priors).
+* The paired engine 3 / engine 4 runs found the same pairs in every arm.

@@ -94,7 +94,7 @@ reports CPU time per sum), and per-P factors (empirical Bayes); `report`
 compares observed and predicted counts. Each sum is searched plain or
 diagonal-first (`msearch --diag-first`, which finds every magic square but
 not the other semi-magic squares), by the measured d-first / plain CPU
-ratio (`--dfirst auto`, the default: d-first from N' ~ 3.5k on with engine 4; the ratio's
+ratio (`--dfirst auto`, the default: d-first from N' ~ 3.7k on with engine 4; the ratio's
 level is learned online). A d-first sum gets a plain calibration stream of
 ~7% of its CPU (`--calib-r1-stride`), whose sampled squares keep the class
 and per-P factors learning and whose plain-time estimate teaches the plain
@@ -168,23 +168,26 @@ binary") speed the search up:
   cheaper, N >= 5000 (`--diag-first-min-n`).
 
 CPU seconds per sum (paired, r1- and d-sampled where large; relSE <= 8%;
-the previous code is fdb77fc):
+the previous code is fdb77fc; "engine 4" is the d-first column times the
+round-2 build's paired engine 4 / engine 3 factor of that sum, measured on
+11 of the 13 sums, research/ideas.md "Integration of the round-2 d-first
+changes"):
 
-| P / S | N | labels | previous plain | plain | d-first | plain speedup | best speedup |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 6 4 2 1 1 / 838 | 1,986 | 104 | 1.01 | 1.01 | 1.65 | 1.0 | 1.0 |
-| 12 6 3 2 1 0 1 / 900 | 2,994 | 121 | 5.9 | 5.8 | 5.9 | 1.0 | 1.0 |
-| 13 7 4 3 1 1 / 1900 | 4,111 | 137 | 35.5 | 23.5 | 29.4 | 1.5 | 1.5 |
-| 12 6 3 2 1 1 / 988 | 6,671 | 159 | 260 | 231 | 149 | 1.1 | 1.7 |
-| 13 7 4 3 1 1 / 2000 | 7,593 | 168 | 511 | 441 | 251 | 1.2 | 2.0 |
-| 12 6 3 2 1 1 / 1200 | 11,697 | 199 | 2,023 | 1,575 | 870 | 1.3 | 2.3 |
-| 13 7 4 3 1 1 / 2200 | 15,199 | 211 | 11,316 | 8,223 | 3,432 | 1.4 | 3.3 |
-| 11 6 4 3 2 1 / 2174 | 16,424 | 220 | 11,503 | 8,685 | 4,056 | 1.3 | 2.8 |
-| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 252 | 14,460 | 12,623 | 5,407 | 1.1 | 2.7 |
-| 9 6 4 3 1 1 1 1 / 2700 | 20,896 | 259 | 53,077 | 13,835 | 4,457 | 3.8 | 11.9 |
-| 13 7 4 3 1 1 / 2400 | 22,992 | 245 | 47,400 | 40,389 | 11,785 | 1.2 | 4.0 |
-| 13 7 4 3 1 1 / 2500 | 26,585 | 260 | 205,729 | 54,280 | 23,366 | 3.8 | 8.8 |
-| 13 7 4 3 1 1 / 2650 | 31,743 | 279 | 467,238 | 121,918 | 39,917 | 3.8 | 11.7 |
+| P / S | N | labels | previous plain | plain | d-first | d-first, engine 4 | plain speedup | best speedup | best speedup, engine 4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 6 4 2 1 1 / 838 | 1,986 | 104 | 1.01 | 1.01 | 1.65 | – | 1.0 | 1.0 | – |
+| 12 6 3 2 1 0 1 / 900 | 2,994 | 121 | 5.9 | 5.8 | 5.9 | 5.0 | 1.0 | 1.0 | 1.2 |
+| 13 7 4 3 1 1 / 1900 | 4,111 | 137 | 35.5 | 23.5 | 29.4 | 26.9 | 1.5 | 1.5 | 1.5 |
+| 12 6 3 2 1 1 / 988 | 6,671 | 159 | 260 | 231 | 149 | 121 | 1.1 | 1.7 | 2.1 |
+| 13 7 4 3 1 1 / 2000 | 7,593 | 168 | 511 | 441 | 251 | 196 | 1.2 | 2.0 | 2.6 |
+| 12 6 3 2 1 1 / 1200 | 11,697 | 199 | 2,023 | 1,575 | 870 | 588 | 1.3 | 2.3 | 3.4 |
+| 13 7 4 3 1 1 / 2200 | 15,199 | 211 | 11,316 | 8,223 | 3,432 | 2,406 | 1.4 | 3.3 | 4.7 |
+| 11 6 4 3 2 1 / 2174 | 16,424 | 220 | 11,503 | 8,685 | 4,056 | 2,961 | 1.3 | 2.8 | 3.9 |
+| 14 7 4 4 1 0 0 1 / 3648 | 20,538 | 252 | 14,460 | 12,623 | 5,407 | 3,185 | 1.1 | 2.7 | 4.5 |
+| 9 6 4 3 1 1 1 1 / 2700 | 20,896 | 259 | 53,077 | 13,835 | 4,457 | 2,487 | 3.8 | 11.9 | 21.3 |
+| 13 7 4 3 1 1 / 2400 | 22,992 | 245 | 47,400 | 40,389 | 11,785 | 7,802 | 1.2 | 4.0 | 6.1 |
+| 13 7 4 3 1 1 / 2500 | 26,585 | 260 | 205,729 | 54,280 | 23,366 | – | 3.8 | 8.8 | – |
+| 13 7 4 3 1 1 / 2650 | 31,743 | 279 | 467,238 | 121,918 | 39,917 | 26,026 | 3.8 | 11.7 | 18.0 |
 
 * The plain search is unchanged up to 128 labels, 1.1-1.5x faster at
   129-256 labels and 3.8x faster above 256.
@@ -202,13 +205,22 @@ the previous code is fdb77fc):
 * Since round 2 (msearch engine 4) the d-first column is lower: the V_d
   searches prune with the class matching of d's numbers (in the V_d of at
   least 137 labels) and skip 3 in 4 of the d through one number x* (the
-  star cover; every magic square is still found). Paired against the
-  table's code: 0.83-0.96x at N 3-6k, 0.81x at 7.6k, 0.63-0.72x at
-  11.7-31.7k (d-first CPU per sum = e^-0.138 (N/4000)^-0.162 x before), so
-  d-first wins from N' ~3.5k (research/ideas.md, "Integration of the
-  round-2 d-first changes").
+  star cover; every magic square is still found). Paired against engine 3
+  (23 sums at N' 3.4-31.7k): 0.90-0.92x at N' 3.4-4.7k, 0.78-0.84x at
+  5.9-7.6k, 0.56-0.73x at 11.7-31.7k; d-first CPU per sum = e^-0.103
+  (N'/4000)^-0.204 x engine 3's, so with its calibration stream d-first
+  wins from N' ~3.7k on (research/ideas.md, "Integration of the round-2
+  d-first changes"). The best speedup over fdb77fc is now 2.1-2.6x at
+  6.7-7.6k, 3.4-6.1x at 11.7-23k and 18-21x above 256 labels.
 
 ## Status (October 2026)
+
+**Current build** (branch integ/round2): msearch engine 4 (the plain search
+of the integrated build; the d-first search with the gated class support
+and the star cover, 0.56-0.92x engine 3's d-first CPU), scheduler v2 with
+d-first units and the calibration search's refits. No 6x6 magic square has
+been found yet. Its forecast (`forecast --shipped`): E = 0.120 at 1
+CPU-year, 0.283 at 10 and 0.60 at 100 (details below).
 
 In a few CPU-hours of testing near S_min (36 values of P searched from S_min
 for 4 minutes each, then 40 units chosen by the scheduler), the new pipeline
@@ -260,14 +272,13 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
   the yield.
 * The analytic scheduler ([research/scheduler-v2.md](research/scheduler-v2.md),
   now the default) uses that model per (P, S) over a pool of 377,908 P
-  that includes exponent orders that are not non-increasing. It forecasts
-  **0.12 magic squares in 1 CPU-year, 0.25 in 10 and 0.39 in 100**
-  (`forecast --shipped`; 90% band from its calibration 0.04-0.32 at 1
-  CPU-year). Units it ranks highest came in at 0.7-0.9 of prediction on
-  held-out data, so the quote was **about 0.1 and 0.2**. Scored by the same model,
-  the old scheduler's choices collect 0.059 and 0.096 (x2.0 / x2.6). The
-  ideal frontier above uses a slower time law and is not directly
-  comparable (v2 reaches ~2/3 of it under that law).
+  that includes exponent orders that are not non-increasing. Before the
+  calibration search and engine 4 it forecast 0.12 magic squares in 1
+  CPU-year, 0.25 in 10 and 0.39 in 100 (`forecast --shipped`), quoted
+  after a x0.8 selection discount as **about 0.1 and 0.2**. Scored by the
+  same model, the old scheduler's choices collect 0.059 and 0.096 (x2.0 /
+  x2.6). The ideal frontier above uses a slower time law and is not
+  directly comparable (v2 reaches ~2/3 of it under that law).
 * **Calibration search in the target region**
   ([research/calibration-target.md](research/calibration-target.md)).
   321 pre-registered sums at N' 3-45k (fresh (P, S), 312 new P) were searched
@@ -285,13 +296,18 @@ data and tested on data it was not fitted to, up to N = 45k vectors per sum.
     remains is the SP coupling (f_rho^2, ln sd 0.47).
   * The existence estimate's level factor goes from x/÷2.0 to x/÷1.8. Its
     large-N widening is unchanged: the search has only 7 sums at 12-45k.
-  * The scheduler ships these refits now (squares at 6-12k x0.93, S
-    traversals x0.94 at 3-6k, A_SQ 6, no selection discount, and `forecast
-    --shipped` charging each unit at the CPU measured per N' band). With
-    msearch engine 4 it forecasts **0.119 at 1 CPU-year and 0.269 at 10**
-    (90% band at 10: 0.09-0.88), before the f_rho^2 median 1.12 that the
-    0.126 / 0.28 above include (research/scheduler-v2.md, "The calibration
-    search's numbers in the shipped calibration").
+  * The scheduler ships these refits now (the class-factor GLMs at the
+    refit's posterior: squares at 6-12k x0.93, S traversals lower at k <=
+    5, ratio <= 1.1 and x < 0.1, P traversals higher; A_SQ 6; no selection
+    discount; `forecast --shipped` charging each unit at the CPU measured
+    per N' band). With msearch engine 4 it forecasts **0.120 at 1
+    CPU-year (90% band 0.056-0.27), 0.283 at 10 (0.13-0.66) and 0.60 at
+    100 (0.28-1.48)**, before the f_rho^2 median 1.12 that the 0.126 /
+    0.28 above include (0.134 / 0.317 with it); the band's SP term is
+    still the scheduler's narrow one. Engine 4 adds x1.02 / 1.06 / 1.08 of
+    that at 1 / 10 / 100 CPU-years (research/scheduler-v2.md, "The
+    calibration search's numbers in the shipped calibration";
+    research/retrospective.md section 8).
 * Speedups are best compared by the ratio of E at a fixed budget: 10x faster
   gives x2.2 at 1 CPU-year and x1.5 at 1,000; time ~ N^2 instead of ~N^4
   beyond N = 4,000 gives x1.1 and x1.7.
@@ -307,27 +323,30 @@ sums (N = 451-31,743):
 | a72cef3 (+ support filter) | 1/6.5 | 0.11 | 0.48 |
 | 2d2bc6d (+ carried bitsets) | 1/11-1/13 | 0.14 | 0.58 |
 | fdb77fc | 1/17-1/18 | 0.16 | 0.64 |
-| current (engine 3), plain and d-first | 1/21 (E = 0.1) to 1/43 (E = 1) | 0.17 | 0.76 |
+| integrated (engine 3), plain and d-first | 1/21 (E = 0.1) to 1/43 (E = 1) | 0.17 | 0.76 |
+| current (engine 4: class support and star cover in d-first) | 1/21 (E = 0.1) to 1/59 (E = 1) | 0.18 | 0.83 |
 
-The current code (msearch engine 3: the "Large sums" table above) is
+The integrated code (msearch engine 3: the "Large sums" table above) is
 1.1-3.8x faster than fdb77fc at N >= 4k with the plain search and 1.5-12x
 with the better of the plain and d-first modes. Its row assumes plain below
 N = 5,000, d-first above, and a calibration stream costing 10% of each
 d-first sum (retrospective.md section 7). It lowers the exponent of N
 (t ~ N^3.5 against N^4.5), so the gain grows with the budget: E x1.11 at 1
-CPU-year, x1.24 at 1,000, and 2.3x less CPU to reach E = 1. Scheduler v2
-now launches d-first units, choosing the mode by the measured ratio
-(d-first from N' ~ 4.3k). Charged under a measurement-anchored truth
-(`forecast --truth anchored`), d-first adds x1.02 / 1.07 to its plan at 1
-/ 10 CPU-years and needs 1.24x less CPU for the plain-only E of 10
-CPU-years (the review's simulation: x1.14 and 1.78x at 100), close to the
-retrospective's x1.03 / 1.07 / 1.13 for d-first on top of the plain search
-(research/scheduler-v2.md, "d-first units"). The laws also have to
-learn engine 3's level first: re-run `forecast` after some engine-3 units. The
-17-18x is measured speed; E at a fixed budget grows only ~3x because
-E(C) rises slowly with C. Search strategy multiplies with it: the first
-search's expected yield (1.1 CPU-years with the legacy code) is reached in
-about 6.5 CPU-hours with the current code and an ideal choice of (P, S).
+CPU-year, x1.24 at 1,000, and 2.3x less CPU to reach E = 1. Engine 4 (round
+2, retrospective.md section 8) takes the d-first CPU down by another
+0.56-0.84x at N 6-32k: E x1.02 / 1.05 / 1.08 / 1.08 over engine 3 at 1 /
+10 / 100 / 1,000 CPU-years, and 1.37x less CPU to reach E = 1 (3.2x less
+than fdb77fc). Scheduler v2 launches d-first units, choosing the mode by
+the measured ratio (d-first from N' ~ 3.7k with engine 4). Its own
+forecast is in the calibration bullet above (research/scheduler-v2.md,
+"d-first units" and "The calibration search's numbers in the shipped
+calibration"); its laws learn each new engine's level from that engine's
+units, starting from the previous engine's shifted by the measured factor.
+The 17-18x of fdb77fc is measured speed; E at a fixed budget grows only
+~3x because E(C) rises slowly with C. Search strategy multiplies with it:
+the first search's expected yield (1.1 CPU-years with the legacy code) is
+reached in about 6.5 CPU-hours with the integrated code and an ideal choice
+of (P, S).
 
 [research/calibration.md](research/calibration.md) checks the per-square
 part of the heuristic rung by rung (S, P, S+S, S+P, P+P, SP) on the 7,021

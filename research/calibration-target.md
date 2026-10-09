@@ -479,12 +479,30 @@ The first analysis was reviewed twice before this write-up. The fixes:
 The scheduler now ships these numbers (research/scheduler-v2.md, "The
 calibration search's numbers in the shipped calibration"):
 
-* squares at N' 6-12k: the GLM prior -0.08 (sd 0.09), x0.93, in place of
-  -0.22 (0.15), x0.80 (section 3.1, the A_SQ 6 refit);
-* S traversals per square: x0.939 at 3-6k and x0.973 at 6-12k against the
-  previous prior (section 3.2), i.e. the N' >= 3k effect +0.04 -> -0.023
-  and a 6-12k effect of +0.036;
-* A_SQ 15 -> 6 (the measured between-sum sd, section 3.1);
+* the class-factor GLMs (squares, S and P traversals) at the posterior of
+  this write-up's refit (section 5, `archive/results/glm.out` and
+  `glm_update.json`'s `calib_post`; means and sds per effect, the
+  correlations dropped), so the shipped forecast starts where section 5's
+  "updated" one did. Among them:
+  * squares at N' 6-12k -0.078 (sd 0.085), x0.93, in place of -0.22
+    (0.15), x0.80 (section 3.1);
+  * S traversals: intercept -0.159 (0.073), N' >= 3k +0.032 (0.073), 6-12k
+    -0.018 (0.050), k <= 5 -0.041, ratio <= 1.1 -0.048, x < 0.1 -0.067:
+    the refit carries the 3-6k deficit (0.939 of the previous prior,
+    section 3.2) mostly in the k, ratio and x effects, which also act
+    below 3k;
+  * P traversals: N' >= 3k +0.06 -> +0.085, 6-12k +0.042, x < 0.1 -0.04
+    -> -0.102 (1.02-1.08, section 3.2).
+
+  The first integration shipped only the squares' 6-12k effect and
+  band-marginal S factors (-0.023 at N' >= 3k, +0.036 at 6-12k, the latter
+  of the opposite sign to the refit's), and labelled them the refit; its
+  verification caught it. Shipping the S refit without the P refit would
+  have lowered E at 10 CPU-years by 11% against the whole refit;
+* A_SQ 15 -> 6 (the measured between-sum sd, section 3.1, as in the refit;
+  that sd is the spread beyond Poisson, so it also holds the per-sum
+  overdispersion that the scheduler's PHI_SUM 2.5 models: without it A
+  would be ~8-9);
 * no x0.8 selection discount; selection is a lognormal(0, 0.12) term of
   the forecast's band (section 5);
 * `forecast --shipped` charges each unit under the "measured" truth by
@@ -492,15 +510,19 @@ calibration search's numbers in the shipped calibration"):
   3.6; this write-up's variant "time"). The engine-3 plain law is right at
   3-6k (0.97), where the anchored truth charged 1.5x.
 
-Not shipped: the P-traversal effects (1.02-1.08) and f_rho (the SP
-coupling stays uncalibrated, section 6). The calibration search's ratio
+Not shipped: f_rho (the SP coupling stays uncalibrated, section 6; its
+median f_rho^2 1.12 is in section 5's quote, not in the scheduler). The calibration search's ratio
 level (about -0.08 for engine 3) is not folded into the prior either; the
 scheduler learns it from the streams.
 
-With engine 4 (the class support and the star cover in the d-first
-search) and these numbers, `forecast --shipped` (10%, seed 1) gives E =
-0.119 at 1 CPU-year and 0.269 at 10 (90% band at 10: 0.090-0.88), as the
-0.118 / 0.268 of section 5's measured-CPU variant before f_rho^2.
+With these numbers, `forecast --shipped` (10%, seed 1, the measured truth)
+gives with engine 3's laws E = 0.118 at 1 CPU-year and 0.268 at 10, section
+5's measured-CPU variant before f_rho^2 (0.118 / 0.268), and with engine 4
+(the class support and the star cover in the d-first search, now shipped)
+0.120 (90% band 0.056-0.27) and 0.283 (0.13-0.66), and 0.60 (0.28-1.48) at
+100 CPU-years (1% sample). With the f_rho^2 median 1.12 of section 5 the
+points are 0.134 / 0.317; its honest SP term widens the band to about x6
+(research/scheduler-v2.md and retrospective.md section 8.3).
 
 **Reproducing sections 1-8.** The scripts here import the scheduler, whose
 shipped calibration, engine and default truth have changed since: run them
