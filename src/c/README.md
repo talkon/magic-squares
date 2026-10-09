@@ -102,10 +102,13 @@ as searched and a part of one (a `--d-range` unit, a `--d-stride` sample) as
 not, and never launches d-first units. Both list the magic squares found
 d-first.
 `--calib-r1-stride k` adds a plain search of every k-th first row (a
-"csum" record with `"mode":"calib"`, `est_squares`, `se_squares`, the
-traversal totals, and "csquare" records) for the models of semi-magic
-squares per sum; it runs after the sum's d loop, in every d-first sum of
-the run (scheduler v2 passes it only to the first unit of a sum).
+"csum" record with `"mode":"calib"`, `est_squares`, `se_squares`,
+`est_time`, the traversal totals, and "csquare" records) for the models of
+semi-magic squares and plain time per sum; it runs after the sum's d loop,
+in every d-first sum of the run whose d loop was not stopped by
+`--time-limit` or `--total-nodes` (scheduler v2 passes it only to the unit
+of a sum that has none yet, normally the first, and passes d-range units a
+`--d-chunk` of 1/8 of their d so that they checkpoint and stop inside).
 
 ### r1 sampling (measurements)
 

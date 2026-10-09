@@ -239,39 +239,49 @@ cheaper than the plain search: 0.57x at N = 7.6k, 0.42-0.47x at 15-21k,
 v2 now launches it.
 
 **Mode per sum** (`--dfirst auto`, the default; `off`; `on`). A sum is
-searched d-first where the d-first law's CPU plus its calibration stream
-(below) is below the plain law's, and its N' is at least `--dfirst-min-n`
-(default 2000). `on` takes d-first at every N' >= `--dfirst-min-n` (for
-tests). A d-first unit runs `msearch --diag-first --diag-first-min-n 0`, so
-msearch never overrules the scheduler's choice. A unit holds one mode only,
-and the launched record (`launched_6.jsonl`) has `mode`, `dlo`, `dhi`,
-`nd`, `calib` and `frac`. `emit` prints the same arguments.
+searched d-first where the measured d-first / plain CPU ratio with the
+calibration stream (below) is below 1, (1 + 0.07) r(N') < 1, and its N' is
+at least `--dfirst-min-n` (default 2000). `on` takes d-first at every N' >=
+`--dfirst-min-n` (for tests). A d-first unit runs `msearch --diag-first
+--diag-first-min-n 0`, so msearch never overrules the scheduler's choice. A
+unit holds one mode only, and the launched record (`launched_6.jsonl`) has
+`mode`, `dlo`, `dhi`, `nd`, `calib` and `frac`. `emit` prints the same
+arguments.
 
-* With the shipped laws (engine 3), `auto` picks the mode the
-  measurements pick on all 13 measured sums: plain at N = 2.0k, 3.0k and
-  4.1k, d-first from 6.7k on.
-* Along 10 pool P it switches to d-first at these N' (from where every
-  later sum is d-first; 13 6 3 2 never gets there, N' <= 1.6k up to
-  2 S0):
+    ln r = a0 - 0.566 ln(N'/4000),   a0 = -0.028 (prior, sd 0.1)
 
-  | P | N' |
-  |---|---:|
-  | 12 6 3 2 1 1 | 4.8k |
-  | 10 6 4 2 1 1, 12 6 3 2 1 0 1 | 5.3-5.4k |
-  | 13 7 4 3 1 1, 12 7 4 2 2 1, 11 6 4 3 2 1 | 7.1-7.9k |
-  | 16 8 4 3 1 1, 14 7 4 4 1 0 0 1 | 9.0-9.3k |
-  | 9 6 4 3 1 1 1 1 | 10.7k |
+(`amodel.DFIRST_RATIO_PRIOR`, pooled over the perf verifier's 13 sums with
+both modes, resid sd 0.17; ideas.md "Measurements on the integrated
+binary"). With the prior level `auto` switches at N' = 4.29k for every P.
+The level a0 is learned online from pairs (below), the slope held.
 
-* This is later than the measured crossover (3.8-4.9k) for some P.
-  The plain law under-predicts the integrated build's plain search
-  between ~5k and 8k for them: obs/pred 1.68 at 13 7 4 3 1 1 / 2000 (N
-  7.6k), against 1.01 at 12 6 3 2 1 1 / 988 (6.7k). Its shape for engine
-  3 is the open point of "The time model". In such a band d-first would
-  save up to ~1.7x per sum.
+* The first version compared the two time laws instead, t_d + t_cal < t_p.
+  That put the switch at N' ~ 9-10k weighted by E, where the
+  measurements put it at ~4.3k. The two laws were fitted separately and
+  their errors do not cancel:
+  * the plain law under-predicts the plain search at N 5-8k generally
+    (obs/pred geometric mean 1.35 over 10 engine-3 sums, range 1.02-1.73,
+    9 of 10 at >= 1.10), while the d-first law is at 0.94 there;
+  * the quotient t_d / t_p inherits the plain law's label term L^-3.46,
+    which the d-first law has not: a sum with labels 10% above typical
+    got a predicted ratio ~1.4x higher. The pool's E-heavy sums at N'
+    4-12k have model labels 7-14% above the measured sums'.
+* Six pool sums at N' ~6.1k (13 8 4 2 2 1 / 2469, 13 6 4 3 2 1 / 2368,
+  13 9 4 3 1 1 / 2750, 14 7 3 4 2 1 / 3315, 13 7 4 2 1 1 / 1492, 12 7 4 3 2
+  / 1854; 154-168 labels), measured by the review as d-first at d-stride
+  16 plus a stream at stride 12: d-first / plain 0.69-0.82, flat in labels,
+  on the pooled law (r(6.1k) = 0.77). The laws' quotient predicted
+  0.93-1.49 and chose plain on 5 of the 6 (regret 1.21-1.33x), and on 13
+  7 4 3 1 1 / 1950 (measured 0.78, predicted 1.16).
+* On all 22 engine-3 sums measured in both modes (the 13, 13 7 4 3 1 1 /
+  1850 and 1950, 12 6 3 2 1 1 / 950 and the six) the ratio law's choice
+  has regret 1.00. Between 4k and 12k the laws' quotient agreed with it on
+  only 32% of the plan's E.
+* The time laws now only price the sums (the planner's density, the
+  units' sizes). If a label term is ever added to one law, the same goes
+  into the other, so that pricing stays consistent.
 * `--dfirst on --dfirst-min-n 5000` reproduces msearch's own threshold
   (and retrospective.md 7's assumption) instead.
-* At N >= 11k the plain law over-predicts (0.31-0.94). That makes d-first
-  look better than it is there, but it is the cheaper mode there anyway.
 
 **The d-first time law** (`amodel.DFIRST_TIME_PRIOR`, its own TimeModel
 per engine, mode "dfirst"):
@@ -296,8 +306,26 @@ per engine, mode "dfirst"):
   d loop dominate: the end-to-end test's sums of 300-400 vectors ran 5x
   the law). A part [d_lo, d_lo + nd) of a sum is scaled to the whole sum:
   its overhead (cpu - time + index_time) plus its d loop (time -
-  index_time) divided by the part's share of the d loop.
-* d-first records stay out of the plain law, as before.
+  index_time) divided by the part's share of the d loop. The row's
+  weight is that share, so a sum split into m parts weighs 1, not m. (With
+  one row per part, a 25k sum split into 150 units of 120 s moved the
+  level from +0.19 to -0.12 against 50 whole sums at 6k, and shrank the
+  sd: the parts share the sum's N' error, small parts are noisy, sd
+  0.26-0.43 in ln for parts of 100-1,000 d, and the tail parts biased.)
+* The d-first records stay out of the plain law. The calibration streams
+  enter it (below).
+* Back-test (the review; engine 3, 16 distinct sums, mean prediction
+  with e^{sd^2/2}): obs/pred geometric mean 0.94, sd(ln) 0.23. By N':
+  0.71 below 3k (outside the fit, where plain is chosen), 1.16 at 3-6k,
+  0.93 at 6-12k, 0.96 at 12-24k, 1.10 above 24k; 1.01 at 129-256 labels
+  and 0.96 above. Out of sample: 13 7 4 3 1 1 / 1950 1.24, / 2100 1.08,
+  12 6 3 2 1 1 / 950 0.96, the six pool sums at ~6.1k 0.68-1.27
+  (geometric mean 0.89), the prototype's engine-2 rows 1.01 (sd 0.32).
+  Most of the scatter is per P (about +-25%): 13 7 4 3 1 1, 9 of the 16
+  sums, runs at ~1.05-1.1, 14 7 4 4 1 0 0 1, 9 6 4 3 1 1 1 1 and 12 6 3 2
+  1 0 1 at 0.6-0.75. A label or x term on the residuals is not identified.
+  With the switch at ~4.3k this law sets the density of every sum above
+  it.
 
 **The cost along d is not uniform.** In the perf verifier's 13 d logs
 (N 2-32k), the mean CPU per d by decile of d's index u = d / N, relative
@@ -320,12 +348,26 @@ complete sum's E is the same either way.
 `--unit-time` gets units of d, one sum each, with `--d-range lo:hi`:
 
 * each unit is about `--unit-time` of d loop, by the cost profile;
+* the unit that carries the sum's calibration stream (normally the first)
+  gets `--unit-time` minus the stream of d loop, at least a quarter of a
+  unit (the stream runs after the unit's d loop, in one piece). Before,
+  its d loop alone was a unit, so with the stream it ran 2.6x / 7.8x /
+  23.5x `--unit-time` 120 at N' 14.7k / 22.1k / 30.9k;
 * a unit runs from the first d not searched to at most the next part
   already searched;
-* a tail below a quarter of a unit is merged into the last unit;
+* a tail below a quarter of a unit is merged into the last unit, so a
+  unit takes at most ~1.5 units (tested at N' 30k);
 * while the sum's number of d is only predicted (N' predicts nvecs_raw),
   the last unit runs to the end (`lo:`). After the first unit has run,
-  the dchunk records give it exactly.
+  the dchunk records give it exactly, and the later units are priced at
+  the sum's own N (the d-first law's slope applied to nvecs_raw / N'):
+  the review's live run had parts at obs/pred 1.21 / 1.14 / 1.05 on a sum
+  with nvecs_raw / N' = 1.03 (x1.105 in time) and 0.63-0.88 on one at
+  0.98 (x0.92);
+* a d-range unit passes `--d-chunk` = 1/8 of its d (at least 8), so it
+  writes 8 checkpoints and `--time-limit` can stop it between them (with
+  the default 256, a unit of < 256 d, every unit above N' ~15k at 120 s,
+  was one chunk).
 
 Smaller d-first sums share units, all d-first, like plain sums. Sums below
 the model's grid go with the first sum inside it. If that sum gets units of
@@ -346,7 +388,19 @@ d, they are skipped, as `Planner._walk` already skipped such gaps.
   plain sum does (`dfirst_truncated` in the report).
 * The "done" record of a d-range unit still leaves the sum out (its
   incomplete dsum is a hole).
-* A plain search of a sum searched in part replaces its parts.
+* Records of a sum already searched in full (a duplicate unit, e.g. one
+  still running when the scheduler restarted, or the dsum of the unit
+  whose chunks completed the sum, read in a later pass) are skipped, so
+  they no longer recreate a `dcov` entry that `report` showed as
+  "searched in part" forever; incremental and from-scratch summaries
+  agree.
+* A plain search of a sum searched in part replaces its parts; with
+  `--dfirst off` such a sum is searched plain in a normal unit (before,
+  the parts mask stopped the unit before it, and a P whose sums below
+  the grid went with it was dropped with a zero-score unit).
+* `dfirst_cpu` counts each chunk's d loop as it completes (also those of
+  killed units, whose d count as searched) and the rest of a dsum
+  (index, reduction, enumeration share) with it.
 * The planner keeps `dpart` per P (from the summary in `run`, simulated in
   `forecast` and `emit`). It continues the frontier sum from its first gap
   and credits each unit with its share (`frac`) of the sum's E and CPU.
@@ -358,16 +412,23 @@ d, they are skipped, as `Planner._walk` already skipped such gaps.
 passes it to one unit per sum: the first planned while the summary has no
 stream of that sum, normally the unit from d 0.
 
-* k = round(t_plain / (0.07 t_dfirst)), with both times from the laws:
-  15-19 where `auto` switches. The stream records ~1/k of the sum's
-  semi-magic squares.
-* Where the plain law over-predicts (N' > 11k), k comes out larger (~45
-  at a law ratio of 0.3). The stream then costs less than 7% and records
-  fewer squares.
-* The mode choice and the planner's density charge it to the sum: (t_d +
-  t_cal) against t_p, with t_cal = t_p / k. In a split sum the first unit
-  carries it (that unit's time is `--unit-time` plus the stream), and the
-  later units' scores leave it out.
+* k = round(1 / (0.07 r(N'))) by the ratio law, i.e. the plain CPU taken
+  as t_dfirst / r: ~15 at the switch, ~18 at 6k, ~41 at 25k. The stream
+  records ~1/k of the sum's semi-magic squares. (Before, k came from the
+  plain law, which under-predicts at 5-8k, so the stream cost ~9.5%
+  instead of 7% there, and 10.8% at 13 7 4 3 1 1 / 2000 in the live run;
+  above 11k, where the plain law over-predicts up to 3x, it cost < 3% and
+  recorded ~3x fewer squares.)
+* k is raised so that the stream takes at most one `--unit-time`
+  (`DFIRST_STREAM_MAX`): at 120 s units that binds above N' ~15k, where
+  the stream then costs less than 7%.
+* msearch skips the stream of a sum whose d loop `--time-limit` (or
+  `--total-nodes`) stopped (it ran 7.2 s past a 1-s limit before); the
+  summary then has no stream of the sum, and the unit that continues it
+  carries it.
+* The planner's density charges it to the sum as 0.07 t_d. In a split
+  sum the unit that carries it has it in its time, and the other units'
+  scores leave it out.
 * Its squares enter the cells, i.e. the squares and traversal GLMs and
   the per-P factors (`Summary._ingest`, csum mode "calib"):
   * squares as w x the sampled count against w x E_sq / k;
@@ -386,12 +447,27 @@ stream of that sum, normally the unit from d 0.
     (kept per sum in `perP[P]["calS"]`);
   * the csquares wait for their csum across incremental reads, and those
     of r1-sampled research runs stay out.
-* Their CPU is reported as the stream's (`calib_cpu`), not in the plain
-  time law.
+* Its est_time (plus the reduction and the enumeration share, as a "sum"
+  record's cpu) is an unbiased estimate of the sum's plain CPU (relative
+  se ~7%). It is a row of the plain law, weighted by its precision
+  (1 / (1 + (se/est)^2 / 0.3^2)), so the plain law's band offsets learn at
+  and above the switch, where no plain sums run (in the review's live run
+  the streams measured plain at 1.2-1.65x the plain law). The sum's N and
+  label bias are recorded with it, once per sum.
+* With the sum's d-first CPU (its parts' whole-sum estimates, weighted,
+  once they cover at least half the d loop and the sum is searched in
+  full) it is one pair y = ln(t_dfirst / t_plain) of the ratio law
+  (`Summary.ratio`, per engine). The level a0 is their posterior mean
+  with prior sd 0.1 and residual sd 0.17 (`amodel.dfirst_ratio_level`):
+  `refit` and `report` show it and the switch N' it implies.
+* Its CPU is reported as the stream's (`calib_cpu`).
 * `report` prints the streams' est_squares against the model (x SQ12,
-  before class factors).
+  before class factors); a plain search that replaces a stream now
+  removes it from these totals too.
 * A notable csquare (best >= 7) joins the notable squares once (flagged
-  calib).
+  calib, and `report` says so). So does a "dsquare" with best >= 7 (SP,
+  SP+S, SP+P: in a d-first sum the only record of these), once per (P,
+  S, hash) and flagged d-first; before, only magic ones were kept.
 
 **A check on real output** (msearch, 12 6 3 2 1 1 / S = 950, N = 5,704,
 not among the sums of the cost profile; 100 CPU-s):
@@ -418,73 +494,137 @@ not among the sums of the cost profile; 100 CPU-s):
 **Forecast with and without d-first.** `forecast` simulates with the mode
 choice and then repeats the same greedy with `--dfirst off`. It prints E
 at the marks for both and the CPU d-first needs to reach the plain-only E
-of the budget. Fresh state, shipped calibration and both laws at their
-priors, as in "Short answer" (10, 100 and 1,000 CPU-years on 10%, 1% and
-0.1% of the candidates with the budget scaled; one run each):
+of the budget. Both arms are planned with the scheduler's laws, and by
+default each unit is also charged its planned time (`--truth laws`). That
+cannot measure the gain: the plain law under-predicts the plain search 1.35x
+at N' 5-8k (so plain looks cheaper than d-first exactly where the ratio
+says d-first wins) and over-predicts it up to 3x above 11k. `--truth
+anchored` charges each planned unit instead under the review's
+measurement-anchored truth (T2): a d-first sum costs the d-first law (it
+back-tests at 0.94), a plain sum the d-first law / r(N') at N' >= 5k, the
+plain law at <= 3k, blended geometrically between; a stream costs the
+plain cost / k.
 
-| CPU-years | 1 | 10 | 100 | 1,000 |
-|---|---:|---:|---:|---:|
-| sample of the candidates | 10% | 10% | 1% | 0.1% |
-| E with d-first (`--dfirst auto`) | 0.126 | 0.266 | 0.436 | 0.603 |
-| E plain only (`--dfirst off`) | 0.126 | 0.261 | 0.406 | 0.529 |
-| ratio | 1.002 | 1.019 | 1.072 | 1.140 |
-| CPU for the plain-only E, plain / with d-first | 1.01 | 1.07 | 1.37 | 1.81 |
-| d-first units: share of E / of CPU | 4% / 7% | 13% / 23% | 34% / 56% | 52% / 85% |
+Fresh state, shipped calibration and laws at their priors, 10% of the
+candidates with the budget scaled (seed 1), after the fixes below:
 
-* The 1% sample gives x1.008 at 1 and x1.032 at 10 CPU-years.
-* The 0.1% sample is noisy: its E at 1 CPU-year is 0.085 against 0.126.
-* The calibration streams cost 6.5% of the d-first CPU. That is 0.5% of
-  all CPU at 1 CPU-year and 4-6% at 100-1,000.
+| CPU-years | 0.1 | 1 | 10 |
+|---|---:|---:|---:|
+| E with d-first, `--truth anchored` | 0.0467 | 0.117 | 0.246 |
+| E plain only, `--truth anchored` | 0.0466 | 0.115 | 0.231 |
+| ratio, anchored | 1.004 | 1.021 | 1.066 |
+| ratio, the scheduler's own laws as truth | 0.990 | 0.959 | 0.957 |
 
-* The gain grows with the budget, as in retrospective.md section 7, but
-  starts later and stays smaller than there ("d-first on top" in T10:
-  x1.03 / 1.07 / 1.13 / 1.16 at 1 / 10 / 100 / 1,000 CPU-years). There
-  are two reasons:
-  * v2's plan is not the ideal frontier. At 1 CPU-year 94% of its E is
-    at N' < 6k, where d-first wins little or nothing.
-  * The plain law under-predicts the plain search at N' 6-8k (obs/pred
-    1.0-1.7), where the retrospective used the measured ratios.
-* At 100-1,000 CPU-years the comparison leans on the plain law at
-  N' >= 11k, which over-predicts the integrated build's plain search
-  (obs/pred 0.31-0.94). That inflates the plain-only CPU there, so these
-  ratios are upper bounds. Refitting the plain law's shape for engine 3
-  above 11k (open, see "The time model") would tighten them.
+* Under the anchored truth the plain-only E of 10 CPU-years takes 8.06
+  CPU-years with d-first: 1.24x less CPU. d-first units hold 26% of E in
+  38% of the CPU at 1 CPU-year, 54% of E in 75% at 10.
+* The review's truth simulation (truthsim.py; T2, 10% sample seed 1 at 1
+  CPU-year, seed 2 at 10, 1% at 100) gives for this label-free choice
+  x1.017 / 1.054 / 1.138 at 1 / 10 / 100 CPU-years and 1.25x / 1.78x less
+  CPU at 10 / 100; for the first version (the laws' quotient) x1.004 /
+  1.019 / 1.092 and 1.09x / 1.50x. Retrospective.md section 7's "d-first
+  on top" of the plain search is x1.03 / 1.07 / 1.13 (its x1.11 / 1.14 /
+  1.19 are against fdb77fc and include the plain search's own speed-up,
+  which v2's engine-3 plain prior carries in both arms).
+* So the d-first gain v2 realises is about what the retrospective
+  predicted once the mode is chosen by the measured ratio. The first
+  version's smaller figures (x1.002 / 1.019 / 1.072 / 1.140 at 1 / 10 /
+  100 / 1,000 CPU-years under its own laws) came mostly from its mode
+  choice, not from v2's plan; and the own-law ratio at 100 CPU-years
+  (x1.08) lay between the review's two truths (1.07, 1.09), so it was
+  not an upper bound either.
+* Under its own laws the forecast now shows d-first as a loss (0.96):
+  those laws price d-first at 4.3-8k above plain. That is the reason the
+  choice no longer uses them, and why `--truth laws` (the default, for
+  E itself) should not be read as the gain.
+* Charged under the anchored truth, E itself is 2-3% lower at 1-10
+  CPU-years than under the planning laws: the plain law under-predicts
+  the plain sums at 3-5k.
 
-**Tests** (`scripts/test_scheduler.py`, 43 s in all):
+**Fixes after the review of the d-first scheduler.** Two verifiers (a
+back-test of the laws and the mode choice with 6 new pool sums, an
+adversarial review, and a live run with kills and restarts) found:
+
+* the mode choice by the two laws' quotient switched at ~9-10k instead of
+  ~4.3k (above, "Mode per sum"): now the ratio law, label-free, its level
+  learned from the streams;
+* the d-first time law took one row per part, so a sum split into m units
+  counted m times: now weighted by the part's share (above);
+* the first unit of a split sum ignored its stream (up to 23.5x
+  `--unit-time` at N' 31k), units of < 256 d had no checkpoint, and the
+  stream ran past `--time-limit`: now sized with the stream (capped at one
+  unit), `--d-chunk` 1/8 of the unit, and msearch skips the stream after a
+  stop;
+* the plain law never saw the streams' est_time and the stride came from
+  the plain law: now the streams are plain-law rows and ratio pairs, and k
+  comes from the ratio;
+* minors: records after a sum was covered recreated a dcov entry;
+  `--dfirst off` dropped a P whose first grid sum was searched in part;
+  a replaced stream stayed in the report's totals; SP-type squares found
+  d-first were dropped; killed units' CPU was lost; later parts used the
+  model's N' with the sum's true N known; the report's stream rows
+  showed "sums 0" and no "(calib)" flag, and the N bias ignored d-first
+  sums.
+* Not taken: the review's suggestion to keep one row per sum in the
+  d-first law at the sum's cover (weighting by share is simpler and
+  teaches the law before a large sum completes).
+
+**Tests** (`scripts/test_scheduler.py`, ~45 s in all):
 
 * `test_dfirst_merge`: duplicates, overlaps, a killed unit, a sampled
   part, chunks without nvecs_raw, incremental reads and save/load, the
-  time-law rows of parts, and a plain search after parts.
+  weighted time-law rows of parts, the CPU of a killed unit's chunks, and
+  a plain search after parts.
 * `test_dfirst_plan`:
-  * the mode choice against both laws and against the measured sums;
+  * the mode choice by the ratio law (one switch N', ~4.29k, unchanged
+    when the plain law moves) and against 16 measured sums (the 13,
+    1850 / 1950 along 13 7 4 3 1 1, the six pool sums at ~6.1k);
   * grid_density against eval_sums;
   * the d-first prior and an online level with the slope held;
-  * a ~11k CPU-s sum split into 20 units of ~600 s whose fractions add to
-    1 and whose E adds to the sum's;
+  * a sum split into units of ~600 s whose fractions add to 1 and whose
+    E adds to the sum's, the first unit's d loop plus its stream one
+    unit, the stride from the ratio law;
   * the stream on the first unit only;
-  * resume from records with gaps;
-  * `--dfirst off` on a sum searched in part;
+  * resume from records with gaps, priced at the sum's known N, with
+    `--d-chunk`;
+  * every unit of a sum at N' 30k (120-s units) within 1.5 units;
+  * `--dfirst off` on a sum searched in part, also as the first sum in
+    the grid with sums below it;
   * whole-sum d-first units;
   * upper bounds of the lazy heap with d-first.
 * `test_calib_cells`: the streams' cell contributions, weights,
-  duplicates, replacement by a plain search, r1-sampled records, and the
-  GLM learning from streams.
+  duplicates, replacement by a plain search (cells and report totals),
+  r1-sampled records, the plain-law row of a stream, and the GLM learning
+  from streams.
+* `test_dfirst_learning`: one sum in 1 or 40 parts gives the same d-first
+  law; a stream's plain-law row and, once the sum is covered, its ratio
+  pair and the scheduler's learned level; records after a sum is covered
+  (no dcov entry; incremental equals a full parse); a d loop stopped by
+  `--time-limit` (nd < d_hi - d_lo); a truncated chunk; SP-type and magic
+  dsquares in the notable list; a multi-sum unit stopped inside a sum
+  resumed from its last chunk with the stream.
 * `test_dfirst_e2e`: `run` with msearch, `--dfirst on --dfirst-min-n 0` and
   tiny units, so that sums are split into 2 d-range units. The second unit
   starts where the first one's records stop and knows the sum's number of
   d, the stream comes with the first unit, and the sums are merged into
-  coverage. Then `report`, `emit` and `forecast` with d-first.
+  coverage; the chunks of every covered sum are disjoint and cover [0,
+  nvecs_raw). Then `report`, `emit` and `forecast` with d-first.
 
 **Not done.**
 
-* The calibration streams' `est_time` could teach the plain law above the
-  crossover, where no plain sums run. One band offset for N' >= 6k cannot
-  fix its shape there (obs/pred 1.7 at 7.6k, 0.3 at 32k), so they are only
-  reported.
+* The plain law's shape for engine 3 (obs/pred 1.35 at 5-8k, 0.65-0.69 at
+  8-24k, 0.30-0.34 above 256 labels): the streams now teach its band
+  offsets, but one offset for N' >= 6k cannot fix a shape. With the
+  switch at ~4.3k it prices only `--dfirst off` and the plain sums below
+  the switch.
+* The ratio's slope is held; only its level learns. The P-level scatter
+  of the d-first law (+-25%) is not modelled.
 * The yield per d is assumed proportional to its cost.
 * A sum's units run one after the other (one unit per P at a time). A
   sum of 11 CPU-hours at the default `--unit-time` 120 is ~330 units with
   ~0.3 s of enumeration and index each (0.3%).
+* A stream's plain-law row stays when a later plain search of the sum
+  replaces its squares in the cells (the sum then has two plain-time rows).
 * v1 (`--model regression`) still never launches d-first units, and counts
   a sum searched in parts as unsearched.
 

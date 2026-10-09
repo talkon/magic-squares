@@ -93,11 +93,12 @@ together), the level of the time law (its shape stays fixed; msearch
 reports CPU time per sum), and per-P factors (empirical Bayes); `report`
 compares observed and predicted counts. Each sum is searched plain or
 diagonal-first (`msearch --diag-first`, which finds every magic square but
-not the other semi-magic squares), whichever its time laws predict to be
-cheaper (`--dfirst auto`, the default; in practice d-first from N' ~ 5-11k
-on). A d-first sum gets a plain calibration stream of ~7% of its CPU
-(`--calib-r1-stride`), whose sampled squares keep the class and per-P
-factors learning, and a sum of hours is split into units of d
+not the other semi-magic squares), by the measured d-first / plain CPU
+ratio (`--dfirst auto`, the default: d-first from N' ~ 4.3k on; the ratio's
+level is learned online). A d-first sum gets a plain calibration stream of
+~7% of its CPU (`--calib-r1-stride`), whose sampled squares keep the class
+and per-P factors learning and whose plain-time estimate teaches the plain
+law and the ratio, and a sum of hours is split into units of d
 (`--d-range`) that are merged and resumed from msearch's checkpoint
 records (research/scheduler-v2.md, "d-first units"). The previous
 scheduler (a Poisson regression fitted to our runs, over non-increasing
@@ -195,7 +196,7 @@ the previous code is fdb77fc):
 * Time per sum, t = a (N / 4000)^b CPU-s fitted at N = 4.1-31.7k: the
   previous plain search a = 24.8, b = 4.5 (t(32k) ~ 280k CPU-s); now, the
   better of the two modes, a = 23, b = 3.5 (t(32k) ~ 35k).
-* Scheduler v2 chooses the mode per sum from its two time laws and runs
+* Scheduler v2 chooses the mode per sum by the measured ratio and runs
   large d-first sums as units of d (research/scheduler-v2.md, "d-first
   units").
 
@@ -282,12 +283,13 @@ N = 5,000, d-first above, and a calibration stream costing 10% of each
 d-first sum (retrospective.md section 7). It lowers the exponent of N
 (t ~ N^3.5 against N^4.5), so the gain grows with the budget: E x1.11 at 1
 CPU-year, x1.24 at 1,000, and 2.3x less CPU to reach E = 1. Scheduler v2
-now launches d-first units. Under its own time laws, d-first adds
-x1.00 / 1.02 / 1.07 / 1.14 to its plan at 1 / 10 / 100 / 1,000 CPU-years (`forecast` prints
-E with and without d-first). That is less than the retrospective's x1.03 /
-1.07 / 1.13 / 1.16 for d-first on top of the plain search: v2's plan stays
-mostly below N' 6k, and its plain law is off for the integrated build at
-N' >= 6k (research/scheduler-v2.md, "d-first units"). Both laws also have to
+now launches d-first units, choosing the mode by the measured ratio
+(d-first from N' ~ 4.3k). Charged under a measurement-anchored truth
+(`forecast --truth anchored`), d-first adds x1.02 / 1.07 to its plan at 1
+/ 10 CPU-years and needs 1.24x less CPU for the plain-only E of 10
+CPU-years (the review's simulation: x1.14 and 1.78x at 100), close to the
+retrospective's x1.03 / 1.07 / 1.13 for d-first on top of the plain search
+(research/scheduler-v2.md, "d-first units"). The laws also have to
 learn engine 3's level first: re-run `forecast` after some engine-3 units. The
 17-18x is measured speed; E at a fixed budget grows only ~3x because
 E(C) rises slowly with C. Search strategy multiplies with it: the first

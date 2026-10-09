@@ -1881,7 +1881,11 @@ cx/wide's R1_SAMPLE patch):
   depends on P: 12 6 3 2 1 0 1 is at 0.99 at N 3.0k, 13 7 4 3 1 1 at 1.25
   at 4.1k. `--diag-first-min-n` stays 5000: sums at 3.8-5k would save at
   most ~10%, and below 5000 the plain search's semi-magic squares feed the
-  models.
+  models. Scheduler v2 chooses the mode by this pooled ratio (with its 7%
+  calibration stream: d-first from N' ~ 4.3k), not by the quotient of its
+  two time laws, which put the switch at ~9-10k (research/scheduler-v2.md,
+  "d-first units"); six more pool sums at N ~6.1k measured 0.69-0.82, on
+  the pooled law.
 * **Time per sum**, t = a (N / 4000)^b CPU-s, least squares on ln t over the
   11 sums with N >= 3k (4.1-31.7k, the 3 above 256 labels included):
 
