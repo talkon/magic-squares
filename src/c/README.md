@@ -76,8 +76,12 @@ labels (two 64-bit words) whatever |V_d|, 1.05-1.12x at 125-132, even at
 133-136 (paired per d on 20 sums at N = 0.7-7.6k), which made whole sums
 with at most 128 labels 1.1-1.6x slower (N 0.7-3k). Gated, none of the 20
 sums is slower and those at N >= 5.7k keep their gain; the dsum record's
-`nd_class` counts the d searched with it (research/ideas.md, "Integration
-of the round-2 d-first changes"). Per sum, against the plain
+`nd_class` counts the d whose search ran it (gated in, with the top-label
+root on the carried path; not under `--d-plain-root`) (research/ideas.md,
+"Integration of the round-2 d-first changes"). With the star cover below,
+engine 4's d-first CPU per sum is e^-0.103 (N'/4000)^-0.204 x engine 3's
+(paired on 23 sums at N' 3.4-31.7k; 0.90-0.92x at 3.4-4.7k, 0.78-0.84x at
+5.9-7.6k, 0.56-0.73x at 11.7-31.7k). Per sum, against the plain
 search of this code (CPU, paired, research/ideas.md "Measurements on the
 integrated binary" and "Class support in the V_d searches"): 1.24x at N =
 4.1k, 0.53x at 6.7k, 0.51x at 7.6k, 0.38x at 11.7k, 0.32-0.34x at
@@ -94,7 +98,8 @@ the number of d of the sum; `truncated`: a V_d hit `--node-limit`; `time`:
 the chunk's process CPU) and a "dsum"
 record (`pairs`, `est_pairs`, `est_time` with `--d-stride`; `complete` when
 every d was searched; `time` is the process CPU of the index and the d
-loop, `est_time` its estimate for the whole d range, `cpu` that plus the
+loop, `est_time` its estimate for the whole d range as run (with the star
+cover: its skipped star d cost nothing), `cpu` that plus the
 reduction and the sum's share of the enumeration as in a "sum" record, and
 `vd_time` / `setup_time` / `search_time` are wall-clock sums over d), not
 "square" / "sum" records. The "done" record of a
@@ -139,9 +144,13 @@ takes 1.05-1.08x less CPU per sum (per expected magic square). Every magic
 square is still found and flagged (the partner test uses every d), once
 instead of twice when x* is on one of its diagonals; the pairs of the star
 d are estimated (`est_pairs` = the others' pairs + K x the searched star
-d's), and the dsum record gets `star_x`, `star_k`, `nd_star`,
-`nd_star_skipped`, `nd_star_searched`, `pairs_star`, `cpu_star`,
-`pred_star_share`, `star_freq_rank`, `star_time` (see msearch.c); a
+d's; `est_nodes` and `est_time` stay those of the run as made, and
+`est_nodes_nostar` / `est_time_nostar` weigh a searched star d K x, the
+cost of the d range without the star cover), and the dsum record gets
+`star_x`, `star_k`, `nd_star`, `nd_star_skipped`, `nd_star_searched`,
+`pairs_star`, `cpu_star`, `pred_star_share`, `star_freq_rank`,
+`star_time` (see msearch.c; `se_*` treat the star d searched at rank % K
+as a random sample of them, which is approximate for few star d); a
 "dchunk" record gets `star_x`, `star_k`, `star_only`, `nd_star_skipped`,
 `nd_other_skipped` and `pairs_star` (with `d_stride` 1 every index of
 [d_lo, d_hi) was then searched or skipped by the star filter).
@@ -159,7 +168,11 @@ group that holds the most of the sum's d loop with its own K and
 `--dfirst-star-x` x*, and records K and x* in its launched records. It
 counts a sum's pairs and their estimate over every d from that group's
 chunks (each weighted by the share of its range not seen before in the
-group), and v1 a complete sum's from `est_pairs`.
+group: exact for the planner's disjoint units and for duplicates,
+approximate for a hand-made unit that partly overlaps), and v1 a complete
+sum's from `est_pairs`. `scripts/calibrate.py` weighs a "dsquare" record
+on a star d (its `dvec` holds x*) d_stride x K, and leaves the records of
+K = -1 and star-only runs out of its estimates.
 
 ### r1 sampling (measurements)
 

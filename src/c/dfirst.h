@@ -67,8 +67,9 @@ typedef struct {
   uint64_t nd_star_skipped, nd_other_skipped, nd_star;
   uint64_t nodes_star, pairs_star;
   double d_cpu_star, d_cpu2_star, d_pairs2_star;
-  /* the d searched with the class support on (opts->class_support and the
-   * gate of dfirst_set_class_min_labels) */
+  /* the d whose search ran the class support (opts->class_support, the
+   * gate of dfirst_set_class_min_labels, and search_stats_t.class_used:
+   * the top-label root on the carried path, V_d of at least 2n vectors) */
   uint64_t nd_class;
 } dfirst_stats_t;
 

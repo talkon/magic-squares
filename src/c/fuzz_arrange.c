@@ -1344,7 +1344,8 @@ static int dfirst_check(uint64_t seed, const vec_list_t *l,
   dfirst_t *df = dfirst_new(l, 0, l->count, &dl, 0, dl.count);
   dfirst_set_top_root(df, top_root);
   /* the gate of the class support (dfirst_set_class_min_labels; msearch's
-   * default 129 would leave it off in these small instances): in every V_d,
+   * default, DFIRST_CLASS_MIN_LABELS = 137, would leave it off in these
+   * small instances): in every V_d,
    * or on one seed in three from a label count in 1..L + 1, so that it
    * splits the V_d of an instance */
   dfirst_set_class_min_labels(

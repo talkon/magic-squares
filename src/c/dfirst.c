@@ -629,7 +629,10 @@ dfirst_stats_t dfirst_search(dfirst_t *df, size_t lo, size_t hi, size_t stride,
     }
     if (sub.count >= (size_t)(2 * n))
       ss = search_vectors(&sub, 0, sub.count, &o, inner_cb, &ic);
-    st.nd_class += o.class_support != 0;
+    /* (the d whose search the class support actually ran in: not a V_d
+     * the gate left out, nor one searched without the top-label root, on
+     * the matrices path, or too small to search) */
+    st.nd_class += ss.class_used != 0;
     st.nodes += ss.nodes;
     st.pairs += ic.pairs;
     st.partners += ic.partners;

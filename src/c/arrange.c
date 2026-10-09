@@ -1271,6 +1271,7 @@ search_stats_t search_vectors(const vec_list_t *l, size_t start, size_t count,
   st.nodes = s.nodes;
   st.squares = s.squares;
   st.truncated = s.stop == 2;
+  st.class_used = s.ncls > 0;
   st.num_labels = (int)L;
   st.setup_seconds = t1 - t0;
   if (s.r1_ns) {

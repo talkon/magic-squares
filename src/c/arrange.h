@@ -31,6 +31,9 @@ typedef struct {
   double setup_seconds;/* relabelling + intersection tables */
   int num_labels;      /* distinct numbers among the vectors */
   int truncated;       /* 1 if the node limit was hit */
+  int class_used;      /* the class support ran (opts.class_support with
+                          the carried path, the top-label root and every
+                          vector in one class) */
   /* r1 sampling (search_opts_t r1_*; all 0 otherwise): the number of first
    * rows searched, and estimates of the full search's totals (sum over the
    * sampled r1 of stride x value) with their standard errors. est_squares

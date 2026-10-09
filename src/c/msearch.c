@@ -65,7 +65,8 @@
  *                     with at least L labels (default 137: in the
  *                     narrower V_d it cost more than it saved, 1.33-1.47x
  *                     their CPU at <= 124 labels; dfirst.h); 0: every V_d.
- *                     The dsum record has nd_class, the d searched with it
+ *                     The dsum record has nd_class, the d whose search
+ *                     ran it (gated in, top-label root, carried path)
  *   --calib-r1-stride k   for each d-first sum, also run the plain search
  *                     on every k-th first row r1 (random offset), which
  *                     estimates the sum's semi-magic squares and plain time
@@ -150,11 +151,17 @@
  * CPU, over the whole list), star_freq_rank (x*'s rank by the number of d
  * containing it), pred_share_top_freq (that of the most frequent number)
  * and star_time (the process CPU of choosing x*, in time and cpu, not
- * scaled in est_time); its est_pairs, est_nodes and est_time weigh a
- * searched star d K x (d_stride x K; with K = -1 they cover the d without
- * x* only, with --dfirst-star-only the star d only), and se_pairs /
+ * scaled in est_time); its est_pairs weighs a searched star d K x
+ * (d_stride x K; with K = -1 it covers the d without x* only, with
+ * --dfirst-star-only the star d only), while est_nodes and est_time are
+ * those of the run as made over the d range (each searched d weighs
+ * d_stride, a skipped star d nothing) and est_nodes_nostar,
+ * est_time_nostar those of the d range without the star filter (a
+ * searched star d weighs d_stride x K, as in est_pairs); se_pairs /
  * se_time are those of the two strata (star d and the others), each
- * sampled at random. A dchunk record has star_x, star_k, star_only,
+ * taken as a simple random sample of its d (approximate: the star d are
+ * searched at a fixed rank % K, a systematic sample, which overweights
+ * the star stratum of est_pairs by at most (K - 1) / nd_star_all). A dchunk record has star_x, star_k, star_only,
  * nd_star_skipped, nd_other_skipped and pairs_star then (with d_stride 1
  * every d of [d_lo, d_hi) was searched or skipped by the star filter). With --diag-first the "done" record has "mode":"dfirst" (and
  * diag_first_min_n): its range then also holds the d-first sums, which
@@ -193,7 +200,7 @@
  * bitsets up to 512 labels, the pretest (cx/integrated, October 2026):
  * 0.66-0.89x engine 2's CPU at 129-256 labels, 0.26x above; 4 = the
  * d-first search's class support (gated) and star cover (round 2, October
- * 2026): d-first CPU per sum x e^-0.138 (N/4000)^-0.162, the plain search
+ * 2026): d-first CPU per sum x e^-0.103 (N'/4000)^-0.204, the plain search
  * unchanged; keep scripts/scheduler.py ENGINE in step) */
 #define ENGINE_VERSION 4
 
@@ -559,6 +566,7 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
   double se_time = 0, se_pairs = 0;
   double est_pairs = k * (double)tot.pairs, est_nodes = k * (double)tot.nodes;
   double est_time = t_index + k * (cpu - t_index);
+  double est_nodes_nostar = 0, est_time_nostar = 0;
   if (!star && m >= 2) {
     const double f = Nd * Nd * (1 - m / Nd) / m / (m - 1);
     const double ct = tot.d_cpu; /* the sum over d of the per-d CPU */
@@ -580,26 +588,44 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
                  ps = (double)tot.pairs_star;
     const double co = tot.d_cpu - tot.d_cpu_star, cs = tot.d_cpu_star;
     est_pairs = k * (w_o * po + w_s * ps);
-    est_nodes = k * (w_o * (double)(tot.nodes - tot.nodes_star) +
-                     w_s * (double)tot.nodes_star);
+    /* est_nodes and est_time: of the run as made over [lo, hi) (each d
+     * searched weighs d_stride; the skipped star d cost nothing), and
+     * est_nodes_nostar, est_time_nostar: of the d loop without the star
+     * filter (a searched star d weighs d_stride x K, as in est_pairs) */
     const double loop = cpu - t_index - t_star;
-    est_time = t_index + t_star +
-               (co + cs > 0 ? k * loop * (w_o * co + w_s * cs) / (co + cs) : 0.0);
+    est_nodes = k * (double)tot.nodes;
+    est_time = t_index + t_star + k * loop;
+    est_nodes_nostar = k * (w_o * (double)(tot.nodes - tot.nodes_star) +
+                            w_s * (double)tot.nodes_star);
+    est_time_nostar =
+        t_index + t_star +
+        (co + cs > 0 ? k * loop * (w_o * co + w_s * cs) / (co + cs) : 0.0);
+    /* (the searched star d of the range: every K-th of its nd_star_range,
+     * the population of the star stratum of est_time; that of est_pairs
+     * is every star d) */
+    const double ns_run =
+        star_k >= 1 ? (double)nd_star_range / (double)star_k : 0.0;
     double vt = 0, vp = 0;
     const struct {
-      double w, Nh, nh, sy, sy2, sp, sp2;
-    } h[2] = {{w_o, Nd - (double)nd_star_range, (double)(tot.nd - tot.nd_star),
-               co, tot.d_cpu2 - tot.d_cpu2_star, po,
-               tot.d_pairs2 - tot.d_pairs2_star},
-              {w_s, (double)nd_star_range, (double)tot.nd_star, cs,
+      double w, Nh, Nt, nh, sy, sy2, sp, sp2;
+    } h[2] = {{w_o, Nd - (double)nd_star_range, Nd - (double)nd_star_range,
+               (double)(tot.nd - tot.nd_star), co, tot.d_cpu2 - tot.d_cpu2_star,
+               po, tot.d_pairs2 - tot.d_pairs2_star},
+              {w_s, (double)nd_star_range, ns_run, (double)tot.nd_star, cs,
                tot.d_cpu2_star, ps, tot.d_pairs2_star}};
     for (int j = 0; j < 2; j++) {
-      if (h[j].w == 0 || h[j].nh < 2 || h[j].Nh <= h[j].nh)
+      if (h[j].w == 0 || h[j].nh < 2)
         continue;
-      const double f =
-          h[j].Nh * h[j].Nh * (1 - h[j].nh / h[j].Nh) / h[j].nh / (h[j].nh - 1);
-      vt += f * (h[j].sy2 - h[j].sy * h[j].sy / h[j].nh);
-      vp += f * (h[j].sp2 - h[j].sp * h[j].sp / h[j].nh);
+      if (h[j].Nh > h[j].nh) {
+        const double f = h[j].Nh * h[j].Nh * (1 - h[j].nh / h[j].Nh) /
+                         h[j].nh / (h[j].nh - 1);
+        vp += f * (h[j].sp2 - h[j].sp * h[j].sp / h[j].nh);
+      }
+      if (h[j].Nt > h[j].nh) {
+        const double f = h[j].Nt * h[j].Nt * (1 - h[j].nh / h[j].Nt) /
+                         h[j].nh / (h[j].nh - 1);
+        vt += f * (h[j].sy2 - h[j].sy * h[j].sy / h[j].nh);
+      }
     }
     se_time = vt > 0 ? sqrt(vt) : 0;
     se_pairs = vp > 0 ? sqrt(vp) : 0;
@@ -637,13 +663,14 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
             "\"nd_other_skipped\":%lu,\"pairs_star\":%lu,\"nodes_star\":%lu,"
             "\"cpu_star\":%.6f,\"pred_star_share\":%.6g,"
             "\"star_freq_rank\":%d,\"nd_star_all\":%lu,"
-            "\"pred_share_top_freq\":%.6g,\"star_time\":%.6f",
+            "\"pred_share_top_freq\":%.6g,\"star_time\":%.6f,"
+            "\"est_nodes_nostar\":%.6g,\"est_time_nostar\":%.6g",
             (unsigned long)sx.x, star_k, star_only,
             (unsigned long)nd_star_range, (unsigned long)tot.nd_star_skipped,
             (unsigned long)tot.nd_star, (unsigned long)tot.nd_other_skipped,
             (unsigned long)tot.pairs_star, (unsigned long)tot.nodes_star,
             tot.d_cpu_star, sx.share, sx.freq_rank, (unsigned long)sx.nstar,
-            sx.top_freq_share, t_star);
+            sx.top_freq_share, t_star, est_nodes_nostar, est_time_nostar);
   fprintf(out, "}\n");
   fflush(out);
   uint64_t nodes = tot.nodes;

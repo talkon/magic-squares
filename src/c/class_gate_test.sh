@@ -51,4 +51,10 @@ nz=$(echo "$z" | field nodes)
 # a gate above every V_d: as without the class support
 h=$($m --class-support-min-labels 100000 --d-range 0:100 --sums $a)
 [ "$(echo "$h" | field nodes)" = "$no" ] && [ "$(echo "$h" | field nd_class)" = 0 ] || fail "1900: L max"
+# the plain root (no top-label root): the class support cannot run, so no
+# d counts in nd_class, and the nodes are those without it
+r=$($m --class-support-min-labels 0 --d-plain-root --d-range 0:100 --sums $a)
+rn=$($m --no-class-support --d-plain-root --d-range 0:100 --sums $a)
+[ "$(echo "$r" | field nd_class)" = 0 ] && [ "$(echo "$r" | field nodes)" = "$(echo "$rn" | field nodes)" ] ||
+  fail "1900: plain root nd_class $(echo "$r" | field nd_class)"
 echo "class support gate ok"
