@@ -2150,6 +2150,80 @@ def test_commands_v2():
         print(f"commands (analytic) ok ({len(units)} units)")
 
 
+def test_machine():
+    """forecast / run --machine (scripts/machine_cal.py's cal.json): a unit
+    file's machine record scales the CPU of its records to reference CPU in
+    the summary (d-first records at the d-first speed); unit_charge_parts
+    adds up to unit_charge; forecast --machine at speed 0.5 gives E at H
+    instance-hours equal to E at H / 2 reference CPU-hours; msearch's first
+    record names its search path"""
+    import numpy as np
+    P = (12, 6, 3, 2, 1, 1)
+    sums = [(S, S % 3) for S in range(880, 900)]
+    with tempfile.TemporaryDirectory() as state:
+        units = os.path.join(state, "units")
+        os.makedirs(units)
+        store = scheduler.ProfileStore(state, None, 6)
+        full = write_unit(os.path.join(units, "u1.jsonl"), P, sums, done=(880, 899))
+        ref = scheduler.Summary(state, 6)
+        ref.update(units, store)
+        mrec = scheduler.machine_record(P, 880, "abc", {"plain": 0.5, "dfirst": 0.25})
+        with open(os.path.join(units, "u1.jsonl"), "w") as f:
+            f.write(json.dumps(mrec) + "\n" + full)
+        m = scheduler.Summary(state, 6)
+        m.update(units, store)
+        assert m.totals["sums"] == ref.totals["sums"] == 20 and m.totals["other_n"] == 0
+        assert abs(m.totals["cpu"] / ref.totals["cpu"] - 0.5) < 1e-9, (m.totals, ref.totals)
+        assert m.files["u1.jsonl"]["speed"] == {"plain": 0.5, "dfirst": 0.25}
+        assert m.cover == ref.cover
+    r = {"type": "dsum", "cpu": 8.0, "est_time": 100.0, "time": 9.0, "nodes": 5}
+    s = scheduler.scale_record(r, {"plain": 0.5, "dfirst": 0.25})
+    assert s["cpu"] == 2.0 and s["est_time"] == 25.0 and s["time"] == 2.25 and s["nodes"] == 5
+    assert r["cpu"] == 8.0
+    s = scheduler.scale_record(dict(r, type="csum"), {"plain": 0.5, "dfirst": 0.25})
+    assert s["cpu"] == 4.0
+    # unit_charge_parts: plain units have no d-first part; a d-first unit's
+    # parts add up to its charge under each truth
+    P = (13, 7, 4, 3, 1, 1)
+    with tempfile.TemporaryDirectory() as state:
+        cands, sc, plan = make_v2([P], state, unit_time=1e9)
+        for truth in ("laws", "measured", "anchored"):
+            u = scheduler.UnitV2(P, 2100, 2100, 0, 50.0, 0, 0, 0, None, None, None, "plain")
+            pl, df = scheduler.unit_charge_parts(sc, u, truth)
+            assert df == 0.0 and abs(pl - scheduler.unit_charge(sc, u, truth)) < 1e-9
+            u = u._replace(mode="dfirst", dlo=0, dhi=100, nd=1000, calib=10, frac=0.25)
+            pl, df = scheduler.unit_charge_parts(sc, u, truth)
+            assert df > 0 and pl > 0 and abs(pl + df - scheduler.unit_charge(sc, u, truth)) < 1e-9
+    # forecast --machine at half speed: H instance-hours = H / 2 CPU-hours
+    with tempfile.TemporaryDirectory() as state:
+        cal = os.path.join(state, "cal.json")
+        with open(cal, "w") as f:
+            json.dump({"plain_speed": 0.5, "dfirst_speed": 0.5, "workers": 2,
+                       "cpu": {"model": "test"}, "build": {"path": "carry512"}}, f)
+        out = run("--state", state, "forecast", "--only", SMALL, "--hours", "1", "--draws", "0")
+        mark = [l for l in out.split("\n") if l.strip().startswith("0.000114 ")]
+        assert mark, out
+        e_ref = float(mark[0].split()[2])
+        out = run("--state", state, "forecast", "--only", SMALL, "--hours", "1", "--draws", "0",
+                  "--machine", cal, "--instance-hours", "2")
+        line = [l for l in out.split("\n") if l.startswith("on this machine: 2 instance-hours")]
+        assert line, out
+        e_m = float(re.search(r"E = ([0-9.e+-]+)", line[0]).group(1))
+        assert abs(e_m / e_ref - 1) < 0.01, (e_m, e_ref, out)
+        assert "P(>=1 magic square) = " in line[0] and "inst-hours" in out
+    # the first record of an msearch run names its search path
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "o.jsonl")
+        subprocess.run([scheduler.binary("msearch"), "--sums", "391", "10", "6", "3", "1", "0",
+                        "1", "--out", out], check=True)
+        recs = [json.loads(l) for l in open(out)]
+        assert recs[0]["path"] in ("carry512", "matrix") or recs[0]["path"].startswith("carry")
+        assert isinstance(recs[0]["isa"], list)
+        assert all("path" not in r for r in recs[1:])
+        assert recs[-1]["type"] == "sum" and recs[-1]["squares"] == 2
+    print("machine ok")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     if len(sys.argv) > 1:
@@ -2179,6 +2253,7 @@ if __name__ == "__main__":
     test_dfirst_star()
     test_dfirst_star_cover()
     test_calibration_target()
+    test_machine()
     test_no_enumerate()
     test_commands_v2()
     test_commands()

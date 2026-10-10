@@ -104,12 +104,15 @@ usage:
                                           the first search already did)
     scheduler.py profile [--workers K]    analytic: model profiles of the pool
                                           (otherwise done by the first command)
-    scheduler.py run [--workers K] [--hours H] [--unit-time T]
+    scheduler.py run [--workers K] [--hours H] [--unit-time T] [--machine cal.json]
     scheduler.py plan [--top K]           show the current ranking
     scheduler.py forecast [--hours H]     predicted squares and magic squares
                                           for the next H CPU-hours (analytic:
                                           composition, uncertainty band;
-                                          --sample F for a faster estimate)
+                                          --sample F for a faster estimate;
+                                          --machine cal.json --instance-hours H:
+                                          E and P(>=1) after H hours of a
+                                          machine, scripts/machine_cal.py)
     scheduler.py fit                      refit the model from all results
     scheduler.py report                   summary of results, calibration
                                           (obs/pred), best squares
@@ -128,6 +131,7 @@ Needs numpy (always for analytic; for `fit` and refits with regression).
 import argparse
 import collections
 import glob
+import hashlib
 import json
 import math
 import os
@@ -1264,6 +1268,8 @@ def cmd_emit(args):
 
 def cmd_forecast(args):
     """predicted squares and magic squares for the next CPU-hours of search"""
+    if args.hours is None:
+        args.hours = 8766.0
     sch = Scheduler(args)
     cands = sch.candidates()
     # predicted numbers of squares, without the exploration bonus
@@ -2162,6 +2168,39 @@ def dsum_est_pairs(r):
     return float(r.get("est_pairs", r.get("pairs", 0)))
 
 
+# the CPU and time fields of msearch records that a machine record scales
+# to reference CPU (scheduler.py run --machine)
+MACHINE_TIME_KEYS = ("cpu", "time", "setup_time", "enum_time", "index_time", "est_time",
+                     "se_time", "reduce_time", "vd_time", "search_time")
+DFIRST_TYPES = ("dsum", "dchunk", "dsquare")
+
+
+def machine_record(P, S, mid, speed):
+    """the record run --machine writes at the top of a unit file: the
+    machine's per-process speeds (reference CPU seconds per process CPU
+    second, scripts/machine_cal.py's per_process), by which the summary
+    scales the CPU of the file's records, so that the time laws learn
+    reference CPU from every machine"""
+    return {"type": "machine", "n": None, "P": list(P), "S": S, "machine": mid,
+            "speed": {"plain": float(speed["plain"]), "dfirst": float(speed["dfirst"])}}
+
+
+def scale_record(r, speed):
+    """a msearch record with its CPU and times in reference CPU seconds
+    (speed: a machine record's per-process speeds; d-first records at the
+    d-first speed, the others at the plain speed)"""
+    if not speed or r.get("type") in ("square", "csquare", "done", "skip"):
+        return r
+    f = float(speed["dfirst" if r.get("type") in DFIRST_TYPES else "plain"])
+    if f == 1.0:
+        return r
+    r = dict(r)
+    for k in MACHINE_TIME_KEYS:
+        if isinstance(r.get(k), (int, float)):
+            r[k] = r[k] * f
+    return r
+
+
 def sum_cpu(r):
     """CPU seconds of a msearch sum record: the process CPU time where
     msearch reports it ("cpu"), else its wall times"""
@@ -2364,9 +2403,15 @@ class Summary:
                 continue
             if not isinstance(r, dict) or "type" not in r:
                 continue
+            if r["type"] == "machine":
+                # (run --machine: the records after it ran on that machine)
+                st["speed"] = r.get("speed")
+                continue
             if r.get("n") != self.n:
                 self.totals["other_n"] += 1
                 continue
+            if st.get("speed"):
+                r = scale_record(r, st["speed"])
             # the sums of this file that its "done" record must not cover
             # (fst["holes"], kept across the incremental reads): d-first
             # sums not searched in full, the plain sums that a --d-range
@@ -3803,6 +3848,8 @@ class SchedulerV2:
 
     def command(self, u, out, check=True):
         nl, tl = self.scorer.limits(u, self.args.unit_time)
+        # (the limits are in reference CPU: a slower machine gets more time)
+        tl /= getattr(self, "machine_slow", 1.0)
         return [binary("msearch", check), "--vec-size", str(self.n), "--min-sum", str(u.lo),
                 "--max-sum", str(u.hi), *dfirst_args(u), "--time-limit", f"{tl:.0f}",
                 "--node-limit", str(nl), "--out", out, *map(str, u.P)]
@@ -3817,8 +3864,36 @@ class SchedulerV2:
         name = f"{int(time.time())}_{seq:06d}_{p_str(P, '_')}_{lo}_{hi}{unit_tag(u)}.jsonl"
         return os.path.join(self.units, name)
 
+    def set_machine(self, path):
+        """run --machine cal.json: write a machine record at the top of each
+        unit file (the summary scales its records' CPU to reference CPU),
+        log the machine in the state (machines_<n>.jsonl), and scale
+        --time-limit by the slower of its per-process speeds"""
+        with open(path, "rb") as f:
+            raw = f.read()
+        cal = json.loads(raw)
+        pp = cal.get("per_process") or {}
+        if not pp.get("plain") or not pp.get("dfirst"):
+            sys.exit(f"{path}: no per_process plain and dfirst speeds (run scripts/machine_cal.py)")
+        self.machine = {"id": hashlib.sha256(raw).hexdigest()[:12],
+                        "speed": {"plain": float(pp["plain"]), "dfirst": float(pp["dfirst"])}}
+        self.machine_slow = min(1.0, self.machine["speed"]["plain"], self.machine["speed"]["dfirst"])
+        with open(os.path.join(self.dir, f"machines_{self.n}.jsonl"), "a") as f:
+            f.write(json.dumps({"t": time.time(), "id": self.machine["id"], "file": os.path.abspath(path),
+                                "host": cal.get("host"), "model": (cal.get("cpu") or {}).get("model"),
+                                "path": (cal.get("build") or {}).get("path"),
+                                "workers": cal.get("workers"), "per_process": self.machine["speed"],
+                                "plain_speed": cal.get("plain_speed"),
+                                "dfirst_speed": cal.get("dfirst_speed")}) + "\n")
+        if cal.get("workers") and cal["workers"] != self.args.workers:
+            log(f"note: {path} recommends {cal['workers']} workers (running {self.args.workers})")
+        log(f"machine {path} ({self.machine['id']}): per-process speed plain "
+            f"{pp['plain']:.3f}, d-first {pp['dfirst']:.3f} reference CPU per CPU second")
+
     def run(self):
         args = self.args
+        if getattr(args, "machine", None):
+            self.set_machine(args.machine)
         plan = self.planner()
         deadline = time.time() + args.hours * 3600 if args.hours else None
         running = {}
@@ -3876,6 +3951,11 @@ class SchedulerV2:
                         break
                     path = self.unit_path(u.P, u.lo, u.hi, u)
                     fresh = self.cands.key(u.a) not in self.summary.perP
+                    if getattr(self, "machine", None):
+                        # (msearch appends to its --out file)
+                        with open(path, "a") as f:
+                            f.write(json.dumps(machine_record(u.P, u.lo, self.machine["id"],
+                                                              self.machine["speed"])) + "\n")
                     proc = subprocess.Popen(self.command(u, path), stdout=subprocess.DEVNULL,
                                             env=msearch_env())
                     running[proc] = (u.a, path)
@@ -4160,7 +4240,18 @@ TIME_TRUTH_DFIRST = {2: 0.969, 3: 0.848, 4: 0.558, 5: 0.379}
 
 
 def unit_charge(sc, u, truth="laws"):
-    """CPU seconds charged for a planned unit u: its predicted time (truth
+    """CPU seconds charged for a planned unit u (see unit_charge_parts)"""
+    pl, df = unit_charge_parts(sc, u, truth)
+    return pl + df
+
+
+def unit_charge_parts(sc, u, truth="laws"):
+    """(plain, d-first) CPU seconds charged for a planned unit u: the d-first
+    part is the d-first search of a d-first unit, the plain part the rest
+    (a plain unit, a d-first unit's calibration stream, which is a sampled
+    plain search, and the unit's overhead); a machine's plain and d-first
+    speeds (forecast --machine) convert each to instance time. In all: its
+    predicted time (truth
     "laws"); under the "measured" truth (TIME_TRUTH_PLAIN, _DFIRST: the
     calibration search's measured CPU per N' band) a plain sum costs the
     plain law and a d-first sum the d-first law, each x the factor of its N'
@@ -4170,10 +4261,18 @@ def unit_charge(sc, u, truth="laws"):
     measured ratio, and the d-first law back-tests at 0.94 where the plain
     law is off by 0.3-1.35x), the plain law at N' <= 3k, geometrically
     blended between; a calibration stream the plain cost / k"""
-    if truth == "laws":
-        return u.time
     np = _np()
     am = _am()
+    if truth == "laws":
+        if u.mode != "dfirst":
+            return u.time, 0.0
+        # (the d-first share of the predicted time: frac x the d-first law
+        # of its sums, the rest is its calibration stream and overhead)
+        S = (np.array([float(u.lo)]) if u.dlo is not None
+             else np.arange(u.lo, u.hi + 1, dtype=float))
+        td = sc.eval_modes(u.a, S)[3]
+        d = min(float((u.frac * td).sum()), max(u.time - am.UNIT_OVERHEAD, 0.0))
+        return u.time - d, d
     if u.dlo is not None:
         S = np.array([float(u.lo)])
     else:
@@ -4187,10 +4286,9 @@ def unit_charge(sc, u, truth="laws"):
         below = S < (Sg[0] - 1e-9) if len(Sg) else np.ones(len(S), bool)
         tpm[below] = tdm[below] = am.SUM_OVERHEAD
         if u.mode == "dfirst":
-            c = float((u.frac * tdm + (tpm / u.calib if u.calib else 0.0)).sum())
-        else:
-            c = float(tpm.sum())
-        return c + am.UNIT_OVERHEAD
+            return (float((tpm / u.calib).sum()) if u.calib else 0.0) + am.UNIT_OVERHEAD, \
+                float((u.frac * tdm).sum())
+        return float(tpm.sum()) + am.UNIT_OVERHEAD, 0.0
     if sc.policy == "off":
         c0, c1, c2, c3, c4, cb = sc._tcd
         k6 = int(sc.c.k[u.a])
@@ -4204,10 +4302,9 @@ def unit_charge(sc, u, truth="laws"):
     below = S < (Sg[0] - 1e-9) if len(Sg) else np.ones(len(S), bool)
     tpa[below] = td[below] = am.SUM_OVERHEAD
     if u.mode == "dfirst":
-        c = float((u.frac * td + (tpa / u.calib if u.calib else 0.0)).sum())
-    else:
-        c = float(tpa.sum())
-    return c + am.UNIT_OVERHEAD
+        return (float((tpa / u.calib).sum()) if u.calib else 0.0) + am.UNIT_OVERHEAD, \
+            float((u.frac * td).sum())
+    return float(tpa.sum()) + am.UNIT_OVERHEAD, 0.0
 
 
 def forecast_truth(args):
@@ -4225,11 +4322,46 @@ def forecast_truth(args):
     return "measured" if getattr(args, "shipped", False) else "laws"
 
 
+def load_machine(path):
+    """(plain speed, d-first speed, cal) from scripts/machine_cal.py's
+    cal.json: reference CPU-hours per instance-hour of the whole instance
+    at its recommended worker count, for the plain and d-first search"""
+    with open(path) as f:
+        cal = json.load(f)
+    ps, ds = cal.get("plain_speed"), cal.get("dfirst_speed")
+    if not ps or not ds or ps <= 0 or ds <= 0:
+        sys.exit(f"{path}: no plain_speed and dfirst_speed (run scripts/machine_cal.py)")
+    return float(ps), float(ds), cal
+
+
+def machine_desc(cal, ps, ds):
+    c = cal.get("cpu", {})
+    b = cal.get("build", {})
+    return (f"{c.get('model') or cal.get('host', '?')}, path {b.get('path', '?')}, "
+            f"{cal.get('workers', '?')} workers: plain {ps:.3g}, d-first {ds:.3g} reference "
+            f"CPU-hours per instance-hour")
+
+
 def v2_forecast(args):
     """simulate the planner from the current state, with posterior means
     (no optimism) and every unit taking its predicted time and finding its
-    predicted squares"""
+    predicted squares; with --machine (scripts/machine_cal.py's cal.json)
+    each unit also takes instance time, its plain part at the machine's
+    plain speed and its d-first part at its d-first speed, and E and
+    P(>=1) are reported at --instance-hours H"""
     np = _np()
+    yr = 8766.0
+    mach = getattr(args, "machine", None)
+    ih = getattr(args, "instance_hours", None)
+    if ih is not None and not mach:
+        sys.exit("--instance-hours needs --machine cal.json")
+    ps = ds = None
+    if mach:
+        ps, ds, cal = load_machine(mach)
+    if getattr(args, "hours", None) is None:
+        # (default: 1 CPU-year; with --instance-hours, through 10 CPU-years
+        # and H at the faster of the two speeds)
+        args.hours = yr if ih is None else max(10 * yr, ih * max(ps, ds) * 1.001)
     sch = SchedulerV2(args)
     if args.shipped:
         # the shipped calibration: prior class factors and time law, no per-P
@@ -4251,9 +4383,9 @@ def v2_forecast(args):
         rng = np.random.default_rng(args.seed)
         drop = rng.random(len(sch.cands)) >= frac
         sch.scorer.lnfsq[drop] = -np.inf
-    yr = 8766.0
     budget = args.hours * frac
-    marks = {h for h in (0.1 * yr, yr, 10 * yr, 100 * yr) if h <= args.hours} | {args.hours}
+    inst_budget = ih * frac if ih is not None else None
+    marks = {h for h in (0.1 * yr, yr, 3 * yr, 10 * yr, 100 * yr) if h <= args.hours} | {args.hours}
     if args.hours < 0.1 * yr:
         marks |= {args.hours * f for f in (0.01, 0.1, 0.3)}
     marks = [m * frac for m in sorted(marks)]
@@ -4273,23 +4405,34 @@ def v2_forecast(args):
     dmagic = dhours = 0.0
     ndunits = 0
     truth = forecast_truth(args)
+    inst = 0.0       # instance-hours (--machine)
+    E_inst = None    # (E, CPU-hours) at --instance-hours
     if truth != "laws":
         print(f"(each unit charged under the {truth!r} truth, see --truth; the plan uses the "
               f"scheduler's laws)")
+    if mach:
+        print(f"machine {mach}: {machine_desc(cal, ps, ds)}")
     print(f"{'CPU-years':>10} {'squares':>12} {'magic squares':>14} {'P touched':>9} {'units':>9}"
-          f" {'max N':>7}  latest unit"
+          f" {'max N':>7}" + (f" {'inst-hours':>10} {'P(>=1)':>6}" if mach else "")
+          + "  latest unit"
           + (f"   (sample {frac:g} of the candidates, scaled)" if frac < 1 else ""))
 
     def line(m, tail):
         E_at[m] = magic
         print(f"{m / frac / yr:10.3g} {squares / frac:12.4g} {magic / frac:14.3g} "
-              f"{len(touched) / frac:9.0f} {nunits / frac:9.0f} {maxN:7.0f}  {tail}", flush=True)
+              f"{len(touched) / frac:9.0f} {nunits / frac:9.0f} {maxN:7.0f}"
+              + (f" {inst / frac:10.4g} {1 - math.exp(-magic / frac):6.3f}" if mach else "")
+              + f"  {tail}", flush=True)
 
-    for u in sch.simulate(max_hours=budget if truth == "laws" else None, detail=True):
-        if hours >= budget:
+    for u in sch.simulate(max_hours=budget if (truth == "laws" and inst_budget is None) else None,
+                          detail=True):
+        if hours >= budget and (inst_budget is None or inst >= inst_budget):
             break
-        cu = unit_charge(sch.scorer, u, truth)
+        pl, df = unit_charge_parts(sch.scorer, u, truth)
+        cu = pl + df
         hours += cu / 3600
+        if mach:
+            inst += (pl / ps + df / ds) / 3600
         squares += u.squares
         magic += u.magic
         nunits += 1
@@ -4310,11 +4453,22 @@ def v2_forecast(args):
         if u.magic > 0:
             maxN = max(maxN, math.exp(sch.scorer.eval_sums(a, [u.hi])[3][0]))
         last_u = u
+        if inst_budget is not None and E_inst is None and inst >= inst_budget:
+            E_inst = (magic, hours)
         while marks and hours >= marks[0]:
             line(marks.pop(0), f"P={p_str(u.P)} S={u.lo}..{u.hi}{describe_dunit(u)}")
     marks_all = sorted(set(E_at) | set(marks))
     for m in marks:   # ran out of candidates
         line(m, "(no more units)")
+    if inst_budget is not None:
+        if E_inst is None:
+            print(f"(ran out of units before {ih:g} instance-hours: E at {inst / frac:.4g})")
+            E_inst = (magic, hours)
+        Eh = E_inst[0] / frac
+        print(f"on this machine: {ih:g} instance-hours = {E_inst[1] / frac / yr:.4g} reference "
+              f"CPU-years (band-weighted along the plan: {E_inst[1] / max(inst_budget, 1e-12):.3g} "
+              f"reference CPU-hours per instance-hour): E = {Eh:.3g}, P(>=1 magic square) = "
+              f"{1 - math.exp(-Eh):.3f}")
     if magic <= 0:
         return
     print(f"simulated in {time.time() - t0:.0f} s; marginal density at the end "
@@ -4570,6 +4724,10 @@ def main():
     p = sub.add_parser("run")
     common(p)
     p.add_argument("--hours", type=float, default=0, help="stop after this long (0 = never)")
+    p.add_argument("--machine", default=None,
+                   help="analytic: this machine's cal.json (scripts/machine_cal.py): the CPU of "
+                        "its records is learned as reference CPU (x its per-process speeds), "
+                        "and --time-limit is scaled for a slower machine")
     p.add_argument("--refit-every", type=int, default=50, help="refit model every K units")
     p.add_argument("--announce-score", type=int, default=7,
                    help="log squares whose best diagonal pair scores at least this")
@@ -4587,7 +4745,16 @@ def main():
 
     p = sub.add_parser("forecast")
     common(p)
-    p.add_argument("--hours", type=float, default=8766, help="CPU-hours to simulate")
+    p.add_argument("--hours", type=float, default=None,
+                   help="reference CPU-hours to simulate (default 8766; with --instance-hours, "
+                        "through 10 CPU-years and H)")
+    p.add_argument("--machine", default=None,
+                   help="analytic: a machine's cal.json (scripts/machine_cal.py): also report "
+                        "instance-hours (plain sums at its plain speed, d-first sums at its "
+                        "d-first speed) and P(>=1)")
+    p.add_argument("--instance-hours", type=float, default=None,
+                   help="analytic, with --machine: E and P(>=1) after this many hours of the "
+                        "instance")
     p.add_argument("--sample", type=float, default=1.0,
                    help="analytic: simulate on this uniform fraction of the candidates with "
                         "the budget scaled (the same greedy, faster)")

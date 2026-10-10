@@ -120,6 +120,29 @@ Each line of `plan.txt` is one `msearch` run writing to
 `scheduler.py fit` refits the model on everything found so far, and the next
 `emit` continues where the plan left off.
 
+### Pricing a machine (paid instances)
+
+Every forecast is in reference CPU-years: CPU of the fast x86 build
+(AVX-512BW, the "carry512" path) on the development machine. Before paying
+for an instance, calibrate it with its own build (about 1.5 minutes on a
+fast x86 instance):
+
+```
+python3 scripts/machine_cal.py --bin bin/msearch --out cal.json
+python3 scripts/scheduler.py forecast --shipped --machine cal.json --instance-hours 720
+python3 scripts/scheduler.py run --machine cal.json --workers K   # K: cal.json "workers"
+```
+
+`machine_cal.py` checks the build's exactness (bench quick/full nodes and
+hashes of its search path), runs four fixed sums as 1, cores and logical
+CPUs concurrent copies, and writes the instance's plain and d-first speeds
+(reference CPU-hours per instance-hour) at the best worker count. It warns
+when the build is not the carry512 path (AVX2 or ARM: ~4-12x the CPU per
+sum) or lacks VPOPCNTDQ/VBMI/GFNI/BITALG, and when SMT vCPUs add less than
+their count. `forecast --machine` reports E and P(>=1 magic square) after H
+instance-hours; `run --machine` learns the time laws in reference CPU
+(research/ideas.md, "Machine calibration").
+
 ## Performance
 
 Arrangement benchmark (`bin/bench`, single core, search time; Intel Sapphire

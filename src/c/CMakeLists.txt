@@ -202,4 +202,7 @@ if (Python3_FOUND)
   # the calibration ladder (scripts/calibrate.py, research/calibration.md)
   add_test(NAME fast_calibrate COMMAND ${Python3_EXECUTABLE}
     ${PROJECT_SOURCE_DIR}/scripts/test_calibrate.py)
+  # the machine calibration's parsers and checks (scripts/machine_cal.py)
+  add_test(NAME fast_machine_cal COMMAND ${Python3_EXECUTABLE}
+    ${PROJECT_SOURCE_DIR}/scripts/test_machine_cal.py)
 endif()

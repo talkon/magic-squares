@@ -219,6 +219,76 @@ static double cpu_time(void) {
   return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
 }
 
+/* the build of this binary, written into the first JSON record of the run
+ * (to --out or stdout; scripts/machine_cal.py and the scheduler read it):
+ * "path" is the search path of the plain search's candidate lists,
+ * "carry512" (they carry their bitsets up to 512 labels: AVX-512BW, the
+ * fast production path), "carry<64 x CARRY_MAX_W>" for a narrower carried
+ * build, or "matrix" (the N x N intersection matrices: no AVX-512BW, or
+ * -DCARRY_MAX_W=0; ~4-5x slower); "isa" the x86 ISA extensions the search
+ * code tests for that were enabled at compile time */
+static FILE *build_fp;
+static int build_written;
+
+static void build_fields(FILE *fp) {
+  search_opts_t o;
+  search_opts_default(&o);
+  int maxl = 0;
+  for (int l = 64; l <= 512; l += 64)
+    if (search_carries((uint32_t)l, &o))
+      maxl = l;
+  if (maxl)
+    fprintf(fp, "\"path\":\"carry%d\",", maxl);
+  else
+    fprintf(fp, "\"path\":\"matrix\",");
+  fprintf(fp, "\"isa\":[");
+  const char *sep = "";
+#define ISA_FLAG(m, name)                                                      \
+  do {                                                                         \
+    fprintf(fp, "%s\"" name "\"", sep);                                       \
+    sep = ",";                                                                 \
+  } while (0)
+#ifdef __AVX2__
+  ISA_FLAG(1, "avx2");
+#endif
+#ifdef __BMI2__
+  ISA_FLAG(1, "bmi2");
+#endif
+#ifdef __AVX512F__
+  ISA_FLAG(1, "avx512f");
+#endif
+#ifdef __AVX512BW__
+  ISA_FLAG(1, "avx512bw");
+#endif
+#ifdef __AVX512VPOPCNTDQ__
+  ISA_FLAG(1, "avx512vpopcntdq");
+#endif
+#ifdef __AVX512VBMI__
+  ISA_FLAG(1, "avx512vbmi");
+#endif
+#ifdef __GFNI__
+  ISA_FLAG(1, "gfni");
+#endif
+#ifdef __AVX512BITALG__
+  ISA_FLAG(1, "avx512bitalg");
+#endif
+#if defined(__aarch64__) || defined(__arm64__)
+  ISA_FLAG(1, "arm64");
+#endif
+#undef ISA_FLAG
+  fprintf(fp, "],");
+}
+
+/* the start of a JSON record, {"type":"<type>", plus the build's fields if
+ * it is the run's first record in the output */
+static void rec_begin(FILE *fp, const char *type) {
+  fprintf(fp, "{\"type\":\"%s\",", type);
+  if (fp == build_fp && !build_written) {
+    build_fields(fp);
+    build_written = 1;
+  }
+}
+
 typedef struct {
   FILE *out;
   int legacy;
@@ -272,8 +342,8 @@ static int square_found(const square_t *sq, void *vctx) {
     ctx->sp_pairs += ds.sp_count;
     ctx->s_trav += ds.s_count;
     ctx->p_trav += ds.p_count;
-    fprintf(fp, "{\"type\":\"%s\",\"n\":%d,\"P\":",
-            ctx->sampled ? "csquare" : "square", sq->n);
+    rec_begin(fp, ctx->sampled ? "csquare" : "square");
+    fprintf(fp, "\"n\":%d,\"P\":", sq->n);
     print_p_json(fp, ctx->p);
     if (ctx->sampled)
       fprintf(fp, ",\"weight\":%g", ctx->weight);
@@ -300,7 +370,8 @@ static int dsquare_found(const dsquare_t *d, void *vctx) {
   diag_stats_t ds;
   square_diag_stats(sq, &ds);
   ctx->magic_pairs += ds.best_score >= 14;
-  fprintf(fp, "{\"type\":\"dsquare\",\"n\":%d,\"P\":", sq->n);
+  rec_begin(fp, "dsquare");
+  fprintf(fp, "\"n\":%d,\"P\":", sq->n);
   print_p_json(fp, ctx->p);
   fprintf(fp, ",\"S\":%lu,\"d\":%zu,\"dvec\":[", (unsigned long)ctx->S,
           d->d_index);
@@ -402,8 +473,9 @@ static uint64_t run_sampled(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
       search_vectors(red, 0, red->count, so, square_found, ctx);
   const double cpu = cpu_time() - c0;
   ctx->sampled = 0;
+  rec_begin(out, "csum");
   fprintf(out,
-          "{\"type\":\"csum\",\"mode\":\"%s\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,"
+          "\"mode\":\"%s\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,"
           "\"S\":%lu,\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%d,",
           mode, n, pstr, (unsigned long)pexp_value(p), (unsigned long)S,
           red->count, raw, st.num_labels);
@@ -521,8 +593,9 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
     tot.d_cpu2_star += st.d_cpu2_star;
     tot.d_pairs2_star += st.d_pairs2_star;
     tot.nd_class += st.nd_class;
+    rec_begin(out, "dchunk");
     fprintf(out,
-            "{\"type\":\"dchunk\",\"n\":%d,\"P\":[%s],\"S\":%lu,\"d_lo\":%zu,"
+            "\"n\":%d,\"P\":[%s],\"S\":%lu,\"d_lo\":%zu,"
             "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
             "\"nvecs_raw\":%zu,\"nodes\":%lu,\"pairs\":%lu,\"partners\":%lu,"
             "\"time\":%.6f,\"truncated\":%d",
@@ -630,8 +703,9 @@ static uint64_t run_dfirst(FILE *out, out_ctx_t *ctx, const char *pstr, int n,
     se_time = vt > 0 ? sqrt(vt) : 0;
     se_pairs = vp > 0 ? sqrt(vp) : 0;
   }
+  rec_begin(out, "dsum");
   fprintf(out,
-          "{\"type\":\"dsum\",\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
+          "\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
           "\"Pval\":%lu,\"S\":%lu,"
           "\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%u,\"d_lo\":%zu,"
           "\"d_hi\":%zu,\"d_stride\":%zu,\"d_offset\":%zu,\"nd\":%lu,"
@@ -990,6 +1064,7 @@ int main(int argc, char *argv[]) {
       return 2;
     }
   }
+  build_fp = out;
 
   if (num_sum_list >= 0) {
     qsort(sum_list, num_sum_list, sizeof(uint64_t), u64_cmp);
@@ -1082,8 +1157,9 @@ int main(int argc, char *argv[]) {
          * sums between them, but a plain sum is searched whole, so only by
          * the unit whose d-range starts at 0 (and whose offset is 0), not
          * once per unit */
+        rec_begin(out, "skip");
         fprintf(out,
-                "{\"type\":\"skip\",\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
+                "\"mode\":\"dfirst\",\"n\":%d,\"P\":[%s],"
                 "\"S\":%lu,\"nvecs\":%zu,\"nvecs_raw\":%zu,\"d_lo\":%zu,"
                 "\"d_offset\":%ld}\n",
                 n, pstr, (unsigned long)S, red.count, raw, d_range_lo,
@@ -1139,8 +1215,9 @@ int main(int argc, char *argv[]) {
       if (legacy) {
         fprintf(out, "num searched: %lu\n", (unsigned long)st.nodes);
       } else {
+        rec_begin(out, "sum");
         fprintf(out,
-                "{\"type\":\"sum\",\"n\":%d,\"P\":[%s],\"Pval\":%lu,\"S\":%lu,"
+                "\"n\":%d,\"P\":[%s],\"Pval\":%lu,\"S\":%lu,"
                 "\"nvecs\":%zu,\"nvecs_raw\":%zu,\"labels\":%d,\"nodes\":%lu,"
                 "\"squares\":%lu,\"time\":%.6f,\"setup_time\":%.6f,"
                 "\"enum_time\":%.6f,\"cpu\":%.6f,\"truncated\":%d,\"engine\":%d}\n",
@@ -1168,8 +1245,9 @@ int main(int argc, char *argv[]) {
      * vectors produce no "sum" record) */
     char pstr[64];
     pexp_to_str(&p, pstr, ",");
+    rec_begin(out, "done");
     fprintf(out,
-            "{\"type\":\"done\",\"n\":%d,\"P\":[%s],\"min_sum\":%lu,"
+            "\"n\":%d,\"P\":[%s],\"min_sum\":%lu,"
             "\"last_sum\":%lu,\"complete\":%d,\"time\":%.3f",
             n, pstr, (unsigned long)min_sum, (unsigned long)last_sum,
             !stop || last_sum >= max_sum, wall_time() - t_start);

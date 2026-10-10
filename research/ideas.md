@@ -3031,3 +3031,163 @@ had the same outcome: 51/51, fuzz 0 fails on 3,900 seeds, bench nodes ok):
 * `python3 scripts/test_scheduler.py` (48 s) and `test_calibrate.py`: all
   ok (new: `test_cli_star`, the chained ratio level, the refit priors).
 * The paired engine 3 / engine 4 runs found the same pairs in every arm.
+
+## Machine calibration (October 2026, branch f1/machinecal)
+
+The user pays for the compute, so what matters is how many reference
+CPU-years one paid instance-hour buys. A "reference CPU-year" is a year of
+CPU on the fast x86 build (AVX-512BW, the carry512 path) on the
+development machine. Every forecast and time law is in that unit. Before
+this branch nothing measured it on the machine that would run the search.
+The ISA study (scratchpad f1/frontier/isa/ab.sh: four fixed sums, paired
+and alternating, two rounds) had found the following on this Sapphire
+Rapids KVM. `-march=cascadelake` costs 1.0-1.2x (1.05x overall), because it
+lacks VPOPCNTDQ/VBMI/GFNI/BITALG. `-march=x86-64-v3` (AVX2: the matrix
+path, the same path as ARM) costs 5.2 / 6.8 / 10.1 / 11.6x. That is E x0.45-0.50 at
+equal core-hours. Nothing yet tells a paid vCPU (an SMT thread) from a
+core.
+
+**What was built.**
+
+* `msearch` writes `"path"` (`carry512`, `carry<64 W>` or `matrix`, from
+  `search_carries` at the default options) and `"isa"` (the ISA macros the
+  search code tests that were enabled at compile time: AVX2, BMI2,
+  AVX-512F/BW/VPOPCNTDQ/VBMI, GFNI, BITALG, arm64) into the first JSON
+  record of a run. Each record writer now starts with `rec_begin`. Nothing
+  else in C changed.
+* `scripts/machine_cal.py` (stdlib only, Linux and macOS):
+  * Detects the ISA, the physical, performance and logical cores, SMT and
+    the cgroup quota. The sources are `/proc/cpuinfo` and `lscpu`, or
+    `sysctl` on macOS.
+  * Runs the exactness gate. bench quick and full must report every
+    instance ok and the node total of the build's path:
+
+    | path     | quick     | full       | prod        |
+    |----------|-----------|------------|-------------|
+    | carry512 | 1,770,779 | 14,958,507 | 50,375,738  |
+    | matrix   | 2,804,467 | 35,176,246 | 171,112,789 |
+
+    A probe sum must also give 2 squares.
+  * Runs the reference workload T1-T4 of ab.sh. It checks the nodes per
+    path (native 19,762,185 / 21,868,831 / 11,012,428 / 9,445,350;
+    portable 77,187,256 / 83,156,821 / 48,075,085 / 56,363,950), the 18
+    squares of T1 and T2, and 0 pairs for T3 and T4.
+  * Runs each sum as K concurrent copies, for K = 1, the cores and the
+    logical CPUs. The throughput is K x the reference CPU (5.40 / 5.16 /
+    6.13 / 8.48 s) / the mean wall time of a copy. The plain speed is
+    taken over T1 + T2 and the d-first speed over T3 + T4.
+  * Writes `cal.json`: the speeds at the best K (geometric mean of the two
+    bands), the recommended worker count, the per-process speeds
+    (reference CPU per process CPU second), est_time / law per sum alone
+    and at the best K, and the CPU load factor.
+  * Warns when the path is not carry512, when the fast extensions are
+    missing, when the build uses extensions the CPU lacks, and when SMT
+    vCPUs add less than their count.
+  * Any node mismatch, or a path with no reference, exits 1.
+* `scheduler.py forecast --machine cal.json --instance-hours H`. Each
+  planned unit is split into a plain part (plain sums, the calibration
+  stream and the overhead) and a d-first part (`unit_charge_parts`). The
+  parts are charged at the machine's plain and d-first speed, so the
+  conversion is band-weighted along the plan itself. The forecast prints
+  instance-hours and P(>=1) at each mark, and E and P(>=1) at H.
+  `--hours` now defaults to 1 CPU-year, or through 10 CPU-years and H.
+  The marks now include 3 CPU-years.
+* `scheduler.py run --machine cal.json` writes a `{"type": "machine",
+  "speed": per_process}` record at the top of each unit file (msearch
+  appends to it). The summary scales the CPU and time fields of the
+  file's records by that speed: d-first records by the d-first speed, the
+  others by the plain speed. The time laws then learn reference CPU from
+  every machine. `--time-limit` is divided by the slower per-process
+  speed, and the machine is logged in `machines_6.jsonl`. Other readers
+  are unaffected, since they skip a record that has no `n` or an unknown
+  type.
+
+**Gates (all pass).**
+
+* bench quick / full / prod: 1,770,779 / 14,958,507 / 50,375,738 nodes,
+  all instances ok (bench is unchanged).
+* T1's 19 records are identical to 80d15cc's apart from the new fields
+  and the times. T1-T4 nodes are identical.
+* `ctest -R fast_`: 52 of 52 pass. The new tests are `fast_machine_cal`
+  and `test_machine` in `fast_scheduler`.
+* `forecast --shipped --hours 87660 --sample 0.1 --seed 1 --draws 0` on
+  smallN's state reproduces 0.120 / 0.185 / 0.283 exactly.
+* A synthetic cal.json at speed 0.5 gives E = 0.12 at 17,532
+  instance-hours and 0.283 at 175,320. These equal E(1) and E(10
+  CPU-years) exactly, inside the 1% tolerance. The test does the same on
+  the small P set.
+* The ISA parsers pass on canned text for Sapphire Rapids (no SMT), Zen 3
+  (AVX2), Zen 4 (full AVX-512), Cascade Lake (flagged as the cascadelake
+  class), Graviton and an M1 (sysctl, 4 performance cores), and on an
+  Intel Mac.
+* A wrong reference (quick 1,770,780, or T1 19,762,186) exits 1.
+
+**Measurements** (this 4-core shared KVM, `nice -n 10`, K = 1 only:
+one heavy process at a time; native, v3, native in turn; about 5.5
+CPU-minutes in all).
+
+| build | T1 | T2 | T3 | T4 | plain speed | d-first speed | wall |
+|---|---|---|---|---|---|---|---|
+| native, run 1 | 5.61 s | 5.41 | 6.12 | 8.51 | 0.958 | 0.999 | 29 s |
+| native, run 2 | 5.81 | 5.49 | 6.22 | 8.78 | 0.935 | 0.974 | 30 s |
+| x86-64-v3 | 28.03 | 35.40 | 64.37 | 101.06 | 0.166 | 0.088 | 245 s |
+
+The table gives the mean wall time per copy, and the speeds in
+reference CPU-hours per instance-hour.
+
+* Native against ab.out: the band speeds are within 7% on both runs
+  (0.94-1.00). The per-sum wall times are 1.00-1.05x in run 1 and
+  1.02-1.08x in run 2. T1's 5.81 s and T2's 5.49 s are 7.6% and 6.4%
+  over, but T1's record CPU is 5.71 s (1.06x). The machine is shared.
+* v3 against native: slowdowns 5.2 / 6.9 / 10.5 / 11.9x, against ab.out's
+  5.2 / 6.8 / 10.1 / 11.6x (within 4%). Its speed is 0.17-0.18 of native
+  on plain sums and 0.088-0.091 on d-first sums, at the lower edge of the
+  0.09-0.25 expected. The build is flagged ("path 'matrix' ... this CPU
+  has AVX-512BW: rebuild with -march=native"). Its exactness gate passes
+  on the matrix references.
+* The plumbing of K > 1 was tested with K = 2 on T1 (11 CPU-s): 1.88
+  reference CPU-hours per instance-hour, 0.97 per process. K = cores and
+  K = logical are for the target hardware only. Here the whole native
+  calibration would be about 3 x 26 s + bench, about 1.5 min of wall time
+  on any 4-16-core instance (under 5 min). A matrix build takes about
+  4 min per K pass.
+* The single-process time law: T1 (N' 3.0k) 0.95-0.98, T2 (4.1k)
+  1.06-1.10, T3 (6.8k, d-first) 0.70-0.71, T4 (11.5k) 0.64-0.66. The
+  laws are per sum here, so smallN's 0.64-0.71x for plain sums at N'
+  1-3k is not this machine's T1. Whether it is a load effect is
+  answered only by `load_factor` on a K = cores run of the target
+  machine, which this machine's rules do not allow.
+* Forecast per paid hour (shipped, measured truth, smallN's state,
+  sample 0.1):
+
+  | build | instance-hours for 1 / 3 / 10 ref CPU-years | E at 87,660 instance-hours |
+  |---|---|---|
+  | native | 8,918 / 26,620 / 88,370 | 0.282 at 9.92 CPU-years, P(>=1) 0.246 |
+  | x86-64-v3 | 82,110 / 263,000 / 920,600 | 0.123 at 1.06 CPU-years, P(>=1) 0.116 |
+
+  The native build's band-weighted speed along the plan is 0.992, the v3
+  build's 0.106 (90% of the CPU of the plan is d-first). At equal
+  core-hours an AVX2 core yields E x0.44 (0.123 / 0.282), as the ISA
+  study predicted (x0.45-0.50).
+
+**Limits.**
+
+* The planner still plans in reference CPU. On a machine whose d-first
+  speed is relatively lower than its plain speed (the matrix path: 0.53x
+  of its own plain speed), the d-first switch should move up. It is not
+  re-optimised: forecast --machine charges the parts correctly, but the
+  plan is the reference machine's. That plan is right for any carry512
+  machine, where both speeds scale alike, and the matrix path should not
+  be rented anyway.
+* The per-process speed of `run --machine` is that of the calibration's
+  load. A run with a different worker count than cal.json's
+  `workers` is logged but not corrected.
+* `calibrate.py` and the other readers of unit files still see the raw
+  CPU of the records.
+
+**Expected gain.** No change in E per reference CPU-year: the time-law
+part is worth at most x1.06 / 1.03 / 1.01. Per paid hour, the tool avoids
+renting an AVX2 or ARM instance (E x0.44 measured here) or a build without
+`-march=native` (E x0.44, flagged). It also avoids pricing SMT vCPUs as
+cores (a 1.5-2x miscount, measured by its K = logical pass on the target).
+Exactness risk: none (no search change; the gates above).
