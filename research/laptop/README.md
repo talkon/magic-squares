@@ -17,7 +17,8 @@ run it anywhere without the scheduler or numpy.
 
    It compiles msearch, bench and fuzz_arrange into `build-laptop/`, checks
    every bench/quick.txt and bench/full.txt instance against the expected
-   squares and hashes, runs a brute-force differential test, and prints the
+   squares and hashes and the node counts of the fast x86 build, runs a
+   brute-force differential test (also node for node), and prints the
    time of bench/quick.txt (please report it: it measures the laptop's speed
    against the fast x86 build's ~0.29 s). Stop if it says FAILED.
 4. Run, plugged in, lid open (a closed lid sleeps the Mac):

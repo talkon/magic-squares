@@ -3328,3 +3328,87 @@ matrices (gcc vectorizes less of these loops than clang). d-first, msearch --dia
 known here (qemu timings mean nothing); scripts/laptop/build.sh prints
 the bench/quick.txt time to compare with the ~0.25-0.29 s of the fast
 x86 build.
+
+### Independent verification of 50bed73 (branch f1/p3-portable-carried-)
+
+A second session rebuilt 50bed73 from `git archive` (direct gcc / clang
+builds: native AVX-512, gcc `-march=x86-64-v2` and `-march=x86-64-v3`,
+clang `-march=x86-64-v3`, aarch64 gcc and clang `-mcpu=apple-m1` static
+under qemu-aarch64, and gcc v3 with ASan+UBSan), on fresh seeds:
+
+* bench quick / full / prod: per instance the same N, labels, nodes,
+  squares and hash check as the 80d15cc native build, for v2, v3, clang v3
+  (all three files) and both aarch64 builds (quick and full).
+* `fuzz_arrange -v` per seed and variant against the native build (squares
+  or pairs and nodes; matrix-path lines left out), 0 fails, nodes
+  identical: v2, v3 and clang v3 each 1,000 default seeds (93100000-,
+  37,089 lines), 1,000 `--dfirst` (93200000-, 2,929 lines), 300 `--mode 7`
+  (93300000-, widths 5-8, 11,700 lines); ASan+UBSan (v3, portable
+  kernels) 200 default (1 skipped by the harness, also in the native run),
+  100 `--dfirst`, 50 `--mode 7`, no report; aarch64 gcc and clang 200
+  default and 200 `--dfirst` each, gcc also 50 `--mode 7`.
+* msearch T1-T4 and a d-sampled sum above 256 labels (T5: 13 7 4 3 1 1,
+  S = 2650, 279 labels, `--d-stride 2500`): the same nodes in native, v2,
+  v3 and clang v3 (19,762,185 / 21,868,831 / 11,012,428 / 9,445,350 /
+  5,959,755) and the same squares.
+* `ctest -R fast_`: 66/66 on the native and on an `-march=x86-64-v3`
+  CMake build (with `bin/` linked, as build.sh does: fast_scheduler and
+  fast_calibrate need bin/msearch and bin/enumerate).
+* scripts/laptop/build.sh passes natively (AVX-512 kernels) and forced to
+  `-march=x86-64-v3` with gcc and clang (portable kernels). The first 40
+  units of plan-20261010 run with run.py (1 worker), native against the
+  clang v3 portable build: all 40 unit files identical apart from times
+  (1,686 square records with the same hashes and grids, 4,337 sum records,
+  1.79e9 nodes); 5 min 39 s against 12 min 37 s (2.23x).
+* Mutations of arrange_carry.h (gcc v3): (m1) the exactly-once test made
+  "at least once"; (m2) a label count of 1 read as 2; (m3) every label
+  count + 1. All three **pass the brute-force oracle** (fuzz 0 fails, the
+  same squares; the filters only relax and each leaf is checked) and bench
+  "ok": only node equality catches them. m1: bench quick 9.9M nodes
+  instead of 1.77M, and `--mode 6` ran for more than 19 min (killed);
+  m2: 1,777,664 nodes on quick, 14,970,581 on full; m3: **the same node
+  totals on bench quick and full** (1,770,779 / 14,958,507) and on
+  `--mode 6`, but 372 of 7,293 seed/variant lines differ in fuzz (5 of 293
+  with `--dfirst`). So the node totals that build.sh checked would not
+  have caught an m3-like divergence on the laptop (another compiler, other
+  vectorization); build.sh now also compares the node count of every seed
+  and variant of its 60 fuzz seeds against the native build (a cksum of
+  the normalized `fuzz_arrange -v` lines, matrix-path lines left out):
+  passes for native, gcc v3 and clang v3, fails for m3 (and m2).
+
+Speed (search CPU s, min of 2 paired alternating rounds, order reversed in
+round 2, nice -n 10, one process; the machine was shared with 2-3 other
+sessions' jobs, about +-10%). Old = 80d15cc (matrix path without
+AVX-512BW).
+
+| instance | native | clang v3 | gcc v3 | gcc v2 | old gcc v3 | old gcc v2 |
+|---|---|---|---|---|---|---|
+| bench quick | 0.217 | 0.561 (2.58x) | 0.745 (3.43x) | 0.780 (3.59x) | 1.124 (5.17x) | 1.141 (5.25x) |
+| T1 plain, N 2,994 | 4.65 | 13.58 (2.92x) | 18.99 (4.08x) | 20.78 (4.47x) | 28.39 (6.10x) | 28.32 (6.09x) |
+| T2 plain r1/4 | 4.78 | 14.35 (3.00x) | 20.08 (4.20x) | 22.00 (4.60x) | 32.75 (6.85x) | 34.50 (7.22x) |
+| T3 d-first | 5.97 | 11.36 (1.90x) | 18.09 (3.03x) | 18.73 (3.14x) | 58.35 (9.77x) | 63.02 (10.55x) |
+| T4 d-first | 7.93 | 14.92 (1.88x) | 24.46 (3.08x) | 26.55 (3.35x) | 96.39 (12.16x) | 100.79 (12.71x) |
+| T5 d-first, 279 labels | 7.63 | 12.41 (1.63x) | 17.82 (2.33x) | 19.34 (2.53x) | 109.57 (14.35x) | 114.61 (15.01x) |
+
+(The native bench quick minimum, 0.217 s, is low; its other round was
+0.298 s, and build.sh runs here gave 0.26 s: clang v3 is 2.1-2.6x on
+quick.) Against the targets: nodes identical everywhere (met); the v3
+build no slower than before (met: 1.5x faster on plain sums, 3.2-6.2x on
+d-first); portable / native <= 2.0 on T1-T4 met only by clang on the
+d-first instances (T3 1.90, T4 1.88), not on the plain ones (2.9-3.0x
+clang, 4.1-4.2x gcc v3); <= 1.8 on bench quick not met (2.1-2.6x clang,
+3.4x gcc). The M1 number is the user's to measure (build.sh prints it;
+the target is <= 0.58 s).
+
+What it is worth: with E(C) ~ C^0.36 between 1 and 10 CPU-years (0.176
+-> 0.407 on the ideal frontier), a machine slower per core by a factor k
+gives k^-0.36 of the E of the same core-hours on AVX-512. Geometric mean
+of T1-T4: old 8.4x -> E x0.46 (the x0.45-0.50 of the plan); clang v3
+2.4x -> x0.73; gcc v3 3.6x -> x0.63. So E per core-hour on non-AVX-512
+hardware rises x1.6 with clang (the laptop's compiler) and x1.35 with gcc,
+at the low end of the expected x1.6-2.0. The work per core-hour (the
+ratio that matters for a fixed nightly slot on the laptop) rises 2.1-2.3x
+on plain sums and 5-9x on d-first ones with clang (old gcc v3 / new clang
+v3), if the M1 follows the x86 clang build. The remaining gap is in the
+plain search (T1, T2: 3x native with clang), where E sits for a 1-10
+CPU-year budget (N' 1-6k), not in d-first.

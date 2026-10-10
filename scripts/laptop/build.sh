@@ -3,7 +3,8 @@
 # ARM) into build-laptop/, then check the build: every bench/quick.txt and
 # bench/full.txt instance must give the expected squares and hash, with the
 # node counts of the fast x86 build (the same search, also without
-# AVX-512), and the differential fuzz test must pass. Prints the time of
+# AVX-512), and the differential fuzz test must pass, with the node count
+# of every seed and variant of the fast x86 build. Prints the time of
 # bench/quick.txt.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -58,9 +59,21 @@ for fn in quick:1770779 full:14958507; do
 done
 echo "checking the search against brute force (fuzz_arrange, 60 seeds, ~1 min)"
 cd "$B"
-./fuzz_arrange 7300000 30 > check_fuzz.txt 2>&1 || { echo "FUZZ FAILED: see $B/check_fuzz.txt"; exit 1; }
-./fuzz_arrange --dfirst 7400000 30 >> check_fuzz.txt 2>&1 || { echo "FUZZ FAILED: see $B/check_fuzz.txt"; exit 1; }
+./fuzz_arrange -v 7300000 30 > check_fuzz.txt 2>&1 || { echo "FUZZ FAILED: see $B/check_fuzz.txt"; exit 1; }
+./fuzz_arrange -v --dfirst 7400000 30 >> check_fuzz.txt 2>&1 || { echo "FUZZ FAILED: see $B/check_fuzz.txt"; exit 1; }
 if grep -q 'MISMATCH\|fails [1-9]' check_fuzz.txt; then echo "FUZZ FAILED: see $B/check_fuzz.txt"; exit 1; fi
+# the node count of every seed and variant, as in the fast x86 build (the
+# totals of bench quick/full miss some divergences that keep the squares,
+# e.g. every label count off by one; the fuzz seeds do not); the lines of
+# the matrix path (more than 512 labels, or forced 16/64 words) left out:
+# its counters differ between builds
+grep -E '^seed .* (squares|pairs)' check_fuzz.txt | sed -E 's/, [0-9.]+s \(oracle [0-9.]+s\)//' |
+  grep -vE 'variant (w16|w64|xcross_w16|w16_nomrv)[:_ ]' |
+  awk '{for (i = 1; i < NF; i++) if ($i == "L" && $(i + 1) > 512) next; print}' > check_fuzz_nodes.txt
+got=$(cksum < check_fuzz_nodes.txt | awk '{print $1, $2}')
+if [ "$got" != "3761910603 92405" ]; then
+  echo "BUILD CHECK FAILED: the fuzz_arrange node counts differ from the fast x86 build's (cksum $got): not the same search, see $B/check_fuzz_nodes.txt"; exit 1
+fi
 cd "$ROOT"
 echo "all checks passed"
 tail -1 "$B/check_quick.txt" | awk '{print "bench/quick.txt search time: " $4 " s (fast x86 build: ~0.29 s)"}'
