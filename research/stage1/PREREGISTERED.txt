@@ -1,0 +1,27 @@
+Pre-registration of a stage-1 plan (2026-10-10T02:54:51+00:00, before any of its units ran)
+
+plan: plan-stage1.jsonl
+sha256 of the plan: a6a4be6a65e65fe7e37f345e68d932e1d1b5ce69be5de28faa3819a4646cce2a
+decision table: /home/user/magic-squares/.claude/worktrees/f1-stage1/research/stage1/decision-table.json sha256 aaf8b224f5a3018811906e3bd8e366d1b4d9abff814ccc7e652cb5a578a37828
+code: 9b8dfe4c81c929694af82719b2edaf41b1dc0f11 (scripts/scheduler.py, scripts/amodel.py, scripts/decide.py)
+model: scheduler v2, --stage1 60:3000:6000, --dfirst auto, --unit-time 120, the state's learned calibration; predictions at f_rho = 1 (pairs = sp_kappa r_S r_P 720 e^lpSP per square, scheduler.unit_predictions)
+state: /tmp/claude-0/-home-user-magic-squares/f8940ae0-7961-577c-be6c-6db2a2de5f8e/scratchpad/f1/stage1/state_base (1324 unit files, 32325 squares)
+
+totals:
+  all       21298 units   60.00 h  squares     859450  S    809825  P   211845  SP  1432.1  pairs  999.73  (d-first loops 0.00)  magic 0.0137
+  stage-1 band (N' 3000-6000)    134 units    4.26 h  squares      64512  S     59198  P    14723  SP    77.4  pairs   60.53  (d-first loops 0.00)  magic 0.0007
+by N' band and mode:
+  1-3k plain      7235 units   43.34 h  squares     671564  S    624783  P   165148  SP  1059.7  pairs  743.72  (d-first loops 0.00)  magic 0.0093
+  3-6k plain       134 units    4.26 h  squares      64512  S     59198  P    14723  SP    77.4  pairs   60.53  (d-first loops 0.00)  magic 0.0007
+  <1k plain      13929 units   12.40 h  squares     123374  S    125844  P    31974  SP   294.9  pairs  195.48  (d-first loops 0.00)  magic 0.0037
+
+45 pairs predicted in the stage-1 band after 51.4 reference CPU-hours of the plan (0 = not within it)
+
+analysis plan (scripts/decide.py STATE --plan PLAN): observed / predicted squares, S and P traversals, pairs per unit run (a prefix of the plan, in order), pooled and by N' band, with Poisson intervals; the f_rho posterior from the band's plain pairs (prior: the calibration search's posterior, median 1.06, f_rho^2 ln sd 0.47); the predictive E and P(>=1) at 1 / 3 / 10 CPU-years; the decision table's rows, evaluated, never acted on by the tool.
+
+notes: the plan is stored xz-compressed (plan-stage1.jsonl.xz; the sha256 is of the
+uncompressed file). The state is the laptop plan's (research/laptop/PREREGISTERED.txt: the
+calibration search's profiled state plus every earlier msearch output, 1,324 files), so
+the first units are those of research/laptop/plan-20261010 (which is --dfirst off; the
+first 60 h here have no d-first unit either: stage 1 turns the 3.7-6k sums plain). Units
+of either plan run elsewhere count for both; decide.py fits each record once.
