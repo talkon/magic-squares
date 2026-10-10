@@ -82,7 +82,7 @@ def gamma_quantile(shape, rate, z):
     return shape * max(1.0 - c + z * math.sqrt(c), 0.0) ** 3 / rate
 
 
-def fit_frho(Y, M, prior="shipped"):
+def fit_frho(Y, M, prior="shipped", phi_min=1.0):
     """f_rho from per-P pairs Y and model pairs M (sequences; the frho_block
     fit, as written): dict with the gamma posterior and summaries, or None
     (flat prior and no pairs)"""
@@ -93,9 +93,9 @@ def fit_frho(Y, M, prior="shipped"):
         return None
     fm = Yt / Mt if Yt > 0 and Mt > 0 else f0
     G = sum(1 for m in M if m > 0)
-    phi = 1.0
+    phi = max(1.0, phi_min)
     if G >= 2 and Yt > 0:
-        phi = max(1.0, sum((y - fm * m) ** 2 for y, m in zip(Y, M)) / (fm * Mt) * G / (G - 1))
+        phi = max(phi, sum((y - fm * m) ** 2 for y, m in zip(Y, M)) / (fm * Mt) * G / (G - 1))
     shape = Yt / phi + a
     rate = Mt / phi + (a / f0 if a else 0.0)
     out = {"prior": prior, "Y": Yt, "M": Mt, "nP": G, "phi": phi, "shape": shape, "rate": rate,
@@ -192,12 +192,20 @@ def cpu_for(fr, pts, p, draws=20000, lo=0.01, hi=1e5):
 
 
 def scheduler_args(state):
+    """the scheduler's argument namespace (emit's defaults), with the
+    state's stage-1 spec (stage1_6.json) when it has one"""
     import scheduler as sch
     got = {}
     emit = sch.v2_emit
     sch.v2_emit = lambda a: got.setdefault("args", a)
     argv = sys.argv
-    sys.argv = ["scheduler.py", "--state", state, "emit", "--units", "1"]
+    st1 = []
+    try:
+        with open(os.path.join(state, "stage1_6.json")) as f:
+            st1 = ["--stage1", ":".join(f"{v:g}" for v in json.load(f)["spec"])]
+    except (OSError, ValueError, KeyError):
+        pass
+    sys.argv = ["scheduler.py", "--state", state, "emit", "--units", "1"] + st1
     try:
         sch.main()
     finally:
@@ -207,6 +215,9 @@ def scheduler_args(state):
 
 
 def open_any(path):
+    if path.endswith(".xz"):
+        import lzma
+        return lzma.open(path, "rt")
     return gzip.open(path, "rt") if path.endswith(".gz") else open(path)
 
 
@@ -449,7 +460,10 @@ def report(a):
         O = collections.Counter()
         Pd = collections.Counter()
         for path, u in units:
-            O.update(file_counts(path))
+            fc = file_counts(path)
+            best = max(fc.pop("best", 0), O.get("best", 0))
+            O.update(fc)
+            O["best"] = best
             for k in ("squares", "S", "P", "pairs", "SP"):
                 Pd[k] += float(u.get("pred_" + k, 0.0) or 0.0)
             Pd["time"] += float(u.get("pred_time", u.get("time", 0.0)) or 0.0)
@@ -465,12 +479,20 @@ def report(a):
     # the fit
     dsums = dfirst_sums([p for p, _ in units], s) if a.dfirst == "on" else []
     ins, outs, per_band, per_mode = pair_data(summ, calib, bands, dsums)
-    fr = fit_frho([y for y, _ in ins], [m for _, m in ins], a.prior)
+    fr = fit_frho([y for y, _ in ins], [m for _, m in ins], a.prior, a.phi_min)
     fro = fit_frho([y for y, _ in outs], [m for _, m in outs], "flat")
     out["fit"], out["fit_outside_flat"] = fr, fro
     pr(f"\nSP coupling (plain pairs in N' {lo:g}-{hi:g}, cells {[sch.NBAND_NAMES[b] for b in bands]}):")
     pr("  " + describe_fit(fr))
     pr("  check, outside the band (flat prior, not used): " + describe_fit(fro))
+    if fro is not None and fr is not None and fro["phi"] > fr["phi"]:
+        # pairs come clustered (by P, and by SP vector within a sum): with
+        # few pairs in the band its own dispersion is poorly estimated
+        frc = fit_frho([y for y, _ in ins], [m for _, m in ins], a.prior, fro["phi"])
+        pc = predictive(frc, load_ecurve(a.ecurve)[1], [1.0], a.draws)[1.0]
+        out["fit_phi_outside"] = frc
+        pr(f"  sensitivity, at the dispersion outside the band ({fro['phi']:.2f}): "
+           + describe_fit(frc) + f"; x band of E at 1 CPU-year {pc['band']:.2f}")
     pr(f"  data: plain squares {per_mode['plain'][0]:.0f} pairs / {per_mode['plain'][1]:.2f}; "
        f"{len(dsums)} d-first sums searched in full in one record (--dfirst-sums "
        f"{a.dfirst}): {per_mode['d-first'][0]:.1f} est. pairs / "
@@ -624,6 +646,8 @@ def main():
     ap.add_argument("--dfirst-sums", dest="dfirst", choices=("on", "off"), default="on",
                     help="also fit the estimated pairs of d-first sums searched in full in one "
                          "record (default on)")
+    ap.add_argument("--phi-min", type=float, default=1.0,
+                    help="floor of the pairs' dispersion in the fit (default 1: the estimate)")
     ap.add_argument("--marks", help="extra CPU-years for the predictive table, e.g. 0.3,30")
     ap.add_argument("--draws", type=int, default=20000)
     ap.add_argument("--json")

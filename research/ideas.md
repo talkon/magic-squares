@@ -3412,3 +3412,49 @@ on plain sums and 5-9x on d-first ones with clang (old gcc v3 / new clang
 v3), if the M1 follows the x86 clang build. The remaining gap is in the
 plain search (T1, T2: 3x native with clang), where E sits for a 1-10
 CPU-year budget (N' 1-6k), not in d-first.
+
+## Stage 1: learn f_rho before deciding the spend (October 2026, branch f1/stage1)
+
+`scheduler.py --stage1 [HOURS[:LO:HI]]` (default 60:3000:6000) searches N'
+in [LO, HI) plain for the first HOURS of reference CPU, `make_plan.py
+--stage1` freezes that plan with per-unit predictions (squares, S, P, SP
+traversals, pairs) and a PREREGISTERED file, and `scripts/decide.py` fits
+f_rho on the band's pairs (the f1/p1 quasi-Poisson gamma fit, prior = the
+calibration search's posterior) and reports the predictive E and P(>=1) at
+1 / 3 / 10 CPU-years against a user-set decision table. Details in
+[stage1.md](stage1.md).
+
+* **E x1.00** (as intended): forecast --shipped 0.1202 / 0.1843 / 0.2827
+  at 1 / 3 / 10 CPU-years with and without stage 1. `--stage1 off`
+  reproduces 80d15cc's plans byte for byte (120-hour plan, 38,646 units).
+* **The mode switch is nearly a no-op (negative result for the lever
+  itself).** Without it, the scheduler's first 60 h hold only 9 d-first
+  units (0.28 CPU-h); its own order already searches 134 units at N' 3-6k
+  plain, with 60.5 predicted pairs. Stage 1 brings the 45th band pair from
+  55.4 to 51.4 reference hours. The premise "45 pairs = 39 CPU-h of plain
+  3-6k search" came from the calibration search's sums (1.8 pairs/CPU-h);
+  the scheduler's top 3-6k sums give ~14/CPU-h (model), so the pairs are
+  cheap and come free with the first ~2 days of any run.
+* **Their value depends on clustering.** decide.py's 90% band of E at 1
+  CPU-year goes from x5.8 to x3.3 / 3.5 / 3.8 at 45 pairs if the pairs'
+  dispersion is 1 / 1.41 / 2.1 (simulation passes: flat-prior coverage
+  86-91%, bias <= 3.6%). The older records show phi 6.8 outside the band
+  (a few P with 9-20 pairs against < 1 expected); at that dispersion 45
+  pairs give x4.6, coverage falls to 79-86% (phi_hat runs low), and x4
+  needs ~120 band pairs (~100 reference hours). decide.py prints the fit at
+  the outside dispersion as a sensitivity line (`--phi-min`).
+* **Replay**: the calibration search's records with the 'pre' prior give
+  median 1.051, f_rho^2 ln sd 0.460 (target 1.06 / 0.47), once its 7 whole
+  d loops (0 pairs against 0.89) are counted; plain squares alone give 1.099.
+* **Measurement** (203 units, 0.32 CPU-h, all N' < 3k): squares 0.979
+  [0.957, 1.000] of the frozen predictions, S 0.98, P 0.93, pairs 8 / 12.2
+  (0.66 [0.33, 1.19]); 24.9 pairs per CPU-h against the model's 41 per
+  reference hour on these densest units; CPU 1.08x the reference. 45 band
+  pairs projected at 56-70 CPU-h (f_rho 1 to 0.66).
+* **Not tried**: reordering stage 1 to front-load the 3-6k units (45 band
+  pairs in ~3.2 CPU-h of them instead of 51 h of the plan) would buy the
+  information ~15x faster at an E cost not measured here; a per-band f_rho
+  model that pools the ~1,000 cheap N' < 3k pairs needs a model of f_rho's
+  N dependence first (the older small-N records sit at f_rho ~4 with phi
+  6.8, the first stage-1 units at 0.66: the small-N pairs are heterogeneous
+  too).
