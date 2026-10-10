@@ -3322,14 +3322,30 @@ So with clang (the compiler on macOS) the portable carried path takes
 against 4.0-4.3x for the matrices (1.8-1.9x less time, with 1.6-3.4x fewer
 nodes); with gcc 2.9-3.4x (v3) and 3.3-3.7x (v2), 1.5-1.65x and 1.35-1.4x
 less than the matrices (gcc vectorizes less of these loops than clang).
-(Correction, integ/stage1: 2.3-2.4x is optimistic for the search the
-laptop runs. Two independent verifications measured clang
--march=x86-64-v3 (256-bit vectors) at 2.5x on bench quick, 2.55-2.6x on
-the plain sums T1/T2 and 1.86-1.97x on the d-first T3/T4; with 128-bit
-vectors, NEON's width (clang or gcc -march=x86-64-v2), 3.2-3.7x; gcc v3
-2.9-3.6x. So the M1 is expected at ~2.5-3.5x per core on plain sums; the
-bench/quick.txt time that build.sh prints measures it, against ~0.25-0.29 s
-native.) d-first, msearch --diag-first
+(Correction, integ/stage1, corrected again after review: 2.3-2.4x is
+optimistic for the search the laptop runs. The two independent
+verifications (the table below, and the second session's
+scratchpad/f1/verify-p3/ab.out; min of 2 rounds per arm, T1-T5 as below)
+measured, against the native build:
+
+| build | bench quick | plain T1/T2 | d-first T3-T5 |
+|---|---|---|---|
+| clang -march=x86-64-v3 | 2.47 / 2.58x | 2.61, 2.55 / 2.92, 3.00x | 1.76-1.97 / 1.63-1.90x |
+| gcc -march=x86-64-v3 | 3.13 / 3.43x | 3.48, 3.59 / 4.08, 4.20x | 2.42-3.11 / 2.33-3.08x |
+| gcc -march=x86-64-v2 (128-bit) | - / 3.59x | - / 4.47, 4.60x | - / 2.53-3.35x |
+
+(second / first verification). Neither ran clang at 128-bit width, the
+M1's compiler and NEON's width; the stage-1 rehearsal did, once, on a busy
+machine, against a clang native build: 3.24x on bench quick (0.855 /
+0.264 s) and 3.20x on 49 plain units of the stage-1 plan (1,221 / 382
+CPU-s, the same records), with build.sh's probe loop edited to
+-march=x86-64-v2 (build.sh now takes ARCH=-march=x86-64-v2 for that; the
+"build.sh forced to -march=x86-64-v3" below was such an edit too). An
+earlier draft of this note quoted only the second verification and called
+gcc v2 3.3-3.7x (its bench files); gcc pays ~3x on d-first sums, not
+~1.9-2x. So the M1 is expected at ~2.5-4.5x per core on plain sums, ~3x
+if it follows clang on x86; the bench/quick.txt time that build.sh prints
+measures it, against ~0.25-0.29 s native.) d-first, msearch --diag-first
 --d-range 0:100 --sums 2200 13 7 4 3 1 1 (98 V_d, class support in all):
 3.74 s native, 6.34 s clang v3, 9.09 s gcc v3 (5,028,440 nodes each),
 36.4 s on the matrix path at 80d15cc (24,830,673 nodes: no class support there). The time per node on the M1 is not
@@ -3449,9 +3465,9 @@ calibration search's posterior) and reports the predictive E and P(>=1) at
   x5.8 to x3.3 / 3.5 / 3.8 at 45 pairs if the pairs' dispersion is 1 /
   1.41 / 2.1 (simulation passes: flat-prior coverage 86-91%, bias <= 3%).
   The pairs are not clustered: counting each plain sum (P, S) once, the
-  state's records give phi 1.03 outside the band (25 pairs / 18.0, f_rho
-  1.37 [0.96, 1.89], still likely biased up by which sums were chosen) and
-  1.0 inside (8 / 7.0). The first version read phi 6.8, f_rho ~4 at small
+  state's records give phi 1.05 outside the band (25 pairs / 18.1, f_rho
+  1.36 [0.95, 1.88], still likely biased up by which sums were chosen) and
+  1.0 inside (8 / 7.05). The first version read phi 6.8, f_rho ~4 at small
   N and "x4.6 at 45 pairs, ~120 pairs for x4" from the raw records, where
   the benchmark and regression sums were searched 8-16 times each (169
   counted SP pairs, 33 distinct squares); withdrawn. decide.py now drops

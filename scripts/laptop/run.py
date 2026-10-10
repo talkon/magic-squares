@@ -8,8 +8,9 @@ usage: run.py PLAN(.jsonl or .jsonl.xz) [--bin BUILD/msearch] [--out DIR] [--wor
 
 * Resumable: a unit whose output has a "done" record is skipped; a unit that
   was interrupted is run again from the start (its output is replaced).
-* Ctrl-C (or --hours) stops launching, stops the running units and leaves
-  everything finished in place. Run it again to continue.
+* Ctrl-C, kill (TERM), closing the terminal (HUP) or --hours stops
+  launching, stops the running units, removes their partial output, leaves
+  everything finished in place and exits. Run it again to continue.
 * Outputs: DIR/U000123.jsonl per unit, DIR/meta_<time>.json (machine, build,
   plan hash), DIR/progress.log. A magic square (best_score >= 14) is
   announced and copied to DIR/MAGIC.txt. U<i> is line i of the plan: a
@@ -17,8 +18,10 @@ usage: run.py PLAN(.jsonl or .jsonl.xz) [--bin BUILD/msearch] [--out DIR] [--wor
   is refused. Plans that share their first lines (research/stage1's plan
   begins with all of plan-20261010) share those outputs.
 * Progress: the units' measured CPU against their predicted reference CPU
-  (the fast x86 build's), and for a stage-1 plan the pairs found in its
-  band units (research/stage1.md; scripts/decide.py fits them).
+  (the fast x86 build's; the ratio also carries the machine's load and the
+  predictions' own error, e.g. the fast build itself ran at 1.32x its
+  predictions on a busy shared machine), and for a stage-1 plan the pairs
+  found in its band units (research/stage1.md; scripts/decide.py fits them).
 """
 import argparse
 import hashlib
@@ -88,6 +91,16 @@ def main():
     if a.max_units:
         units = units[:a.max_units]
     os.makedirs(a.out, exist_ok=True)
+    # one run.py per output directory
+    try:
+        import fcntl
+        lock = open(os.path.join(a.out, ".lock"), "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            sys.exit(f"another run.py is running on {a.out}")
+    except ImportError:
+        pass
     if not os.path.exists(a.bin):
         sys.exit(f"{a.bin} not found: run scripts/laptop/build.sh first")
     meta = {"plan": os.path.basename(a.plan), "plan_sha256": hashlib.sha256(raw).hexdigest(),
@@ -103,10 +116,21 @@ def main():
 
     def say(msg):
         line = time.strftime("[%Y-%m-%d %H:%M:%S] ") + msg
-        print(line, flush=True)
+        try:
+            print(line, flush=True)
+        except OSError:     # (the terminal is gone: the log still has it)
+            pass
         log.write(line + "\n")
         log.flush()
 
+    # partial outputs of an earlier run (U<i>.jsonl.part.<pid>): removed, so
+    # that a unit is never written by two processes under one name
+    for name in os.listdir(a.out):
+        if ".jsonl.part" in name:
+            try:
+                os.remove(os.path.join(a.out, name))
+            except OSError:
+                pass
     todo = []
     n_done = 0
     for u in units:
@@ -131,6 +155,10 @@ def main():
         say("stopping: finishing nothing new, stopping the running units")
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
+    if hasattr(signal, "SIGHUP"):
+        # (closing the terminal: stop the units too, they run in their own
+        # sessions and would otherwise go on as orphans)
+        signal.signal(signal.SIGHUP, on_signal)
 
     t0 = time.time()
     running = {}  # Popen -> (unit, tmp path)
@@ -150,14 +178,14 @@ def main():
             if recs:
                 count_band(u, recs)
     last = 0.0
-    while (todo or running):
+    while (todo and not stop["now"]) or running:
         if a.hours and time.time() - t0 > a.hours * 3600 and not stop["now"]:
             stop["now"] = True
             say(f"--hours {a.hours} reached: stopping")
         while todo and not stop["now"] and len(running) < a.workers:
             u = todo.pop(0)
             out = os.path.join(a.out, f"U{u['i']:06d}.jsonl")
-            tmp = out + ".part"
+            tmp = f"{out}.part.{os.getpid()}"
             cmd = [a.bin, *u["args"][:-len(u["P"])], "--out", tmp, *map(str, u["P"])]
             p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
@@ -185,7 +213,7 @@ def main():
             stats["ref"] += u.get("pred_time", 0.0)
             count_band(u, recs)
             for r in recs:
-                if r.get("type") == "sum":
+                if r.get("type") in ("sum", "csum", "dsum"):
                     stats["cpu"] += r.get("cpu", r.get("time", 0.0))
                 elif r.get("type") == "square":
                     stats["squares"] += 1

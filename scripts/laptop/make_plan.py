@@ -14,13 +14,14 @@ the binary and --out), "pred_time" (CPU-s of the fast x86 build),
 "pred_squares", "pred_magic", "score"}. --time-limit and --node-limit are
 multiplied by --time-factor and --node-factor, because a slower machine
 would otherwise stop units early. An ARM laptop runs the same search with
-the portable kernels: on x86 without AVX-512 they take 2.5-2.6x the fast
-build's time per core on plain sums with clang -march=x86-64-v3 and
-3.2-3.7x with 128-bit vectors (NEON's width), so an M1 is expected at
-~2.5-3.5x (scripts/laptop/build.sh measures it). The scheduler's time
-limit is max(2 x unit time, 3 x predicted) of the fast build; the default
-factor 12 keeps 3.4-4.8x of that margin at 2.5-3.5x (a factor of ~6 would
-do at 3.5x) and still covers a core 6-10x slower (an efficiency core, a
+the portable kernels: on x86 without AVX-512 they take 2.55-3.0x the fast
+build's time per core on plain sums with clang -march=x86-64-v3, 3.5-4.2x
+with gcc, and with 128-bit vectors (NEON's width) 3.2x with clang and
+4.5-4.6x with gcc, so an M1 (clang) is expected at ~2.5-4.5x
+(scripts/laptop/build.sh measures it). The scheduler's time limit is
+max(2 x unit time, 3 x predicted) of the fast build; the default factor 12
+keeps 2.7-4.8x of that margin at 2.5-4.5x (a factor of ~8 would do at
+4.5x) and still covers a core 6-10x slower (an efficiency core, a
 throttled laptop); the cost is only that a runaway unit runs longer. The
 node factor was for the matrix path's extra nodes, which builds without
 AVX-512 no longer take; the time limit binds first. Prints the sha256 of
@@ -34,8 +35,12 @@ shipped-or-learned calibration of the state and f_rho = 1
 (scheduler.unit_predictions): pred_S, pred_P (traversals), pred_SP (SP
 traversals before the class factors), pred_pairs ((square, SP traversal)
 pairs, scripts/decide.py's model), pred_pairs_dfirst (the d loop's, not in
-decide.py), lNp (ln N' of its first and last sum) and stage1 (the unit is
-in the stage-1 band). The totals, the sha256 of the plan and of the
+decide.py), lNp (ln N' of its first and last sum), stage1 (the unit's
+first sum is in the stage-1 band) and, on d-first lines only,
+pred_rec_squares (the squares it records, its calibration stream's, which
+pred_S, pred_P and pred_pairs count; pred_squares is all of its sums').
+A band that is not whole N' bands is allowed with a warning (decide.py
+then needs --band). The totals, the sha256 of the plan and of the
 decision table go into --prereg (default: next to the plan), to be
 committed before the first unit runs.
 """
@@ -103,6 +108,8 @@ def main():
     a = ap.parse_args()
 
     spec = sch.parse_stage1(a.stage1) if a.stage1 else None
+    if sch.stage1_band_note(spec):
+        print("warning: " + sch.stage1_band_note(spec), file=sys.stderr)
     dfirst = a.dfirst or ("auto" if spec else "off")
     hours = a.hours if a.hours is not None else (spec[0] if spec else 40.0)
     args = scheduler_args(a.state, dfirst, a.unit_time, a.stage1)
@@ -129,6 +136,11 @@ def main():
             p = sch.unit_predictions(s.scorer, u, band=band)
             # (not in the plan's lines, whose format is frozen)
             band_pairs.append(p.pop("pred_pairs_band"))
+            if u.mode == "dfirst":
+                # (the squares it records, its calibration stream's, which
+                # pred_S, pred_P and pred_pairs are of; only on d-first lines,
+                # so that plain lines keep the frozen format)
+                p["pred_rec_squares"] = p["pred_squares"]
             p["pred_squares"] = u.squares
             rec.update(p)
             rec["stage1"] = bool(band[0] <= p["lNp"][0] < band[1])

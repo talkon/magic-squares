@@ -1,13 +1,19 @@
 #!/bin/sh
 # Pack the outputs of scripts/laptop/run.py for analysis:
-# research/laptop/results-<host>-<date>.tar.xz (only finished units).
+# research/laptop/results-<host>-<date>.tar.xz (only finished units), with
+# the build's record (build-laptop/build_info.txt: compiler, flags, search
+# kernels, bench/quick.txt time; and check_quick.txt). Nothing else needs
+# to be sent.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=${1:-$ROOT/laptop-runs}
 NAME=results-$(hostname -s 2>/dev/null || echo host)-$(date +%Y%m%d-%H%M).tar.xz
 mkdir -p "$ROOT/research/laptop"
 cd "$OUT"
-ls | grep -E '^U[0-9]+\.jsonl$|^meta_.*\.json$|^progress\.log$|^MAGIC\.txt$' > .collect_list
+for f in build_info.txt check_quick.txt; do
+  if [ -f "$ROOT/build-laptop/$f" ]; then cp "$ROOT/build-laptop/$f" "build-laptop_$f"; fi
+done
+ls | grep -E '^U[0-9]+\.jsonl$|^meta_.*\.json$|^progress\.log$|^MAGIC\.txt$|^build-laptop_.*\.txt$' > .collect_list
 tar -cJf "$ROOT/research/laptop/$NAME" -T .collect_list
 rm .collect_list
 echo "wrote research/laptop/$NAME ($(du -h "$ROOT/research/laptop/$NAME" | cut -f1))"

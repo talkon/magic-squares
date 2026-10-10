@@ -2233,6 +2233,11 @@ def test_stage1():
     assert scheduler.parse_stage1("0") is None
     assert scheduler.parse_stage1("60") == (60.0, 3000.0, 6000.0)
     assert scheduler.parse_stage1("10:2000:5000") == (10.0, 2000.0, 5000.0)
+    # (allowed, with a warning: decide.py fits whole N' bands)
+    assert "2000:5000" in scheduler.stage1_band_note((10.0, 2000.0, 5000.0))
+    assert scheduler.stage1_band_note((60.0, 3000.0, 6000.0)) is None
+    assert scheduler.stage1_band_note((60.0, 3000.0, math.inf)) is None
+    assert scheduler.stage1_band_note(None) is None
     for bad in ("1:5:4", "1:2"):
         try:
             scheduler.parse_stage1(bad)
@@ -2285,6 +2290,23 @@ def test_stage1():
     assert abs(fr["mean"] - (7 + a) / (5.74 + a)) < 1e-9 and fr["phi"] == 1.0
     assert abs(fr["median"] - 1.06) < 0.02 and abs(fr["ln_sd_f2"] - 0.47) < 0.02
     assert decide.fit_frho([], [], "flat") is None
+    # exact gamma quantiles (Wilson-Hilferty alone is 23% low at shape 1)
+    assert abs(decide.gamma_quantile(1.0, 1.0, -1.6448536) / -math.log(0.95) - 1) < 1e-6
+    assert abs(decide.gamma_quantile(1.0, 2.0, 0.0) - math.log(2) / 2) < 1e-9
+    # the dispersion with unequal M_P: unbiased (the G / (G - 1) form is
+    # low when one P holds much of M)
+    import numpy as np
+    rng = np.random.default_rng(3)
+    Mq = [12.0] + [1.0] * 11
+    ph = []
+    for _ in range(4000):
+        Yq = 2 * rng.poisson(np.array(Mq) / 2)     # Var y = 2 m: phi 2
+        if Yq.sum():
+            ph.append(decide.fit_frho(Yq.tolist(), Mq, "flat", phi_min=0)["phi"])
+    assert abs(np.mean(ph) / 2 - 1) < 0.1, np.mean(ph)
+    fr = decide.fit_frho([30, 0, 0], [10.0, 1.0, 1.0], "flat")
+    assert abs(fr["phi"] - (sum((y - 2.5 * m) ** 2 for y, m in ((30, 10), (0, 1), (0, 1)))
+                            / (2.5 * (12 - 102 / 12)))) < 1e-9, fr
     fr = decide.fit_frho([0, 4, 0, 0], [1.0, 1.0, 1.0, 1.0], "flat")
     assert fr["phi"] > 1 and abs(fr["mean"] - 1.0) < 1e-9
     assert abs(decide.trigamma(1.0) - math.pi ** 2 / 6) < 1e-8
@@ -2323,6 +2345,19 @@ def test_stage1():
         o = decide.file_counts(copies[1])
         assert o["sums"] == 1 and o["squares"] == 0 and o["complete"] == 1
         assert decide.file_counts(f2)["pairs"] == 2      # (the raw file)
+        # a truncated record, or one with fewer squares, gives way to a
+        # complete one with more, wherever it is
+        f0 = os.path.join(d, "c.jsonl")
+        write_unit(f0, P, [(885, 0), (886, 0)], [], done=(885, 886))
+        with open(f0) as f:
+            rr = [json.loads(x) for x in f]
+        rr[0]["truncated"] = 1
+        with open(f0, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in rr))
+        copies, plain, dd = decide.dedupe_copies([f0, f1, f2], os.path.join(d, "out2"))
+        assert dd["sums_kept"] == 3 and dd["sums_dropped"] == 3 and dd["squares_dropped"] == 1
+        assert decide.file_counts(copies[0])["sums"] == 0
+        assert decide.file_counts(copies[1])["squares"] == 2
     # decide.py without a state: the plan's frozen predictions
     with tempfile.TemporaryDirectory() as d:
         plan = os.path.join(d, "plan.jsonl")
@@ -2346,6 +2381,13 @@ def test_stage1():
         assert r["fit"]["Y"] == 2 and abs(r["fit"]["M"] - 0.25) < 1e-9, r["fit"]
         assert r["fit_outside_flat"]["Y"] == 2 and r["finished"] == 3
         assert "flat prior" in txt and "1 units across an edge" in txt, txt
+        assert "from 1 units" in txt, txt       # (the band units, not their P's)
+        # a band from 0
+        txt = subprocess.run([sys.executable, os.path.join(HERE, "decide.py"), "--plan", plan,
+                              "--units-dir", units, "--json", out, "--draws", "2000",
+                              "--band", "0:3000"], capture_output=True, text=True,
+                             check=True).stdout
+        assert "in the band 2 pairs / 0.25 from 1 units" in txt, txt
     print("stage 1 ok")
 
 
@@ -2373,6 +2415,61 @@ def test_stage1_machine():
                   "--stage1", "1:100:1000000", "--machine", cal, "--instance-hours", "2")
         assert "stage 1: N' 100-1000000 plain" in out and "on this machine: 2 instance-hours" in out
     print("stage 1 with --machine ok")
+
+
+def test_laptop_run():
+    """scripts/laptop/run.py with stand-in binaries: units finish and
+    resume; --hours, SIGINT and SIGHUP stop the running units, remove their
+    partial output and exit"""
+    import signal
+    runpy = os.path.join(HERE, "laptop", "run.py")
+    with tempfile.TemporaryDirectory() as d:
+        plan = os.path.join(d, "plan.jsonl")
+        P = [10, 4, 3, 2]
+        with open(plan, "w") as f:
+            for i in range(3):
+                f.write(json.dumps({"i": i, "P": P, "lo": 300 + i, "hi": 300 + i, "mode": "plain",
+                                    "args": ["--sums", str(300 + i), *map(str, P)],
+                                    "pred_time": 1.0}) + "\n")
+        ok = os.path.join(d, "ok.sh")
+        hang = os.path.join(d, "hang.sh")
+        with open(ok, "w") as f:
+            f.write('#!/bin/sh\nS=$2\nwhile [ "$1" != --out ]; do shift; done\n'
+                    'echo \'{"type": "sum", "n": 6, "P": [10, 4, 3, 2], "S": \'$S\', "cpu": 2.0}\' > "$2"\n'
+                    'echo \'{"type": "done", "complete": 1}\' >> "$2"\n')
+        with open(hang, "w") as f:
+            f.write("#!/bin/sh\nexec sleep 60\n")
+        os.chmod(ok, 0o755)
+        os.chmod(hang, 0o755)
+
+        def go(bin_, out, *extra, sig=None):
+            p = subprocess.Popen([sys.executable, runpy, plan, "--bin", bin_, "--out", out,
+                                  "--workers", "2", *extra], stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True)
+            if sig:
+                time.sleep(1.5)
+                p.send_signal(sig)
+            try:
+                txt = p.communicate(timeout=30)[0]
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.communicate()
+                raise AssertionError(f"run.py did not exit ({sig}, {extra})")
+            return p.returncode, txt
+        out = os.path.join(d, "o1")
+        rc, txt = go(ok, out, "--max-units", "2")
+        assert rc == 0 and "finished: 2/2 units done" in txt and "2.00x the reference" in txt, txt
+        rc, txt = go(ok, out)
+        assert rc == 0 and "2 already done, 1 to run" in txt, txt
+        for sig, extra in ((None, ("--hours", "0.0003")), (signal.SIGINT, ()),
+                           (signal.SIGHUP, ())):
+            out = os.path.join(d, f"o_{sig}")
+            t0 = time.time()
+            rc, txt = go(hang, out, *extra, sig=sig)
+            assert rc == 0 and "stopping" in txt and "finished: 0/3" in txt, (sig, txt)
+            assert time.time() - t0 < 20, sig
+            assert not [x for x in os.listdir(out) if ".part" in x], os.listdir(out)
+    print("laptop run ok")
 
 
 if __name__ == "__main__":
@@ -2410,4 +2507,5 @@ if __name__ == "__main__":
     test_commands()
     test_stage1()
     test_stage1_machine()
+    test_laptop_run()
     print(f"all ok ({time.time() - t0:.0f} s)")

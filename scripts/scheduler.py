@@ -1504,6 +1504,20 @@ def parse_stage1(spec):
     return (h, lo, hi)
 
 
+def stage1_band_note(spec):
+    """a warning when the stage-1 band is not whole N' bands (scripts/
+    decide.py fits whole bands: it then needs --band with band edges), else
+    None"""
+    if not spec:
+        return None
+    edges = (0.0,) + tuple(float(e) for e in NBAND_EDGES) + (math.inf,)
+    if spec[1] in edges and spec[2] in edges:
+        return None
+    return (f"stage 1's band {spec[1]:g}:{spec[2]:g} is not whole N' bands (edges "
+            f"{', '.join(f'{e:g}' for e in edges)}): scripts/decide.py fits whole bands and will "
+            f"need --band with edges")
+
+
 class Stage1:
     """the stage-1 clock: the spec (hours, lo, hi) and the reference
     CPU-seconds of the units launched under it (persisted in the state for
@@ -3818,6 +3832,9 @@ class SchedulerV2:
             self.cands = Cands(exps, src, ratio, self.n)
         self.fill_profiles()
         self.stage1 = Stage1(self.dir, self.n, parse_stage1(getattr(args, "stage1", None)))
+        note = stage1_band_note(self.stage1.spec)
+        if note and not quiet:
+            log("warning: " + note)
         self.refit(save=False)
         self.scorer.stage1 = self.stage1.band()
 

@@ -4,14 +4,15 @@ Stage 1's decision report (research/stage1.md): what the pairs found so far
 say about the SP coupling f_rho, and what that means for spending 1, 3 or 10
 CPU-years. It only reports; it never decides spend.
 
-usage: decide.py STATE [--select stage1|all] [--plan PLAN --units-dir DIR]
+usage: decide.py STATE [--select stage1|all] [--plan PLAN --units-dir DIR] [--only P;...]
                  [--prior shipped|pre|flat] [--band LO:HI]
                  [--ecurve FILE] [--table FILE] [--json OUT]
        decide.py --plan PLAN --units-dir DIR [...]     (no state: the plan's
                  frozen per-unit predictions only)
        decide.py --simulate PLAN [--reps 1000] [--pairs 45] [--phi 1.41]
 
-STATE is a scheduler state (scripts/scheduler.py --state). The records used:
+STATE is a scheduler state (scripts/scheduler.py --state), fully profiled
+(a state made with `--only` needs the same --only here). The records used:
   --select stage1 (the default when the state has a stage-1 clock): the
       units `scheduler.py run --stage1` launched while stage 1 was on
       (launched_6.jsonl "stage1"), with the predictions frozen at launch;
@@ -26,10 +27,12 @@ STATE is a scheduler state (scripts/scheduler.py --state). The records used:
       state's fit, is per square found); the units that start below LO
       and reach into the band are left out.
 
-Each plain sum (P, S) counts once: a sum searched again in a later file
-(the state's older records hold benchmark and regression sums searched up
-to 16 times) is dropped with its squares, and a d-first sum searched in
-full counts only where no plain record of (P, S) is kept.
+Each plain sum (P, S) counts once: of the files that searched it (the
+state's older records hold benchmark and regression sums searched up to 16
+times) one keeps it, a record not truncated first, then the one with the
+most squares, then the first file; the others lose it and its squares,
+and a d-first sum searched in full counts only where no plain record of
+(P, S) is kept.
 
 The fit (from worktree f1/p1-learn-the-sp-coup, scratchpad frho_block.py,
 "as written"): per P its (square, SP traversal) pairs Y_P in the cells of
@@ -39,8 +42,9 @@ band edges, scheduler.NBAND_EDGES, or inf), from its plain squares and
 searched in full in one record, against the model's M_P = sum over its
 squares of k_SP r_S r_P 720 e^{lpSP} (scheduler.sp_kappa; r_S, r_P the
 state's learned class rates); quasi-Poisson with a gamma prior: posterior
-Gamma(Y / phi + a, M / phi + rate0), phi = the Pearson dispersion of the
-per-P totals x G / (G - 1), floored at 1; priors (center, ln sd of f_rho):
+Gamma(Y / phi + a, M / phi + rate0), phi = sum_P (Y_P - f M_P)^2 /
+(f (M - sum_P M_P^2 / M)), f = Y / M (the dispersion of the per-P totals,
+unbiased for unequal M_P), floored at 1; priors (center, ln sd of f_rho):
 shipped = the calibration search's posterior (median 1.06, 0.235: f_rho^2
 ln sd 0.47, median 1.12, mean 1.23; for records that are not the
 calibration search's), pre = its prior (mean 1, 0.29: to replay its
@@ -96,13 +100,70 @@ def trigamma(x):
     return v + 1 / x + x2 / 2 + (1 / x) * x2 * (1 / 6 - x2 * (1 / 30 - x2 * (1 / 42 - x2 / 30)))
 
 
+def gamma_cdf(a, x):
+    """the regularized lower incomplete gamma function P(a, x) (series below
+    a + 1, continued fraction above; Numerical Recipes 6.2)"""
+    if x <= 0:
+        return 0.0
+    lpre = a * math.log(x) - x - math.lgamma(a)
+    if x < a + 1:
+        term = total = 1.0 / a
+        ap = a
+        for _ in range(10000):
+            ap += 1
+            term *= x / ap
+            total += term
+            if abs(term) < abs(total) * 1e-15:
+                break
+        return min(1.0, total * math.exp(lpre))
+    tiny = 1e-300
+    b = x + 1 - a
+    c = 1 / tiny
+    d = 1 / b
+    h = d
+    for i in range(1, 10000):
+        an = -i * (i - a)
+        b += 2
+        d = an * d + b
+        d = tiny if abs(d) < tiny else d
+        c = b + an / c
+        c = tiny if abs(c) < tiny else c
+        d = 1 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1) < 1e-15:
+            break
+    return max(0.0, 1.0 - math.exp(lpre) * h)
+
+
 def gamma_quantile(shape, rate, z):
-    """the quantile at standard normal z of Gamma(shape, rate) (Wilson-
-    Hilferty; shape >= ~1)"""
+    """the quantile at standard normal z (probability Phi(z)) of
+    Gamma(shape, rate): Newton steps on gamma_cdf from the Wilson-Hilferty
+    approximation (which alone is 23% low at the 5% point at shape 1),
+    kept inside a bracket"""
     if shape <= 0 or rate <= 0:
         return float("nan")
+    p = 0.5 * math.erfc(-z / math.sqrt(2))
     c = 1.0 / (9.0 * shape)
-    return shape * max(1.0 - c + z * math.sqrt(c), 0.0) ** 3 / rate
+    x = shape * max(1.0 - c + z * math.sqrt(c), 0.0) ** 3
+    if x <= 0:      # (P(a, x) ~ x^a / Gamma(a + 1) for small x)
+        x = math.exp((math.log(p) + math.lgamma(shape + 1)) / shape)
+    lo, hi = 0.0, float("inf")
+    for _ in range(200):
+        f = gamma_cdf(shape, x) - p
+        if f > 0:
+            hi = x
+        else:
+            lo = x
+        dens = math.exp((shape - 1) * math.log(x) - x - math.lgamma(shape))
+        xn = x - f / dens if dens > 0 else float("nan")
+        if not (lo < xn < hi):
+            xn = (lo + hi) / 2 if math.isfinite(hi) else 2 * x
+        if abs(xn - x) <= 1e-13 * x:
+            x = xn
+            break
+        x = xn
+    return x / rate
 
 
 def prior_shape_rate(prior):
@@ -128,7 +189,12 @@ def fit_frho(Y, M, prior="shipped", phi_min=1.0):
     G = sum(1 for m in M if m > 0)
     phi = max(1.0, phi_min)
     if G >= 2 and Yt > 0:
-        phi = max(phi, sum((y - fm * m) ** 2 for y, m in zip(Y, M)) / (fm * Mt) * G / (G - 1))
+        # E sum (y - fm m)^2 = phi f (Mt - sum m^2 / Mt) for Var y = phi f m
+        # (G / (G - 1) of sum / Mt when the m are equal; a P holding much of
+        # Mt would make that run low)
+        dof = Mt - sum(m * m for m in M) / Mt
+        if dof > 1e-12 * Mt:
+            phi = max(phi, sum((y - fm * m) ** 2 for y, m in zip(Y, M)) / (fm * dof))
     shape = Yt / phi + a
     rate = Mt / phi + rate0
     out = {"prior": prior, "Y": Yt, "M": Mt, "nP": G, "phi": phi, "shape": shape, "rate": rate,
@@ -224,9 +290,9 @@ def cpu_for(fr, pts, p, draws=20000, lo=0.01, hi=1e5):
 # records
 
 
-def scheduler_args(state):
+def scheduler_args(state, only=None):
     """the scheduler's argument namespace (emit's defaults), with the
-    state's stage-1 spec (stage1_6.json) when it has one"""
+    state's stage-1 spec (stage1_6.json) when it has one, and --only"""
     import scheduler as sch
     got = {}
     emit = sch.v2_emit
@@ -238,7 +304,8 @@ def scheduler_args(state):
             st1 = ["--stage1", ":".join(f"{v:g}" for v in json.load(f)["spec"])]
     except (OSError, ValueError, KeyError):
         pass
-    sys.argv = ["scheduler.py", "--state", state, "emit", "--units", "1"] + st1
+    sys.argv = (["scheduler.py", "--state", state, "emit", "--units", "1"] + st1
+                + (["--only", only] if only else []))
     try:
         sch.main()
     finally:
@@ -326,29 +393,40 @@ def selected_units(state, sch_obj, select, plan, units_dir):
 
 def dedupe_copies(paths, dst, n=6):
     """copies in dst of the unit files (in the given order) with each plain
-    sum (P, S) once: the first file with a "sum" record of (P, S) keeps it
-    and its squares; later files lose that sum record and its squares
-    (searched again: the state's older records hold benchmark and
-    regression sums searched up to 16 times), and every calibration-stream
-    record of a (P, S) with a plain sum is dropped (a 1-in-k sample of the
-    same squares). Returns (the copies' paths, the plain (P key, S) kept,
-    counts)"""
+    sum (P, S) once: one file with a "sum" record of (P, S) keeps it and its
+    squares (a record not truncated first, then the one with the most
+    squares, then the first file); the other files lose that sum record and
+    its squares (searched again: the state's older records hold benchmark
+    and regression sums searched up to 16 times), and every
+    calibration-stream record of a (P, S) with a plain sum is dropped (a
+    1-in-k sample of the same squares). Returns (the copies' paths, the
+    plain (P key, S) kept, counts)"""
     import scheduler as sch
-    owner = {}
+    best = {}       # (P key, S) -> ((not truncated, squares, -file), file)
     for i, path in enumerate(paths):
+        nsq = collections.Counter()
         try:
             with open_any(path) as f:
                 for line in f:
-                    if '"sum"' not in line:
+                    if '"sum"' not in line and '"square"' not in line:
                         continue
                     try:
                         r = json.loads(line)
                     except ValueError:
                         continue
-                    if r.get("type") == "sum" and r.get("n") == n:
-                        owner.setdefault((sch.norm_p(r["P"]), int(r["S"])), i)
+                    t = r.get("type")
+                    if t not in ("sum", "square") or r.get("n") != n:
+                        continue
+                    key = (sch.norm_p(r["P"]), int(r["S"]))
+                    if t == "square":
+                        nsq[key] += 1
+                        continue
+                    rank = (not r.get("truncated"), nsq[key], -i)
+                    if key not in best or rank > best[key][0]:
+                        best[key] = (rank, i)
         except OSError:
             continue
+    owner = {k: i for k, (_, i) in best.items()}
     os.makedirs(dst, exist_ok=True)
     dd = collections.Counter()
     copies = []
@@ -575,6 +653,8 @@ def print_frozen(units, counts, pr=print):
         O["best"] = best
         for k in ("squares", "S", "P", "pairs", "SP"):
             Pd[k] += float(u.get("pred_" + k, 0.0) or 0.0)
+        if "pred_rec_squares" in u:     # (d-first: its calibration stream's squares)
+            Pd["squares"] += float(u["pred_rec_squares"]) - float(u.get("pred_squares", 0.0))
         Pd["time"] += float(u.get("pred_time", u.get("time", 0.0)) or 0.0)
     pr(f"\nfrozen predictions of the {len(units)} units (at launch / in the plan, f_rho = 1):")
     for k in ("squares", "S", "P", "pairs"):
@@ -594,7 +674,7 @@ def state_part(a, out):
     import numpy as np
     import scheduler as sch
     pr = print
-    args = scheduler_args(a.state)
+    args = scheduler_args(a.state, a.only)
     s = sch.SchedulerV2(args, quiet=True)
     spec = s.stage1.spec
     select = a.select or ("stage1" if spec else "all")
@@ -685,16 +765,26 @@ def frozen_part(a, out):
     out.update({"units": len(units), "finished": len(fin), "band": [lo, hi]})
     if units:
         out["frozen"] = print_frozen(units, counts)
-    llo, lhi = math.log(lo), math.log(hi) if hi < float("inf") else float("inf")
+    llo = math.log(lo) if lo > 0 else -math.inf
+    lhi = math.log(hi) if hi < math.inf else math.inf
     inP = collections.defaultdict(lambda: [0.0, 0.0])
     outP = collections.defaultdict(lambda: [0.0, 0.0])
     left = [0, 0.0]
+    n_in = 0
     for u, c in fin:
-        ps = float(u.get("pred_squares", 0.0) or 0.0)
+        # (pred_rec_squares: the squares a d-first unit records, its
+        # calibration stream's; pred_squares is all of its sums')
+        ps = float(u.get("pred_rec_squares", u.get("pred_squares", 0.0)) or 0.0)
         m = float(u["pred_pairs"]) * c["squares"] / ps if ps > 0 else 0.0
         l0, l1 = u["lNp"]
         if l0 >= llo and l1 < lhi:
             acc = inP
+            n_in += 1
+            if (lo, hi) == (sch.STAGE1_DEFAULT[1], sch.STAGE1_DEFAULT[2]) and "stage1" in u \
+                    and not u["stage1"]:
+                sys.exit(f"plan line {u['i']}: N' {math.exp(l0):.0f}-{math.exp(l1):.0f} is in "
+                         f"the band but the plan does not mark it stage1 (another band?): "
+                         f"give --band")
         elif l1 < llo or l0 >= lhi:
             acc = outP
         else:
@@ -708,7 +798,7 @@ def frozen_part(a, out):
     out["band_desc"] = f"N' {lo:g}-{hi:g}: the finished units whose sums all lie in it"
     out["data_lines"] = [
         f"data: in the band {sum(y for y, _ in ins):.0f} pairs / {sum(m for _, m in ins):.2f} "
-        f"from {sum(1 for u, c in fin if tuple(u['P']) in inP)} units; outside "
+        f"from {n_in} units; outside "
         f"{sum(y for y, _ in outs):.0f} / {sum(m for _, m in outs):.2f}; {left[0]} units across "
         f"an edge of the band left out ({left[1]:.0f} pairs)"]
     return lo, hi, ins, outs
@@ -873,6 +963,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("state", nargs="?")
     ap.add_argument("--select", choices=("stage1", "all"), default=None)
+    ap.add_argument("--only", help="the --only of a state made with it (otherwise the model "
+                                    "profiles the whole candidate pool first, which takes long "
+                                    "and writes the profiles into the state)")
     ap.add_argument("--plan")
     ap.add_argument("--units-dir")
     ap.add_argument("--prior", choices=tuple(FRHO_PRIORS), default="shipped")

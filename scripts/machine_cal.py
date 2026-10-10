@@ -38,10 +38,12 @@ usage: machine_cal.py [--bin DIR/msearch] [--out cal.json] [--ks 1,8,16]
 
 Run it under the conditions of the search (nothing else heavy running).
 About 1.5 minutes on a fast x86 instance (each K pass ~25 s of wall); the
-portable kernels (no AVX-512BW) are slower per sum: on x86 with clang
--march=x86-64-v3 2.5-2.6x on plain sums and 1.9-2.0x on d-first ones, with
-128-bit vectors (x86-64-v2, NEON's width) 3.2-3.7x (research/ideas.md, "The
-carried path without AVX-512"); the matrix path 4-12x.
+portable kernels (no AVX-512BW) are slower per sum: on x86 (two
+verifications) with clang -march=x86-64-v3 2.55-3.0x on plain sums and
+1.6-2.0x on d-first ones, with gcc -march=x86-64-v3 3.5-4.2x and 2.3-3.1x;
+with 128-bit vectors (x86-64-v2, NEON's width) clang 3.2x, gcc 4.5-4.6x on
+plain sums (research/ideas.md, "The carried path without AVX-512"); the
+matrix path 4-12x.
 """
 import argparse
 import hashlib
@@ -208,11 +210,12 @@ def isa_class(isa):
     """the class of a CPU (or build) for this search from its ISA names"""
     s = set(isa)
     if "arm64" in s:
-        return "arm64 (portable carried kernels, expected ~2.5-3.5x slower per core)"
+        return "arm64 (portable carried kernels, expected ~2.5-4.5x slower per core)"
     if "avx512bw" not in s:
-        return ("avx2 (no AVX-512BW: portable carried kernels, ~2.5-3.6x slower per core "
-                "on plain sums)" if "avx2" in s
-                else "x86-64 without AVX2 (portable carried kernels, ~3.2-3.7x slower)")
+        return ("avx2 (no AVX-512BW: portable carried kernels, ~2.5-4.2x slower per core "
+                "on plain sums: clang ~2.5-3x, gcc ~3.5-4.2x)" if "avx2" in s
+                else "x86-64 without AVX2 (portable carried kernels, ~3.2-4.6x slower per core "
+                     "on plain sums: clang ~3.2x, gcc ~4.5x)")
     missing = [f for f in FAST_EXT if f not in s]
     if missing:
         return "avx512 cascadelake class (no " + "/".join(missing) + ": ~1.05x the CPU)"
@@ -450,8 +453,11 @@ def main():
                             + rebuild)
         elif "avx512bw" not in bisa:
             warnings.append("the build has no AVX-512BW: the carried path with the portable "
-                            "kernels (the same nodes), ~2.5-3.5x the CPU of the reference build "
-                            "per plain sum, ~1.9-2x per d-first sum on x86" + rebuild)
+                            "kernels (the same nodes); on x86 with 256-bit vectors ~2.5-3x "
+                            "(clang) or ~3.5-4.2x (gcc) the CPU of the reference build per "
+                            "plain sum, ~1.6-2x (clang) or ~2.3-3.1x (gcc) per d-first sum; "
+                            "with 128-bit vectors (x86-64-v2) ~3.2x (clang) or ~4.5x (gcc) per "
+                            "plain sum" + rebuild)
         miss = [f for f in FAST_EXT if f not in bisa]
         if path == "carry512" and miss and "avx512bw" in bisa:
             warnings.append(f"the build lacks {', '.join(miss)} (cascadelake class: ~1.05x the "

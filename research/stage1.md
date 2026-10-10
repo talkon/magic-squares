@@ -32,7 +32,7 @@ Can a short, cheap first stage narrow that band before the money goes?
 * **What the 45 pairs buy.** With Poisson-like counts (dispersion phi 1-2.1)
   decide.py's 90% band of E at 1 CPU-year narrows from **x5.8 to x3.3-3.8**
   (simulation, shipped prior). The pairs found so far are not clustered
-  once each sum is counted once (section 4): outside the band phi 1.03, in
+  once each sum is counted once (section 4): outside the band phi 1.05, in
   it 1.0. The first version of this note read phi 6.8 and f_rho ~4 from
   the state's raw records, where benchmark and regression sums searched
   8-16 times each count every pair 8-16 times; that risk (x4.6 at 45 pairs,
@@ -82,10 +82,13 @@ Can a short, cheap first stage narrow that band before the money goes?
   E is the same at 40 h (0.0109).
 * `scripts/decide.py STATE` (or `STATE --plan PLAN --units-dir DIR` for a
   static plan run by scripts/laptop/run.py, or `--plan PLAN --units-dir
-  DIR` alone, without a state): reports, never decides.
+  DIR` alone, without a state): reports, never decides. The state must be
+  fully profiled, or made with `--only` and given the same `--only` (else
+  the model first profiles the whole pool, for minutes, into the state).
   * the records: by default the units launched under stage 1;
-  * each plain sum (P, S) once: a repeat in a later file is dropped with its
-    squares, the calibration stream of a sum with a plain record is
+  * each plain sum (P, S) once: of its copies the one kept is a record not
+    truncated, then the one with the most squares, then the first file's;
+    the others are dropped with their squares, the calibration stream of a sum with a plain record is
     dropped, and a d-first sum searched in full counts only where no plain
     record of it is kept;
   * checks: observed / predicted squares, S and P traversals per N' band
@@ -96,8 +99,10 @@ Can a short, cheap first stage narrow that band before the money goes?
     is copied, not its Summary changes): per P the band's plain pairs
     Y_P against M_P, plus the d-first sums searched in full in one record
     (their est_pairs; their calibration streams left out), quasi-Poisson
-    with a gamma prior, phi = the Pearson dispersion of the per-P totals
-    floored at 1 (`--phi-min` raises the floor). Priors: shipped (the
+    with a gamma prior, phi = the dispersion of the per-P totals
+    (sum (Y_P - f M_P)^2 / (f (M - sum M_P^2 / M)), unbiased also when one P
+    holds much of M) floored at 1 (`--phi-min` raises the floor); exact
+    gamma quantiles. Priors: shipped (the
     calibration search's posterior, set by its median 1.06, f_rho^2 ln sd
     0.47: f_rho^2 median 1.12, mean 1.23, the search's 1.12 / 1.24; the
     first version set its mean to 1.06, median 1.041, which read P(>=1)
@@ -133,16 +138,17 @@ Can a short, cheap first stage narrow that band before the money goes?
 | forecast --shipped 0.120 / 0.185 / 0.283 | 0.1202 / 0.1843 / 0.2827 (the 3-year value is 0.184 to 3 digits; the target's 0.185 was rounded) |
 | `--stage1` E at 1 CPU-year drops <= 1% | 0.1202 -> 0.1202 (0.0%); also 3 and 10 CPU-years unchanged to 4 digits (again after the merge: 0.0427 / 0.0718 / 0.1202 / 0.1843 / 0.2827 at 0.1-10 CPU-years with and without `--stage1`) |
 | replay: the calibration search's records, 'pre' prior -> median 1.06, f_rho^2 ln sd 0.47 within 0.02 | passes only with `--band 3000:inf` (the band that search was fitted on): median 1.051, f_rho^2 ln sd 0.460 (7 pairs / 5.74: 4.85 from plain squares, 0.89 from its 7 whole d loops, which found 0); without the d loops the median is 1.099. With the default band (3-6k) it gives 1.027 / 0.487 (5 pairs / 4.21) and fails by 0.033 |
-| simulation (1,000 replicates per f_rho 0.5 / 1 / 2, per-P gamma clustering, the plan's first 45 band pairs over 74 P): 90% interval covers 85-95%, posterior median unbiased within 5% | flat prior, phi 1.0 / 1.41 / 2.1: covers 86.0-91.3%, bias -2.9% to +0.2%: **passes**. phi 6.8: 77.4-86.1%, bias -1.8 to -10.0%: fails (phi_hat 4.9-6.1 runs low), but section 4 finds no such clustering |
-| (same, shipped prior) | f_rho = 1: covers 93.9-95.4%, bias +1.6 to +2.1%; f_rho drawn from the prior: 88.2-91.3%; at f_rho 0.5 / 2 it covers only 35-53% at phi 1-2.1 (the prior pulls the median +32-45% / -14-20%): by design, but a far-off truth needs the flat-prior line, which decide.py prints |
-| band <= x4 at 45 pairs (shipped prior, f_rho = 1) | x3.32 / 3.50 / 3.76 at phi 1 / 1.41 / 2.1: passes (x4.60 at phi 6.8, which the deduplicated records do not show) |
-| ctest -R fast_ | 51/51 passed (f1/stage1); 67/67 after the merge with the machine calibration and the portable path (integ/stage1); test_scheduler.py all ok (new test_stage1, test_stage1_machine), test_machine_cal.py and test_calibrate.py ok |
+| simulation (1,000 replicates per f_rho 0.5 / 1 / 2, per-P gamma clustering, the plan's first 45 band pairs over 74 P): 90% interval covers 85-95%, posterior median unbiased within 5% | flat prior, phi 1.0 / 1.41 / 2.1: covers 86.1-91.3%, bias -2.9% to +0.2%: **passes**. phi 6.8: 77.7-86.1%, bias -1.8 to -10.1%: fails (phi_hat 4.9-6.1 runs low), but section 4 finds no such clustering |
+| (same, shipped prior) | f_rho = 1: covers 93.9-95.4%, bias +1.6 to +2.1%; f_rho drawn from the prior: 87.9-91.4%; at f_rho 0.5 / 2 it covers only 35-53% at phi 1-2.1 (the prior pulls the median +32-45% / -14-20%): by design, but a far-off truth needs the flat-prior line, which decide.py prints |
+| band <= x4 at 45 pairs (shipped prior, f_rho = 1) | x3.33 / 3.50 / 3.76 at phi 1 / 1.41 / 2.1: passes (x4.61 at phi 6.8, which the deduplicated records do not show) |
+| ctest -R fast_ | 51/51 passed (f1/stage1); 67/67 after the merge with the machine calibration and the portable path (integ/stage1); test_scheduler.py all ok (new test_stage1, test_stage1_machine, and test_laptop_run: run.py exits on --hours, SIGINT and SIGHUP and removes partial output), test_machine_cal.py and test_calibrate.py ok |
 | measurement: squares within Poisson + 20% | 5,695 / 5,820 = 0.979 [0.957, 1.000]: passes; band units 5,476 / 5,021 = 1.09 |
 
 The simulation and the band rows are from `decide.py --simulate` on the
-committed plan with the shipped prior set by its median (integ/stage1);
+committed plan with the shipped prior set by its median, exact gamma
+quantiles and the dispersion for unequal M_P (integ/stage1, after review);
 the first version's numbers (prior set by its mean) differ by up to 6
-points of coverage.
+points of coverage, the review's changes by up to 0.4.
 
 ## 3. Measurements
 
@@ -174,8 +180,11 @@ random from the committed plan, one process, 1,323 CPU-s):
 | pairs | 6 (3 in one P) | 4.58 | 1.31 [0.57, 2.59] |
 | CPU | 0.368 h | 0.319 h (reference) | 1.15 |
 
-decide.py on them: f_rho 1.080 median [0.745, 1.503] (shipped prior,
-6 / 5.04 over 10 P, phi 1.59); flat prior 1.089 [0.388, 2.342].
+decide.py on them without a state (`--plan --units-dir`): f_rho 1.080
+median [0.745, 1.504] (shipped prior, 6 / 5.04 over 10 P, phi 1.61); flat
+prior 1.087 [0.386, 2.355]. With the state's records (decide.py STATE
+--plan --units-dir) the shipped-prior line is the same and the flat prior
+gives 1.086 [0.387, 2.352].
 
 Projected CPU for 45 band pairs: 40.3 reference hours counting every sum in
 the band, 51.4 counting the band units only (what decide.py fits without a
@@ -196,12 +205,15 @@ them are the benchmark and regression sums, searched 8-16 times each
 
 | records of the plan's state (1,324 files) | outside the band (flat prior) | inside the band (3-6k) |
 | --- | --- | --- |
-| raw (every record, as the first version) | 158 pairs / 26.6, phi 6.1 | 12 / 7.7, phi 2.1 |
+| raw records (decide.py of 3f1cb6a, `--select all --prior flat`) | 158 pairs / 26.6, phi 6.1 | 12 / 7.7, phi 2.1 |
 | each plain sum once (the verification's dedupe.py) | 26 / 17.6, phi 1.12, f_rho 1.46 [1.01, 2.02] | 8 / 7.0, phi 1.0 |
-| each sum once, also the calibration streams and d-first sums of a sum with a plain record (decide.py) | 25 / 18.0, phi 1.03, f_rho 1.37 [0.96, 1.89] | 8 / 7.00, phi 1.0, f_rho 1.08 [0.77, 1.47] (shipped prior) |
+| each sum once, also the calibration streams and d-first sums of a sum with a plain record (decide.py) | 25 / 18.1, phi 1.05, f_rho 1.36 [0.95, 1.88] | 8 / 7.05, phi 1.0, f_rho 1.08 [0.77, 1.47] (shipped prior) |
 
-(decide.py dropped 12,495 repeated sums with 6,026 squares and 136 pairs,
-and left out 84 d-first sums that also have a plain record.) So the
+(decide.py dropped 12,495 repeated sums with 5,726 squares and 136 pairs,
+and left out 84 d-first sums that also have a plain record. Of the copies of
+a sum it keeps a record not truncated, then the one with the most squares;
+keeping the first file's, as first written, dropped 300 more squares, among
+them a band sum's 77 behind a truncated record with none: 0.05 model pairs.) So the
 evidence is phi ~1 inside and outside the band, and the "band <= x4 at 45
 pairs" criterion passes (x3.3-3.8 at phi 1-2.1). The f_rho ~1.4 outside the
 band is likely biased up still, by which sums were chosen for the

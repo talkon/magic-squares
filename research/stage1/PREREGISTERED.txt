@@ -30,7 +30,7 @@ notes after review (2026-10-10, integ/stage1; the plan and every frozen predicti
 unchanged: make_plan.py --stage1 on the same state reproduces sha256 a6a4be6a... after
 the merge with the machine calibration, and its first 15,164 units are those of
 research/laptop/plan-20261010, which it supersedes as the laptop's plan; the
---time-limit factor stays 12, which covers the portable build's expected 2.5-3.5x):
+--time-limit factor stays 12, which covers the portable build's expected 2.5-4.5x):
 * the 134 band units' sums lie at N' 3.0-4.2k (first sums 3.0-4.0k; 100 end below 3.6k).
 * the band holds 91.59 predicted pairs counted by sum: 60.53 in the band units and 31.06
   in the later sums of 243 units that start below N' 3000. 45 band pairs are predicted

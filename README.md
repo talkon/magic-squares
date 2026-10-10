@@ -138,8 +138,10 @@ hashes of its search path), runs four fixed sums as 1, cores and logical
 CPUs concurrent copies, and writes the instance's plain and d-first speeds
 (reference CPU-hours per instance-hour) at the best worker count. It warns
 when the build has no AVX-512BW (AVX2 or ARM: the carried path with portable
-kernels, the same nodes at ~2.5-3.5x the CPU per plain sum and ~1.9-2x per
-d-first sum, measured on x86 with clang and gcc; the matrix path of a
+kernels, the same nodes at ~2.5-3x the CPU per plain sum with clang and
+~3.5-4.2x with gcc (x86-64-v3; 128-bit vectors ~3.2x clang, ~4.5x gcc),
+and per d-first sum ~1.6-2x with clang, ~2.3-3.1x with gcc, measured on
+x86; the matrix path of a
 -DCARRY_MAX_W=0 build ~4-12x) or lacks VPOPCNTDQ/VBMI/GFNI/BITALG, and when
 SMT vCPUs add less than their count. `forecast --machine` reports E and P(>=1 magic square) after H
 instance-hours; `run --machine` learns the time laws in reference CPU

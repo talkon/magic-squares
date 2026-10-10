@@ -5,7 +5,14 @@
 # node counts of the fast x86 build (the same search, also without
 # AVX-512), and the differential fuzz test must pass, with the node count
 # of every seed and variant of the fast x86 build. Prints the time of
-# bench/quick.txt.
+# bench/quick.txt and adds it, with the search kernels, to
+# build-laptop/build_info.txt (run.py copies that file into its meta file,
+# collect.sh packs it).
+#
+# CC picks the compiler; ARCH replaces the target flags, which are by default
+# the first of -march=native, -mcpu=native, -mcpu=apple-m1 that the compiler
+# takes. On an x86 machine with AVX-512, ARCH=-march=x86-64-v2 (or -v3)
+# builds the portable kernels, to rehearse the laptop's build.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 B=$ROOT/build-laptop
@@ -13,10 +20,14 @@ mkdir -p "$B"
 CC=${CC:-cc}
 cd "$ROOT/src/c"
 probe() { echo 'int main(void){return 0;}' > "$B/probe.c"; $CC $1 -o "$B/probe" "$B/probe.c" 2>/dev/null; }
-ARCH=""
-for f in -march=native -mcpu=native -mcpu=apple-m1; do
-  if probe "$f"; then ARCH=$f; break; fi
-done
+if [ -n "${ARCH:-}" ]; then
+  probe "$ARCH" || { echo "the compiler does not take ARCH=$ARCH"; exit 1; }
+else
+  ARCH=""
+  for f in -march=native -mcpu=native -mcpu=apple-m1; do
+    if probe "$f"; then ARCH=$f; break; fi
+  done
+fi
 LTO=""
 if probe -flto; then LTO=-flto; fi
 DEFS=""
@@ -46,10 +57,11 @@ done
 # otherwise the plain C ones of src/c/arrange_carry.h, e.g. on ARM), which
 # visits exactly the nodes of the fast x86 build
 if $CC $FLAGS -dM -E -x c /dev/null 2>/dev/null | grep -q __AVX512BW__; then
-  echo "search kernels: AVX-512"
+  KERNELS="search kernels: AVX-512"
 else
-  echo "search kernels: portable (plain C, no AVX-512BW)"
+  KERNELS="search kernels: portable (plain C, no AVX-512BW)"
 fi
+echo "$KERNELS"
 for fn in quick:1770779 full:14958507; do
   f=${fn%%:*}; n=${fn#*:}
   got=$(tail -1 "$B/check_$f.txt" | awk '{print $2}')
@@ -76,4 +88,6 @@ if [ "$got" != "3761910603 92405" ]; then
 fi
 cd "$ROOT"
 echo "all checks passed"
-tail -1 "$B/check_quick.txt" | awk '{print "bench/quick.txt search time: " $4 " s (fast x86 build: ~0.25-0.29 s; the ratio is this machine'"'"'s time per core against the reference, expected ~2.5-3.5x without AVX-512)"}'
+QUICK=$(tail -1 "$B/check_quick.txt" | awk '{print $4}')
+{ echo "$KERNELS"; echo "all checks passed"; echo "bench/quick.txt search time: $QUICK s"; } >> "$B/build_info.txt"
+echo "bench/quick.txt search time: $QUICK s (fast x86 build: ~0.25-0.29 s; the ratio is this machine's time per core against the reference, expected ~2.5-4.5x without AVX-512)"
