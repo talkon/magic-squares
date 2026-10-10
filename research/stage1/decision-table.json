@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "note": "Fixed before stage 1 runs (its sha256 goes into the plan's PREREGISTERED file). The thresholds X are the user's to set: null = not set. scripts/decide.py evaluates each row's metric on the stage-1 posterior and prints whether the condition holds; it never decides or launches anything. Metric: P(at least one magic square) after C CPU-years in total (stage 1 included), from the predictive distribution (E_ship(C) x f_rho^2 x the class-factor, pair and selection terms).",
+  "rows": [
+    {"id": "stop", "action": "stop after stage 1", "metric": "P(>=1)", "C": 10, "op": "<", "X": null},
+    {"id": "go-1y", "action": "continue to 1 CPU-year", "metric": "P(>=1)", "C": 3, "op": ">=", "X": null},
+    {"id": "go-3y", "action": "continue to 3 CPU-years", "metric": "P(>=1)", "C": 3, "op": ">=", "X": null},
+    {"id": "go-10y", "action": "plan for 10 CPU-years", "metric": "P(>=1)", "C": 10, "op": ">=", "X": null}
+  ]
+}

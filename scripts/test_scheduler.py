@@ -2224,6 +2224,67 @@ def test_machine():
     print("machine ok")
 
 
+def test_stage1():
+    """stage 1 (--stage1): the spec, the clock, plain in the band only, and
+    decide.py's fit and predictive"""
+    import numpy as np
+    import decide
+    assert scheduler.parse_stage1(None) is None and scheduler.parse_stage1("off") is None
+    assert scheduler.parse_stage1("0") is None
+    assert scheduler.parse_stage1("60") == (60.0, 3000.0, 6000.0)
+    assert scheduler.parse_stage1("10:2000:5000") == (10.0, 2000.0, 5000.0)
+    for bad in ("1:5:4", "1:2"):
+        try:
+            scheduler.parse_stage1(bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    with tempfile.TemporaryDirectory() as state:
+        st = scheduler.Stage1(state, 6, (1.0, 3000.0, 6000.0))
+        assert st.active and st.band() == (math.log(3000), math.log(6000))
+        assert not st.charge(1800) and st.charge(1800) and not st.active and st.band() is None
+        st.save()
+        assert scheduler.Stage1(state, 6, (1.0, 3000.0, 6000.0)).spent == 3600
+        # another spec starts a new clock; the sample scales the hours
+        assert scheduler.Stage1(state, 6, (2.0, 3000.0, 6000.0)).spent == 0
+        st2 = scheduler.Stage1(state, 6, (2.0, 3000.0, 6000.0), scale=0.1)
+        assert st2.limit == 720 and st2.active
+        assert not scheduler.Stage1(state, 6, None).active
+        # plain in the band, the mode elsewhere unchanged
+        cands, sc, plan = make_v2([(12, 6, 3, 2, 1, 1), (13, 7, 4, 3, 1, 1)], state)
+        for a in range(2):
+            S = np.arange(int(cands.S0[a]) + 1, int(2 * cands.S0[a]), 7, dtype=float)
+            r0 = sc.eval_modes(a, S)
+            sc.stage1 = (math.log(3000), math.log(6000))
+            r1 = sc.eval_modes(a, S)
+            sc.stage1 = None
+            lNp, dm0, dm1 = r0[6], r0[5], r1[5]
+            inb = (lNp >= math.log(3000)) & (lNp < math.log(6000))
+            assert not dm1[inb].any() and (dm1[~inb] == dm0[~inb]).all()
+            assert dm0[inb].any() and dm0[~inb].any()
+            assert np.allclose(r0[2], r1[2]) and np.allclose(r0[1], r1[1])
+        # a plain unit's predictions: pairs = sp_kappa r_S r_P 720 e^lpSP per square
+        u = plan.unit(0)
+        p = scheduler.unit_predictions(sc, u)
+        assert abs(p["pred_squares"] - u.squares) < 1e-6 * max(u.squares, 1)
+        assert 0 < p["pred_pairs"] < p["pred_SP"] * scheduler.sp_kappa() * 1.5
+    # decide.py: the quasi-Poisson gamma fit, the replay of the calibration
+    # search (7 pairs / 5.74 at the 'pre' prior: median 1.05, f_rho^2 ln sd 0.46)
+    fr = decide.fit_frho([7.0], [5.74], "pre")
+    a = 1 / 0.29 ** 2 + 0.5
+    assert abs(fr["mean"] - (7 + a) / (5.74 + a)) < 1e-9 and fr["phi"] == 1.0
+    assert abs(fr["median"] - 1.06) < 0.02 and abs(fr["ln_sd_f2"] - 0.47) < 0.02
+    assert decide.fit_frho([], [], "flat") is None
+    fr = decide.fit_frho([0, 4, 0, 0], [1.0, 1.0, 1.0, 1.0], "flat")
+    assert fr["phi"] > 1 and abs(fr["mean"] - 1.0) < 1e-9
+    assert abs(decide.trigamma(1.0) - math.pi ** 2 / 6) < 1e-8
+    pts = [(1.0, 0.1), (10.0, 0.3)]
+    assert abs(decide.e_at(pts, 3.0) - 0.1 * 3 ** math.log10(3)) < 1e-9
+    pr = decide.predictive(None, pts, [1.0], 20000)[1.0]
+    assert abs(pr["P1"] - (1 - math.exp(-0.1))) < 0.01 and pr["E_point"] == 0.1
+    print("stage 1 ok")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     if len(sys.argv) > 1:
@@ -2257,4 +2318,5 @@ if __name__ == "__main__":
     test_no_enumerate()
     test_commands_v2()
     test_commands()
+    test_stage1()
     print(f"all ok ({time.time() - t0:.0f} s)")

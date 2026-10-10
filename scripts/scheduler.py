@@ -1472,6 +1472,83 @@ DFIRST_TIME_MIN_N = 2000
 # CALIB_PHI where the stream sampled fewer than 5 squares
 CALIB_PHI = 2.5
 
+# stage 1 (--stage1 HOURS[:LO:HI], research/stage1.md): for the first HOURS
+# of reference CPU (the units' predicted CPU-seconds at the scheduler's laws,
+# the fast x86 build's clock, counted from the start of stage 1 in the
+# state's stage1_<n>.json) the sums with N' in [LO, HI) are searched plain
+# (as --dfirst off for them), in the scheduler's own order; everything else
+# is unchanged. Plain search records every (square, SP traversal) pair of a
+# sum at weight 1 (d-first records them through the star cover, 1 in K d,
+# and only where the summary holds d-first pairs), so the SP coupling f_rho
+# is learned fastest from plain squares at N' 3-6k, where d-first / plain
+# is 0.9-1.0 and almost no E is lost (scripts/decide.py fits it).
+STAGE1_DEFAULT = (60.0, 3000.0, 6000.0)
+
+
+def parse_stage1(spec):
+    """--stage1 HOURS[:LO:HI] -> (hours, lo, hi), or None for off / 0 h"""
+    if spec is None or str(spec).strip().lower() in ("", "off", "none", "0"):
+        return None
+    parts = str(spec).split(":")
+    if len(parts) not in (1, 3):
+        raise ValueError(f"--stage1 {spec}: HOURS or HOURS:LO:HI")
+    h = float(parts[0])
+    lo, hi = (STAGE1_DEFAULT[1], STAGE1_DEFAULT[2]) if len(parts) == 1 else map(float, parts[1:])
+    if h <= 0:
+        return None
+    if not 0 < lo < hi:
+        raise ValueError(f"--stage1 {spec}: need 0 < LO < HI")
+    return (h, lo, hi)
+
+
+class Stage1:
+    """the stage-1 clock: the spec (hours, lo, hi) and the reference
+    CPU-seconds of the units launched under it (persisted in the state for
+    `run`; `plan`, `emit` and `forecast` start from the state's value and
+    count their simulated units without saving)"""
+
+    def __init__(self, state, n, spec, scale=1.0):
+        self.path = os.path.join(state, f"stage1_{n}.json")
+        self.spec = spec
+        self.scale = scale        # forecast --sample: the budget is scaled
+        self.spent = 0.0
+        try:
+            with open(self.path) as f:
+                d = json.load(f)
+            if spec is not None and tuple(d.get("spec", ())) == tuple(spec):
+                self.spent = float(d.get("spent", 0.0))
+        except (OSError, ValueError):
+            pass
+
+    @property
+    def limit(self):
+        return 0.0 if self.spec is None else self.spec[0] * 3600.0 * self.scale
+
+    @property
+    def active(self):
+        return self.spec is not None and self.spent < self.limit
+
+    def band(self):
+        """(ln LO, ln HI) while stage 1 is on, else None"""
+        if not self.active:
+            return None
+        return (math.log(self.spec[1]), math.log(self.spec[2]))
+
+    def charge(self, seconds):
+        """count a unit; True when this ends stage 1"""
+        was = self.active
+        self.spent += float(seconds)
+        return was and not self.active
+
+    def save(self):
+        if self.spec is None:
+            return
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"spec": list(self.spec), "spent": self.spent,
+                       "hours": self.spent / 3600.0}, f)
+        os.replace(tmp, self.path)
+
 
 def ratio_bin(r):
     np = _np()
@@ -3054,6 +3131,8 @@ class AnalyticScorer:
         # msearch engine self.engine (its slope)
         self.engine = ENGINE
         self.lr0 = _am().dfirst_ratio_coefs(self.engine)[0] if lr0 is None else float(lr0)
+        # stage 1: (ln LO, ln HI) of the N' band searched plain, or None
+        self.stage1 = None
         self.set_calibration(calib)
         self.lnfsq = np.zeros(len(cands))
         self.lnFm = np.zeros(len(cands))
@@ -3138,6 +3217,8 @@ class AnalyticScorer:
             dm = lNp >= self.ldmin
         else:
             dm = (lNp >= self.ldmin) & ((1 + cf) * np.exp(self.log_ratio(lNp)) < 1)
+        if self.stage1 is not None:
+            dm = dm & ~((lNp >= self.stage1[0]) & (lNp < self.stage1[1]))
         return dm, tcal
 
     def grid_density(self, rows):
@@ -3730,7 +3811,9 @@ class SchedulerV2:
             ratio = np.concatenate([self.pool.ratio[rows], ea["ratio"]])
             self.cands = Cands(exps, src, ratio, self.n)
         self.fill_profiles()
+        self.stage1 = Stage1(self.dir, self.n, parse_stage1(getattr(args, "stage1", None)))
         self.refit(save=False)
+        self.scorer.stage1 = self.stage1.band()
 
     def _prefill_touched(self):
         idx = self.pool.index()
@@ -3912,6 +3995,8 @@ class SchedulerV2:
         signal.signal(signal.SIGINT, handle_sigint)
         log(f"{len(self.cands)} candidate values of P, {args.workers} workers "
             f"(model analytic, pool {args.pool})")
+        if self.stage1.spec:
+            log(self.stage1_status())
         try:
             while True:
                 for proc in list(running):
@@ -3960,12 +4045,23 @@ class SchedulerV2:
                                             env=msearch_env())
                     running[proc] = (u.a, path)
                     running_t[proc] = u.time
+                    in_stage1 = self.stage1.active
+                    # (stage 1: the model's predictions of the unit's records,
+                    # frozen at launch for scripts/decide.py)
+                    pred = unit_predictions(self.scorer, u) if self.stage1.spec else {}
+                    if self.stage1.charge(u.time):
+                        log(f"stage 1 done ({self.stage1.spent / 3600:.1f} reference CPU-hours "
+                            f"launched): back to --dfirst {self.scorer.policy} at every N'")
+                        self.scorer.stage1 = None
+                        plan.build({b for b, _ in running.values()})
+                    self.stage1.save()
                     launched.write(json.dumps({
                         "file": os.path.basename(path), "P": list(u.P), "lo": u.lo, "hi": u.hi,
                         "time": u.time, "squares": u.squares, "magic": u.magic, "score": u.score,
                         "fresh": fresh, "t": time.time(), "mode": u.mode, "dlo": u.dlo,
                         "dhi": u.dhi, "nd": u.nd, "calib": u.calib, "frac": u.frac,
-                        "star_k": u.star_k, "star_x": u.star_x}) + "\n")
+                        "star_k": u.star_k, "star_x": u.star_x}
+                        | ({"stage1": in_stage1} | pred if self.stage1.spec else {})) + "\n")
                     launched.flush()
                     log(f"start P={p_str(u.P)} S={u.lo}..{u.hi}{describe_dunit(u)} (predicted "
                         f"{u.time:.0f}s, {u.squares:.1f} squares, {u.score * 3.15e7:.3g} "
@@ -3991,19 +4087,38 @@ class SchedulerV2:
 
     def simulate(self, max_units=None, max_hours=None, detail=False):
         """greedy simulation with predicted times and squares: yields units"""
+        # (stage 1: the simulated units count on a copy of the state's clock)
+        st1 = Stage1.__new__(Stage1)
+        st1.__dict__.update(self.stage1.__dict__)
+        self.scorer.stage1 = st1.band()
         plan = self.planner()
         hours, i = 0.0, 0
-        while (max_units is None or i < max_units) and (max_hours is None or hours < max_hours):
-            u = plan.pop()
-            if u is None:
-                break
-            if detail:
-                u = plan.unit(u.a, detail=True)
-            yield u
-            hours += u.time / 3600
-            i += 1
-            plan.advance_unit(u)
-            plan.push(u.a)
+        try:
+            while (max_units is None or i < max_units) and (max_hours is None or hours < max_hours):
+                u = plan.pop()
+                if u is None:
+                    break
+                if detail:
+                    u = plan.unit(u.a, detail=True)
+                yield u
+                hours += u.time / 3600
+                i += 1
+                plan.advance_unit(u)
+                if st1.charge(u.time):
+                    self.scorer.stage1 = None
+                    plan.build()
+                else:
+                    plan.push(u.a)
+        finally:
+            self.scorer.stage1 = self.stage1.band()
+
+    def stage1_status(self):
+        st = self.stage1
+        if not st.spec:
+            return "stage 1: off"
+        h, lo, hi = st.spec
+        return (f"stage 1: N' {lo:.0f}-{hi:.0f} plain for the first {h:g} reference CPU-hours; "
+                f"{st.spent / 3600:.2f} h launched so far ({'on' if st.active else 'done'})")
 
 
 def am_s0(P):
@@ -4198,6 +4313,8 @@ def report_launched(sch, pr):
 
 def v2_plan(args):
     sch = SchedulerV2(args)
+    if sch.stage1.spec:
+        print(sch.stage1_status())
     plan = sch.planner()
     print(f"{'P':24} {'S range':>13} {'pred. time':>10} {'squares/h':>9} "
           f"{'P(magic)':>9} {'magic/CPU-year':>14}  mode (d-first: d range, calibration stride; "
@@ -4307,6 +4424,56 @@ def unit_charge_parts(sc, u, truth="laws"):
     return float(tpa.sum()) + am.UNIT_OVERHEAD, 0.0
 
 
+def sp_kappa():
+    """k_SP / (0.86 0.64): the model's (square, SP traversal) pairs per
+    square = this x r_S r_P x 720 e^{lpSP} at f_rho = 1 (research/
+    calibration-target.md 3.4, its cm.py; the SP coupling f_rho multiplies
+    it, and P(magic | square) by f_rho^2)"""
+    return math.sqrt(_am().KAPPA / 1.1) / (TRAV_BASE[0] * TRAV_BASE[1])
+
+
+def unit_predictions(sc, u):
+    """the model's predictions of the records of a planned unit u at the
+    scorer's calibration and f_rho = 1: squares recorded (plain: its sums';
+    d-first: its calibration stream's, 1 in k first rows), their S and P
+    traversals (720 e^{lpS} x r_S, 720 e^{lpP} x r_P per square), their SP
+    traversals before the class factors (720 e^{lpSP}, as the report's "SP
+    traversals predicted"), their (square, SP traversal) pairs (sp_kappa()
+    r_S r_P 720 e^{lpSP}, scripts/decide.py's model pairs), the pairs of a
+    d-first unit's part of the d loop (found through the star cover; not
+    in decide.py), and the unit's N' (of its first and last sum)"""
+    np = _np()
+    am = _am()
+    a = u.a
+    S = np.array([float(u.lo)]) if u.dlo is not None else np.arange(u.lo, u.hi + 1, dtype=float)
+    sq, m, tp, td, tc, dm, lNp, lL, cell = sc.eval_modes(a, S)
+    src = sc.c.src[a]
+    if src >= 0:
+        A = np.asarray(sc.store.arr[src], np.float64)
+        v = np.asarray(sc.store.valid[src], bool)
+    else:
+        A, v = sc.store.get(sc.c.P(a))
+        A = np.asarray(A, np.float64)
+    T = NUM_TRAVERSALS[sc.n]
+    if v.any():
+        Sg = sc.c.S0[a] * (1 + am.GRID_U[v])
+        eS, eP, eSP = (T * np.exp(np.interp(S, Sg, A[j, v])) for j in (3, 4, 5))
+    else:
+        eS = eP = eSP = np.zeros(len(S))
+    rS, rP = np.exp(sc.ln_rS[cell]), np.exp(sc.ln_rP[cell])
+    q = sp_kappa() * rS * rP * eSP
+    if u.mode == "dfirst":
+        rec = sq / u.calib if u.calib else np.zeros_like(sq)
+        dpairs = float((u.frac * sq * q).sum())
+    else:
+        rec = sq
+        dpairs = 0.0
+    return {"pred_squares": float(rec.sum()), "pred_S": float((rec * eS * rS).sum()),
+            "pred_P": float((rec * eP * rP).sum()), "pred_SP": float((rec * eSP).sum()),
+            "pred_pairs": float((rec * q).sum()), "pred_pairs_dfirst": dpairs,
+            "lNp": [float(lNp[0]), float(lNp[-1])]}
+
+
 def forecast_truth(args):
     """the truth a forecast charges its units under: --truth, by default
     "measured" for --shipped (the shipped laws, corrected by the
@@ -4383,9 +4550,15 @@ def v2_forecast(args):
         rng = np.random.default_rng(args.seed)
         drop = rng.random(len(sch.cands)) >= frac
         sch.scorer.lnfsq[drop] = -np.inf
+    # (stage 1's hours scale with the budget)
+    sch.stage1.scale = frac
+    sch.scorer.stage1 = sch.stage1.band()
+    if sch.stage1.spec:
+        print(sch.stage1_status() + (f" (x{frac:g} with the sample)" if frac < 1 else ""))
     budget = args.hours * frac
     inst_budget = ih * frac if ih is not None else None
-    marks = {h for h in (0.1 * yr, yr, 3 * yr, 10 * yr, 100 * yr) if h <= args.hours} | {args.hours}
+    marks = {h for h in (0.1 * yr, 0.3 * yr, yr, 3 * yr, 10 * yr, 30 * yr, 100 * yr)
+             if h <= args.hours} | {args.hours}
     if args.hours < 0.1 * yr:
         marks |= {args.hours * f for f in (0.01, 0.1, 0.3)}
     marks = [m * frac for m in sorted(marks)]
@@ -4469,6 +4642,8 @@ def v2_forecast(args):
               f"CPU-years (band-weighted along the plan: {E_inst[1] / max(inst_budget, 1e-12):.3g} "
               f"reference CPU-hours per instance-hour): E = {Eh:.3g}, P(>=1 magic square) = "
               f"{1 - math.exp(-Eh):.3f}")
+    print("E at the marks (4 digits): " + ", ".join(
+        f"{m / frac / yr:g} CPU-years {E_at[m] / frac:.4f}" for m in sorted(E_at)))
     if magic <= 0:
         return
     print(f"simulated in {time.time() - t0:.0f} s; marginal density at the end "
@@ -4713,6 +4888,13 @@ def main():
                             "--dfirst-min-n only")
         p.add_argument("--dfirst-min-n", type=float, default=DFIRST_MIN_NP,
                        help="analytic: smallest predicted N' of a d-first sum")
+        p.add_argument("--stage1", nargs="?", const=":".join(f"{v:g}" for v in STAGE1_DEFAULT),
+                       default=None, metavar="HOURS[:LO:HI]",
+                       help="analytic: stage 1 (research/stage1.md): for the first HOURS of "
+                            "reference CPU (the units' predicted CPU at the scheduler's laws, "
+                            "counted in the state's stage1_<n>.json) search the sums with N' "
+                            "in [LO, HI) plain, to learn the SP coupling f_rho from their "
+                            "pairs (scripts/decide.py); default %(const)s; off = none")
         p.add_argument("--calib-frac", type=float, default=CALIB_FRAC,
                        help="analytic: CPU of a d-first sum's calibration stream (msearch "
                             "--calib-r1-stride, semi-magic squares for the models) as a share "

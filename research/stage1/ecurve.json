@@ -1,0 +1,6 @@
+{
+  "source": "forecast --shipped (engine 4, the measured truth, seed 1) on the calibration search's profiled state, f_rho = 1: 0.1-10 CPU-years on 10% of the candidates (0.0427 / 0.0718 / 0.1202 / 0.1843 / 0.2827); 30 and 100 on 1% (0.4240 / 0.6009) x 0.944, the 10% / 1% ratio at 10 CPU-years (the 1% sample runs 6-11% high at 0.1-10)",
+  "code": "f1/stage1 (scheduler v2 at 80d15cc + --stage1; --stage1 on gives the same E to 4 digits)",
+  "E": {"0.1": 0.0427, "0.3": 0.0718, "1": 0.1202, "3": 0.1843, "10": 0.2827, "30": 0.400, "100": 0.567},
+  "composition_10y": {"1-3k": 0.14, "3-6k": 0.45, "6-12k": 0.37, "12-24k": 0.04}
+}
