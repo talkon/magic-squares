@@ -41,3 +41,7 @@ tests/
 
 # SuperCloud outputs
 LLSUB*
+
+# laptop runs (scripts/laptop)
+build-laptop/
+laptop-runs/

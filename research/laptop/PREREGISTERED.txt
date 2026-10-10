@@ -1,0 +1,18 @@
+Pre-registration of the laptop run (2026-10-10, before any unit ran on the laptop)
+
+plan: research/laptop/plan-20261010.jsonl.xz
+sha256 of the uncompressed plan: a2852ebe2b8c1355c345d09a94d347f0df6a503b0e8f2a19cbaffa6dc2255540
+model: scheduler v2 at 709344f (engine 4 laws, the calibration-target GLM posterior,
+measured truth), --dfirst off, unit time 120 s; scheduler state = the calibration
+search's profiled state plus every earlier msearch output of this session (1,324
+distinct files), so the plan skips sums searched before.
+plan totals: 15,164 units, 10,276 P, 40.0 predicted CPU-hours (fast x86 build),
+E[magic] 0.0109, 615,778 predicted semi-magic squares.
+predictions per unit: pred_time (x86 CPU-s), pred_squares, pred_magic, score; the
+per-sum S, P and SP traversal predictions follow deterministically from the model at
+709344f (scripts/amodel.py, scheduler.py AnalyticScorer) and will be computed with it.
+analysis plan: observed / predicted squares, S, P and SP traversals per square, and SP
+diagonals per sum, pooled over the units run (a prefix of the plan, in order) and by
+N' band, x and exponent class, with Poisson and between-unit intervals; the selection
+effect (units ranked first vs later); the laptop's time / predicted x86 time.
+x86 check of the first 40 units (here): squares 1686 vs 1698 predicted.
