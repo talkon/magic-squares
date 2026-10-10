@@ -438,8 +438,8 @@ uint64_t dfirst_star_count(const dfirst_t *df, size_t lo, size_t hi) {
 
 /* the top-label root pays with the carried bitsets and with the matrices
  * of up to 4 words (0.64x and 0.68x the CPU of the plain root at 159
- * labels), not with the matrices of 8 words (257-512 labels without
- * AVX-512BW, or with CARRY_MAX_W < 8: 1.27x, as the top labels then cost
+ * labels), not with the matrices of 8 words (257-512 labels in a build
+ * with -DCARRY_MAX_W below 8: 1.27x, as the top labels then cost
  * more nodes there than on the carried path; research/ideas.md) */
 static int top_root_pays(uint32_t labels, const search_opts_t *opts) {
   const uint32_t lw = labels > 64u * (uint32_t)opts->min_words

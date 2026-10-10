@@ -95,7 +95,7 @@ size_t dfirst_vd(dfirst_t *df, size_t i, vec_list_t *out);
  * of it) instead of all of V_d. 0.6-0.7x the nodes and time of the plain
  * root (on = 0, as bin/dsearch). The (square, d) pairs are the same.
  * With on = 1, a V_d searched with the intersection matrices of 8 words
- * (257-512 labels without AVX-512BW or past CARRY_MAX_W) gets the plain
+ * (257-512 labels in a build with -DCARRY_MAX_W below 8) gets the plain
  * root: the top root took 1.27x its CPU there (and 0.68x with the
  * matrices of up to 4 words; research/ideas.md).
  */

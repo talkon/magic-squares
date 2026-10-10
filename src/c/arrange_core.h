@@ -113,20 +113,23 @@
  * Bit-sliced counters: bit i of word t * W + w is set if label 64 * w + i is
  * in more than t candidates.
  */
+#ifndef CARRY_P
 static inline uint64_t COVERED(const uint64_t *g, int w) {
-#if defined(COUNT_BYTES) && !defined(CARRY_P)
+#if defined(COUNT_BYTES)
   __m512i x = _mm512_loadu_si512(g + 8 * w);
   return _mm512_test_epi8_mask(x, x);
-#elif defined(COUNT_BYTES)
-  const uint8_t *gb = (const uint8_t *)(g + 8 * w);
-  uint64_t r = 0;
-  for (int i = 0; i < 64; i++)
-    r |= (uint64_t)(gb[i] != 0) << i;
-  return r;
 #else
   return g[w];
 #endif
 }
+#endif
+/* (COVERED is not defined with the portable kernels, so that a use does
+ * not compile: their byte counters are computed only at the unmatched
+ * cells, see COUNT_CARRY in arrange_carry.h, while the AVX-512 ones cover
+ * every label of a word with such a cell; a read of the other bytes would
+ * change the search on ARM and AVX2 only. The carried path reads the
+ * unions uni[d][*] instead, and the counts only in the choice of the
+ * branching cell.) */
 
 #ifndef COUNT_BYTES
 static inline uint64_t IN_CLASS(const uint64_t *g, int w, int c) {

@@ -32,8 +32,10 @@ count for the stage-1 plan too (the same unit numbers).
    time of bench/quick.txt (divided by the fast x86 build's ~0.25-0.29 s it
    is the laptop's time per core against the reference, expected ~2.5-4.5x,
    see below). It also writes that time and the search kernels into
-   `build-laptop/build_info.txt`, which the results carry (step 6). Stop if
-   it says FAILED.
+   `build-laptop/build_info.txt`, which the results carry (step 6). Please
+   report its last two lines (the time and the time per core). Stop if it
+   says FAILED. On an M1 it builds with `-mcpu=native -flto` and prints
+   `search kernels: portable`.
 4. Run, plugged in, lid open (a closed lid sleeps the Mac):
 
        caffeinate -i python3 scripts/laptop/run.py research/stage1/plan-stage1.jsonl.xz --hours 9
@@ -122,7 +124,10 @@ reference hours reaches 0-21 of them (1.7 predicted pairs by 12 h, 2.9 by
   | clang -march=x86-64-v2 (the stage-1 rehearsal, busy machine) | 3.2x | 3.2x (49 plan units) | - |
 
   The M1 builds with clang at NEON's 128-bit width, so it is expected at
-  ~2.5-4.5x per core on plain sums (~3x if it follows clang on x86), to be
+  ~2.5-4.5x per core on plain sums (~3x if it follows clang on x86; the
+  aarch64 code for -mcpu=apple-m1 executes 1.20-1.28x the instructions of
+  the AVX2 code on the same work, counted under qemu and callgrind, which
+  gives a separate estimate of 2.2-3.6x, central 2.7x), to be
   measured by the bench/quick.txt time of step 3 and by run.py's CPU
   against reference CPU. The plan's --time-limit is 12x the scheduler's
   (the scheduler's limit is at least 3x a unit's predicted CPU, so 12
@@ -130,12 +135,19 @@ reference hours reaches 0-21 of them (1.7 predicted pairs by 12 h, 2.9 by
   --node-limit factor of 4 does not bind.
 
 To rehearse the laptop's build on an x86 machine with AVX-512, give the
-target: `CC=clang ARCH=-march=x86-64-v2 ./scripts/laptop/build.sh` (without
-ARCH, build.sh adds -march=native, which picks the AVX-512 kernels).
+target: `CC=clang ARCH=-march=x86-64-v2 ./scripts/laptop/build.sh`, or a
+CC that names it (`CC='gcc -march=x86-64-v3'`); otherwise build.sh adds
+-march=native, which picks the AVX-512 kernels.
 
-The portable ARM build was checked here by cross-compiling and running under
-qemu: bench quick/full all ok, and three plan units give the same squares,
-hashes, traversal counts and vector counts as the x86 build.
+The portable ARM build of the carried path (src/c/arrange_carry.h) was
+checked here by cross-compiling (clang -mcpu=apple-m1, gcc -mcpu=neoverse-n1
+and generic) and running under qemu: bench quick and full (each
+compiler), and with clang bench prod and plan units 0 and 40, give the same
+squares, hashes, traversal counts, vector counts and node counts as the x86
+AVX-512 build, and fuzz_arrange (2,000 seeds with clang, also d-first and
+257-512 labels) the same squares and nodes. (The
+first version of this file reported the same check on the older matrix
+build.)
 
 ## Files
 

@@ -399,7 +399,11 @@ versa), plus:
   62.6), 0.82 / 10.6 / 45.6 s with x86-64-v2 (matrices 1.16 / 14.6 / 61.4).
   d-first, 13 7 4 3 1 1, S = 2200, d < 100: 3.7 s AVX-512, 6.3 s clang
   v3, 9.1 s gcc v3, 36.4 s on the matrix path (no class support, 4.9x the
-  nodes) (research/ideas.md, "The carried path without AVX-512");
+  nodes). At NEON's width, clang -march=x86-64-v2 takes 1.4-1.6x the time
+  of clang v3 (3.2-3.7x the AVX-512 build on bench); the aarch64 code for
+  -mcpu=apple-m1 executes 1.2-1.3x the instructions of clang v3, so an M1
+  core is estimated at 2.2-3.6x the AVX-512 build's time per core,
+  unmeasured (research/ideas.md, "The carried path without AVX-512");
 - each first row r1 is searched with only the 64-bit words it needs: its
   subproblem has the vectors after it, whose labels are all at most its
   largest label x, so the r1 are searched in runs of equal width

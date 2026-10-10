@@ -271,7 +271,7 @@ typedef struct {
   uint8_t *clskm[2];
 } sstate_t;
 
-static inline bool bit_get(const uint64_t *row, uint32_t u) {
+static inline __attribute__((unused)) bool bit_get(const uint64_t *row, uint32_t u) {
   return (row[u >> 6] >> (u & 63)) & 1;
 }
 
@@ -279,7 +279,7 @@ static inline bool bit_get(const uint64_t *row, uint32_t u) {
 /* the minimum of the 64 unsigned bytes of v: halving to 16 bytes, then
  * phminposuw on the minima of their pairs (the high byte of each 16-bit
  * lane is then 0) */
-static inline int hmin_epu8(__m512i v) {
+static inline __attribute__((unused)) int hmin_epu8(__m512i v) {
   __m256i a = _mm256_min_epu8(_mm512_castsi512_si256(v),
                               _mm512_extracti64x4_epi64(v, 1));
   __m128i b = _mm_min_epu8(_mm256_castsi256_si128(a),
@@ -474,7 +474,7 @@ static void report(sstate_t *s) {
 
 #if CARRY_MAX_W > 0 && defined(CARRY_AVX512)
 /* the k-th lowest set bit of y (k < popcount(y)) */
-static inline uint64_t nth_bit(uint64_t y, int k) {
+static inline __attribute__((unused)) uint64_t nth_bit(uint64_t y, int k) {
 #ifdef __BMI2__
   return _pdep_u64((uint64_t)1 << k, y);
 #else

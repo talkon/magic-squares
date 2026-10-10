@@ -3437,6 +3437,92 @@ v3), if the M1 follows the x86 clang build. The remaining gap is in the
 plain search (T1, T2: 3x native with clang), where E sits for a 1-10
 CPU-year budget (N' 1-6k), not in d-first.
 
+### Follow-up after review: the speed to expect on the M1, NEON, interleaving
+
+Two reviews re-ran the gates (fresh seeds, more builds: also -O0,
+-funsigned-char, ASan/UBSan, aarch64 gcc -march=armv8-a; all node-identical
+to the native build) and measured the speed more widely (clang arms, min of
+2 alternating rounds, time per core against the native AVX-512 build):
+
+| build | bench quick / full / prod | plan units 0-2 | d-first (3 samples) |
+|---|---|---|---|
+| clang x86-64-v3, carried (256-bit AVX2) | 2.16 / 2.45 / 2.42 | 2.12-2.39 | 1.72-1.93 |
+| clang x86-64-v2, carried (128-bit SSE4.2) | 3.24 / 3.71 / 3.67 | 3.28-3.37 | 2.51-2.92 |
+| gcc x86-64-v3, carried | 2.97-3.44 | 3.08 | 2.22-2.88 |
+| clang x86-64-v3, matrices (80d15cc) | 3.75 / 4.46 / 4.40 | 3.73-3.85 | 10.2-11.6 |
+
+* NEON is 128 bits wide, so clang v2 is the closer proxy for the width:
+  1.41-1.57x the time of clang v3 (clang leaves 6 of the 22 instances of
+  the exactly-once test loop scalar on v2: SSE4.2 has no 64-bit variable
+  shift; for -mcpu=apple-m1 it vectorizes all of them, 2 entries per
+  register). Dynamic instructions on the same work, aarch64 apple-m1
+  (qemu, counted) against clang v3 (callgrind): 1.28x on the bench
+  instance 11 4 3 1 1, S = 470 (380M against 297M; clang v2 531M), 1.20x
+  on a d-first sample. Estimate for an M1 Pro P-core: 2.2-3.6x the
+  AVX-512 build's time per core, central 2.7x, if it retires instructions
+  at 0.75-1.1x the rate of the Emerald Rapids vCPU here (an
+  extrapolation). scripts/laptop/build.sh now prints the measured ratio
+  (best of 3 runs of bench/quick.txt against 0.27 s; on clang v3 the ratio
+  was 2.16 on quick and 2.21 on the plan units).
+* Against the matrices, both clang v3: 1.7-1.8x less time on bench,
+  1.6-1.8x on the plan's units, 5.3-6.4x on d-first (no class support on
+  the matrix path).
+* Where the extra time goes (clang v3 against native, PC sampling, full /
+  plan unit 0 / d-first): the filter's test 24 / 21 / 19% of the time and
+  its copy of the kept entries 23 / 24 / 17% (FILTER_CARRY: 47% of the gap
+  on full and unit 0), cross support's U_y build 15 / 11 / 0% and test
+  10 / 10 / 0%, COUNT_CARRY 6 / 9 / 6%, KEEP_CARRY 7 / 7 / 15%, class
+  support 0 / 0 / 27%.
+* Interleaving the test loops: clang does not interleave loops with a small
+  known trip count (at most 64 entries per block here), so it builds each
+  block's mask with one chain of vector ors (interleave count 1 in the
+  -Rpass=loop-vectorize remarks, on x86 and aarch64 alike). Forcing
+  `#pragma clang loop interleave_count(2 or 4)` on the six test loops
+  (filter, keep, select, cross, class support): no gain on x86 (clang v3
+  full 6.87 s at 1, 7.12 at 2, 7.19 at 4; clang v2 full 9.54 / 10.23 /
+  10.85 s; quick within noise, 0.82-0.92 s on v2), so not kept. Whether the
+  M1 (2-wide vectors, 4 vector pipes) gains is unknown.
+* NEON intrinsics: not written. The candidate is the mask of a test loop
+  built 8 entries at a time (compares, narrowing to bytes, an and with the
+  bit weights, addv) instead of an or of a shifted bit per entry; that
+  saves about 3 of the 18-30 vector operations per 2 entries of the test
+  (W = 2-4), i.e. about 15% of the test loops, which take about 20% of the
+  time: a few percent at most, not measurable without an M1 (qemu timings
+  mean nothing), and the interleaving result above suggests the mask chain
+  is not the bottleneck. The larger costs, the copy of the kept entries
+  (scalar, W loads and stores per entry) and the U_y build, need other
+  layouts or algorithms (entries with their words contiguous; see "Not
+  tried" above), not intrinsics.
+* COVERED (labels with a candidate, from the counts) is no longer defined
+  with the portable kernels: their byte counters exist only at the
+  unmatched cells, while the AVX-512 ones cover every label of a word with
+  such a cell, so a future read of the other bytes would change the search
+  on ARM and AVX2 only. The carried path reads the unions instead; now such
+  a use does not compile.
+* Also from the reviews: the comments of dfirst.c/dfirst.h on the plain
+  root for 257-512 labels now name -DCARRY_MAX_W below 8 (no longer "without
+  AVX-512BW"); bit_get, nth_bit and hmin_epu8 are marked unused, so clang
+  -march=native (with or without -DCARRY_PORTABLE) also compiles with
+  -Wall -Wextra -Werror; scripts/laptop/build.sh takes the target from CC
+  when CC names one (`CC='gcc -march=x86-64-v3'` used to get -march=native
+  appended, i.e. the AVX-512 build), uses -mcpu=native on arm64 and prints
+  the time per core from the best of 3 runs of bench/quick.txt.
+* Gates of this follow-up: the object code (objdump -d) of arrange.o,
+  dfirst.o and msearch.o is identical to the previous commit for gcc v2 /
+  v3, clang v2 / v3, gcc -march=native with and without -DCARRY_PORTABLE,
+  aarch64 clang -mcpu=apple-m1 and gcc -mcpu=neoverse-n1 / generic, and to
+  80d15cc for the AVX-512 builds (gcc and clang, native and cascadelake), so
+  every gate above carries over; re-run anyway: bench quick / full / prod
+  per instance identical to native on gcc v2, gcc v3 and clang v3 (aarch64
+  under qemu: quick on all three compilers, full with clang);
+  `fuzz_arrange -v` node-identical to native on fresh seeds (default 300,
+  --dfirst 300, --mode 7 200, --dfirst --variants cls 200 on v3, clang v3
+  and v2; --mode 6 4 seeds on clang v3; under qemu clang apple-m1 default
+  300, --dfirst 100, --mode 7 50 and gcc neoverse-n1 default 100); `ctest
+  -R fast_` 66 of 66; scripts/laptop/build.sh passes with CC='gcc
+  -march=x86-64-v3' (quick 0.77 s, 2.8x), CC='clang -march=x86-64-v3'
+  (0.49 s, 1.8x) and the default native build (0.25 s, AVX-512 kernels).
+
 ## Stage 1: learn f_rho before deciding the spend (October 2026, branch f1/stage1)
 
 `scheduler.py --stage1 [HOURS[:LO:HI]]` (default 60:3000:6000) searches N'
