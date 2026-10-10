@@ -425,6 +425,13 @@ def main():
         + (", SMT" if cpu["smt"] else "")
         + (f", cgroup quota {cpu['cgroup_cpus']:g} CPUs" if cpu.get("cgroup_cpus") else ""))
     say(f"ISA: {' '.join(cpu['isa']) or '-'}; class: {cpu['class']}")
+    try:
+        load0 = os.getloadavg()[0]
+    except (AttributeError, OSError):
+        load0 = None
+    if load0 is not None and load0 > 0.5:
+        warnings.append(f"load average {load0:.2f} before the run: other work on this machine "
+                        f"makes the speeds below read low (rerun on an idle machine)")
     with tempfile.TemporaryDirectory(prefix="machine_cal_") as tmp:
         path, bisa = build_of(msearch, tmp)
         say(f"build: {msearch}: search path {path}; ISA at compile time: {' '.join(bisa) or '-'}")
@@ -480,6 +487,10 @@ def main():
                     f"{rows[t['name']]['wall_max']:.2f}), CPU/process {rows[t['name']]['cpu']:7.2f}"
                     f" s (reference {t['ref_cpu']:.2f}), {rows[t['name']]['speed']:.3f} "
                     f"reference CPU-s per s, est/law {rows[t['name']]['law_ratio']:.3f}")
+            slow = [n for n, r in rows.items() if r["cpu"] > 0 and r["wall"] / r["cpu"] > 1.05]
+            if K <= cpu["cores"] and slow:
+                warnings.append(f"K={K}: wall exceeds process CPU by more than 5% on "
+                                f"{', '.join(slow)}: the machine was busy, so these speeds read low")
             run = {"K": K, "tests": rows}
             names = {m: [t["name"] for t in tests if t["mode"] == m] for m in ("plain", "dfirst")}
             for m, ns in names.items():

@@ -129,7 +129,7 @@ fast x86 instance):
 
 ```
 python3 scripts/machine_cal.py --bin bin/msearch --out cal.json
-python3 scripts/scheduler.py forecast --shipped --machine cal.json --instance-hours 720
+python3 scripts/scheduler.py forecast --shipped --machine cal.json --instance-hours 720 --sample 0.1
 python3 scripts/scheduler.py run --machine cal.json --workers K   # K: cal.json "workers"
 ```
 
