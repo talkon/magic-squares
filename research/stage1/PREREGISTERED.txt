@@ -25,3 +25,21 @@ calibration search's profiled state plus every earlier msearch output, 1,324 fil
 the first units are those of research/laptop/plan-20261010 (which is --dfirst off; the
 first 60 h here have no d-first unit either: stage 1 turns the 3.7-6k sums plain). Units
 of either plan run elsewhere count for both; decide.py fits each record once.
+
+notes after review (2026-10-10, integ/stage1; the plan and every frozen prediction
+unchanged: make_plan.py --stage1 on the same state reproduces sha256 a6a4be6a... after
+the merge with the machine calibration, and its first 15,164 units are those of
+research/laptop/plan-20261010, which it supersedes as the laptop's plan; the
+--time-limit factor stays 12, which covers the portable build's expected 2.5-3.5x):
+* the 134 band units' sums lie at N' 3.0-4.2k (first sums 3.0-4.0k; 100 end below 3.6k).
+* the band holds 91.59 predicted pairs counted by sum: 60.53 in the band units and 31.06
+  in the later sums of 243 units that start below N' 3000. 45 band pairs are predicted
+  after 40.3 reference CPU-hours counting every sum in the band (decide.py with the
+  state), after 51.4 counting the band units only (decide.py without a state).
+* the analysis (scripts/decide.py) now counts each plain sum (P, S) once, sets the
+  shipped prior by its median 1.06 (the first version set its mean to 1.06), prints the
+  flat-prior fit next to the shipped-prior one, refuses a --band that is not whole N'
+  bands, and runs without a state on the plan's frozen predictions (the finished band
+  units: Y = their pairs, M = pred_pairs x observed / predicted squares).
+* units already run before this note: 203 of the scheduler's own order (all at N' < 3k,
+  research/stage1.md 3) and 10 band units drawn at random (the verification).

@@ -3318,10 +3318,18 @@ builds without AVX-512BW took the matrices).
 | gcc x86-64-v2: portable carried / matrices | 0.821 / 1.162 | 10.63 / 14.56 | 45.59 / 61.36 |
 
 So with clang (the compiler on macOS) the portable carried path takes
-2.3-2.4x the AVX-512 build's time per core, against 4.0-4.3x for the
-matrices (1.8-1.9x less time, with 1.6-3.4x fewer nodes); with gcc
-2.9-3.4x (v3) and 3.3-3.7x (v2), 1.5-1.65x and 1.35-1.4x less than the
-matrices (gcc vectorizes less of these loops than clang). d-first, msearch --diag-first
+2.3-2.4x the AVX-512 build's time per core on the bench files here,
+against 4.0-4.3x for the matrices (1.8-1.9x less time, with 1.6-3.4x fewer
+nodes); with gcc 2.9-3.4x (v3) and 3.3-3.7x (v2), 1.5-1.65x and 1.35-1.4x
+less than the matrices (gcc vectorizes less of these loops than clang).
+(Correction, integ/stage1: 2.3-2.4x is optimistic for the search the
+laptop runs. Two independent verifications measured clang
+-march=x86-64-v3 (256-bit vectors) at 2.5x on bench quick, 2.55-2.6x on
+the plain sums T1/T2 and 1.86-1.97x on the d-first T3/T4; with 128-bit
+vectors, NEON's width (clang or gcc -march=x86-64-v2), 3.2-3.7x; gcc v3
+2.9-3.6x. So the M1 is expected at ~2.5-3.5x per core on plain sums; the
+bench/quick.txt time that build.sh prints measures it, against ~0.25-0.29 s
+native.) d-first, msearch --diag-first
 --d-range 0:100 --sums 2200 13 7 4 3 1 1 (98 V_d, class support in all):
 3.74 s native, 6.34 s clang v3, 9.09 s gcc v3 (5,028,440 nodes each),
 36.4 s on the matrix path at 80d15cc (24,830,673 nodes: no class support there). The time per node on the M1 is not
@@ -3430,31 +3438,43 @@ calibration search's posterior) and reports the predictive E and P(>=1) at
 * **The mode switch is nearly a no-op (negative result for the lever
   itself).** Without it, the scheduler's first 60 h hold only 9 d-first
   units (0.28 CPU-h); its own order already searches 134 units at N' 3-6k
-  plain, with 60.5 predicted pairs. Stage 1 brings the 45th band pair from
-  55.4 to 51.4 reference hours. The premise "45 pairs = 39 CPU-h of plain
+  plain (their sums at N' 3.0-4.2k), with 60.5 predicted pairs, and 243
+  units that start below 3k add 31.1 in their later sums (91.6 by sum).
+  Stage 1 brings the 45th band pair from 55.4 to 51.4 reference hours
+  counting the 134 units, 40.3 counting every sum in the band. The premise "45 pairs = 39 CPU-h of plain
   3-6k search" came from the calibration search's sums (1.8 pairs/CPU-h);
   the scheduler's top 3-6k sums give ~14/CPU-h (model), so the pairs are
   cheap and come free with the first ~2 days of any run.
-* **Their value depends on clustering.** decide.py's 90% band of E at 1
-  CPU-year goes from x5.8 to x3.3 / 3.5 / 3.8 at 45 pairs if the pairs'
-  dispersion is 1 / 1.41 / 2.1 (simulation passes: flat-prior coverage
-  86-91%, bias <= 3.6%). The older records show phi 6.8 outside the band
-  (a few P with 9-20 pairs against < 1 expected); at that dispersion 45
-  pairs give x4.6, coverage falls to 79-86% (phi_hat runs low), and x4
-  needs ~120 band pairs (~100 reference hours). decide.py prints the fit at
-  the outside dispersion as a sensitivity line (`--phi-min`).
+* **What 45 pairs buy.** decide.py's 90% band of E at 1 CPU-year goes from
+  x5.8 to x3.3 / 3.5 / 3.8 at 45 pairs if the pairs' dispersion is 1 /
+  1.41 / 2.1 (simulation passes: flat-prior coverage 86-91%, bias <= 3%).
+  The pairs are not clustered: counting each plain sum (P, S) once, the
+  state's records give phi 1.03 outside the band (25 pairs / 18.0, f_rho
+  1.37 [0.96, 1.89], still likely biased up by which sums were chosen) and
+  1.0 inside (8 / 7.0). The first version read phi 6.8, f_rho ~4 at small
+  N and "x4.6 at 45 pairs, ~120 pairs for x4" from the raw records, where
+  the benchmark and regression sums were searched 8-16 times each (169
+  counted SP pairs, 33 distinct squares); withdrawn. decide.py now drops
+  the repeats.
+* **The shipped prior** weighs as ~19 pairs: at a true f_rho of 0.5 or 2 its
+  90% interval covers only 35-53% at 45 pairs (phi 1-2.1). decide.py prints
+  the flat-prior fit next to it. The prior is now set by its median 1.06
+  (the calibration search's posterior); set by its mean, as first written,
+  it read P(>=1) 0.4-0.8 points low.
 * **Replay**: the calibration search's records with the 'pre' prior give
-  median 1.051, f_rho^2 ln sd 0.460 (target 1.06 / 0.47), once its 7 whole
-  d loops (0 pairs against 0.89) are counted; plain squares alone give 1.099.
+  median 1.051, f_rho^2 ln sd 0.460 (target 1.06 / 0.47) with `--band
+  3000:inf`, once its 7 whole d loops (0 pairs against 0.89) are counted;
+  plain squares alone give 1.099. With the default band (3-6k) the replay
+  gives 1.027 / 0.487 and fails by 0.033.
 * **Measurement** (203 units, 0.32 CPU-h, all N' < 3k): squares 0.979
   [0.957, 1.000] of the frozen predictions, S 0.98, P 0.93, pairs 8 / 12.2
   (0.66 [0.33, 1.19]); 24.9 pairs per CPU-h against the model's 41 per
-  reference hour on these densest units; CPU 1.08x the reference. 45 band
-  pairs projected at 56-70 CPU-h (f_rho 1 to 0.66).
+  reference hour on these densest units; CPU 1.08x the reference. 10
+  random band units (verification, 1,323 CPU-s): squares 1.09, S 1.04, P
+  1.08, pairs 6 / 4.58 (1.31 [0.57, 2.59]), CPU 1.15x; f_rho 1.08 median.
 * **Not tried**: reordering stage 1 to front-load the 3-6k units (45 band
-  pairs in ~3.2 CPU-h of them instead of 51 h of the plan) would buy the
+  pairs in ~3.2 CPU-h of them instead of 40-51 h of the plan) would buy the
   information ~15x faster at an E cost not measured here; a per-band f_rho
   model that pools the ~1,000 cheap N' < 3k pairs needs a model of f_rho's
-  N dependence first (the older small-N records sit at f_rho ~4 with phi
-  6.8, the first stage-1 units at 0.66: the small-N pairs are heterogeneous
-  too).
+  N dependence first (the deduplicated records outside the band read 1.37,
+  the first stage-1 units at N' < 3k 0.66).
