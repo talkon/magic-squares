@@ -76,4 +76,4 @@ if [ "$got" != "3761910603 92405" ]; then
 fi
 cd "$ROOT"
 echo "all checks passed"
-tail -1 "$B/check_quick.txt" | awk '{print "bench/quick.txt search time: " $4 " s (fast x86 build: ~0.29 s)"}'
+tail -1 "$B/check_quick.txt" | awk '{print "bench/quick.txt search time: " $4 " s (fast x86 build: ~0.25-0.29 s; the ratio is this machine'"'"'s time per core against the reference, expected ~2.5-3.5x without AVX-512)"}'

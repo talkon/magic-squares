@@ -388,7 +388,12 @@ versa), plus:
   (paired with the AVX-512 build and the matrix path, min of 2 rounds),
   clang -march=x86-64-v3, bench quick / full / prod: 0.56 / 6.8 / 30.0 s,
   2.3-2.4x the AVX-512 build's 0.25 / 2.9 / 12.4 s and 1.8-1.9x faster than
-  the matrix path's 1.00 / 12.7 / 53.0 s (1.6x / 2.35x / 3.4x its nodes);
+  the matrix path's 1.00 / 12.7 / 53.0 s (1.6x / 2.35x / 3.4x its nodes)
+  in the first measurement; two independent verifications found more:
+  clang v3 2.5x on bench quick, 2.55-2.6x on plain sums and 1.86-1.97x on
+  d-first ones, 3.2-3.7x with 128-bit vectors (-march=x86-64-v2, NEON's
+  width), gcc v3 2.9-3.6x, so an ARM core is expected at ~2.5-3.5x on
+  plain sums;
   gcc: 0.71 / 9.9 / 41.7 s with -march=x86-64-v3 (matrices 1.18 / 14.7 /
   62.6), 0.82 / 10.6 / 45.6 s with x86-64-v2 (matrices 1.16 / 14.6 / 61.4).
   d-first, 13 7 4 3 1 1, S = 2200, d < 100: 3.7 s AVX-512, 6.3 s clang

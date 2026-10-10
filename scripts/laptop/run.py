@@ -10,9 +10,15 @@ usage: run.py PLAN(.jsonl or .jsonl.xz) [--bin BUILD/msearch] [--out DIR] [--wor
   was interrupted is run again from the start (its output is replaced).
 * Ctrl-C (or --hours) stops launching, stops the running units and leaves
   everything finished in place. Run it again to continue.
-* Outputs: DIR/U000123.jsonl per unit, DIR/meta.json (machine, build, plan
-  hash), DIR/progress.log. A magic square (best_score >= 14) is announced and
-  copied to DIR/MAGIC.txt.
+* Outputs: DIR/U000123.jsonl per unit, DIR/meta_<time>.json (machine, build,
+  plan hash), DIR/progress.log. A magic square (best_score >= 14) is
+  announced and copied to DIR/MAGIC.txt. U<i> is line i of the plan: a
+  finished U<i> whose P or sums are not line i's (another plan's output)
+  is refused. Plans that share their first lines (research/stage1's plan
+  begins with all of plan-20261010) share those outputs.
+* Progress: the units' measured CPU against their predicted reference CPU
+  (the fast x86 build's), and for a stage-1 plan the pairs found in its
+  band units (research/stage1.md; scripts/decide.py fits them).
 """
 import argparse
 import hashlib
@@ -45,6 +51,21 @@ def done_file(path):
     except (OSError, ValueError):
         return None
     return recs if any(r.get("type") == "done" for r in recs) else None
+
+
+def unit_matches(u, recs):
+    """the records' P and sums are those of plan line u"""
+    P = list(u["P"])
+    while P and P[-1] == 0:
+        P.pop()
+    for r in recs:
+        if r.get("type") in ("sum", "square"):
+            Q = list(r.get("P", []))
+            while Q and Q[-1] == 0:
+                Q.pop()
+            if Q != P or not u["lo"] <= r.get("S", -1) <= u["hi"]:
+                return False
+    return True
 
 
 def main():
@@ -89,7 +110,12 @@ def main():
     todo = []
     n_done = 0
     for u in units:
-        if done_file(os.path.join(a.out, f"U{u['i']:06d}.jsonl")):
+        path = os.path.join(a.out, f"U{u['i']:06d}.jsonl")
+        recs = done_file(path)
+        if recs:
+            if not unit_matches(u, recs):
+                sys.exit(f"{path} is not the output of line {u['i']} of {a.plan} (another "
+                         f"plan's?): use another --out")
             n_done += 1
         else:
             todo.append(u)
@@ -108,7 +134,21 @@ def main():
 
     t0 = time.time()
     running = {}  # Popen -> (unit, tmp path)
-    stats = {"units": 0, "cpu": 0.0, "squares": 0, "sp": 0, "magic": 0}
+    stats = {"units": 0, "cpu": 0.0, "ref": 0.0, "squares": 0, "sp": 0, "magic": 0}
+    # (a stage-1 plan: pairs in its band units, all finished ones so far)
+    band = {"units": 0, "pairs": 0, "pred": 0.0}
+    stage1 = any("stage1" in u for u in units)
+
+    def count_band(u, recs):
+        if u.get("stage1"):
+            band["units"] += 1
+            band["pred"] += u.get("pred_pairs", 0.0)
+            band["pairs"] += sum(r.get("sp_count", 0) for r in recs if r.get("type") == "square")
+    for u in units:
+        if stage1 and u.get("stage1"):
+            recs = done_file(os.path.join(a.out, f"U{u['i']:06d}.jsonl"))
+            if recs:
+                count_band(u, recs)
     last = 0.0
     while (todo or running):
         if a.hours and time.time() - t0 > a.hours * 3600 and not stop["now"]:
@@ -142,6 +182,8 @@ def main():
                 continue
             os.replace(tmp, out)
             stats["units"] += 1
+            stats["ref"] += u.get("pred_time", 0.0)
+            count_band(u, recs)
             for r in recs:
                 if r.get("type") == "sum":
                     stats["cpu"] += r.get("cpu", r.get("time", 0.0))
@@ -156,15 +198,22 @@ def main():
                             f.write(msg + "\n")
         if time.time() - last > 60:
             last = time.time()
-            el = (time.time() - t0) / 3600
-            say(f"{n_done + stats['units']}/{len(units)} units done; this run: "
-                f"{stats['units']} units, {stats['cpu'] / 3600:.2f} CPU-h in {el:.2f} h, "
-                f"{stats['squares']} squares, {stats['sp']} with an SP diagonal, "
-                f"{stats['magic']} magic")
+            say(progress(n_done, len(units), stats, t0, band if stage1 else None))
+    say("finished: " + progress(n_done, len(units), stats, t0, band if stage1 else None))
+
+
+def progress(n_done, n, stats, t0, band):
     el = (time.time() - t0) / 3600
-    say(f"finished: {n_done + stats['units']}/{len(units)} units done; this run "
-        f"{stats['units']} units, {stats['cpu'] / 3600:.2f} CPU-h in {el:.2f} h, "
-        f"{stats['squares']} squares, {stats['sp']} with an SP diagonal, {stats['magic']} magic")
+    ref = stats["ref"] / 3600
+    msg = (f"{n_done + stats['units']}/{n} units done; this run: {stats['units']} units, "
+           f"{stats['cpu'] / 3600:.2f} CPU-h in {el:.2f} h = {ref:.2f} reference CPU-h"
+           + (f" ({stats['cpu'] / stats['ref']:.2f}x the reference per core)" if stats["ref"] else "")
+           + f", {stats['squares']} squares, {stats['sp']} with an SP diagonal, "
+           f"{stats['magic']} magic")
+    if band is not None:
+        msg += (f"; stage-1 band units so far: {band['units']}, pairs {band['pairs']} "
+                f"(predicted {band['pred']:.1f} at f_rho = 1)")
+    return msg
 
 
 if __name__ == "__main__":

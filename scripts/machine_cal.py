@@ -11,7 +11,10 @@ usage: machine_cal.py [--bin DIR/msearch] [--out cal.json] [--ks 1,8,16]
    physical (on macOS the performance) cores, the logical CPUs and SMT.
 2. Exactness gate: bench/quick.txt and bench/full.txt must report every
    instance ok (squares and hashes) and the node totals of the build's
-   search path ("carry512": AVX-512BW, or "matrix": the portable path);
+   search path ("carry512": the carried path, with AVX-512BW kernels or,
+   without AVX-512BW, the portable C kernels of src/c/arrange_carry.h,
+   which visit the same nodes; "matrix": the N x N matrices, builds with
+   -DCARRY_MAX_W=0 or before the portable kernels);
    msearch writes its path into its first record. Any mismatch exits 1.
 3. Reference workload, the four fixed sums of the ISA study
    (research/ideas.md, "Machine calibration"): T1 plain 12 6 3 2 1 0 1 / 900,
@@ -35,7 +38,10 @@ usage: machine_cal.py [--bin DIR/msearch] [--out cal.json] [--ks 1,8,16]
 
 Run it under the conditions of the search (nothing else heavy running).
 About 1.5 minutes on a fast x86 instance (each K pass ~25 s of wall); the
-portable path is ~4-12x slower per sum.
+portable kernels (no AVX-512BW) are slower per sum: on x86 with clang
+-march=x86-64-v3 2.5-2.6x on plain sums and 1.9-2.0x on d-first ones, with
+128-bit vectors (x86-64-v2, NEON's width) 3.2-3.7x (research/ideas.md, "The
+carried path without AVX-512"); the matrix path 4-12x.
 """
 import argparse
 import hashlib
@@ -202,10 +208,11 @@ def isa_class(isa):
     """the class of a CPU (or build) for this search from its ISA names"""
     s = set(isa)
     if "arm64" in s:
-        return "arm64 (portable matrix path, ~4-5x slower per core)"
+        return "arm64 (portable carried kernels, expected ~2.5-3.5x slower per core)"
     if "avx512bw" not in s:
-        return ("avx2 (no AVX-512BW: matrix path, ~5-12x slower per core)" if "avx2" in s
-                else "x86-64 without AVX2 (matrix path)")
+        return ("avx2 (no AVX-512BW: portable carried kernels, ~2.5-3.6x slower per core "
+                "on plain sums)" if "avx2" in s
+                else "x86-64 without AVX2 (portable carried kernels, ~3.2-3.7x slower)")
     missing = [f for f in FAST_EXT if f not in s]
     if missing:
         return "avx512 cascadelake class (no " + "/".join(missing) + ": ~1.05x the CPU)"
@@ -435,13 +442,18 @@ def main():
     with tempfile.TemporaryDirectory(prefix="machine_cal_") as tmp:
         path, bisa = build_of(msearch, tmp)
         say(f"build: {msearch}: search path {path}; ISA at compile time: {' '.join(bisa) or '-'}")
+        rebuild = ("; this CPU has AVX-512BW: rebuild with -march=native"
+                   if "avx512bw" in cpu["isa"] else "")
         if path != "carry512":
-            warnings.append(f"the build's search path is {path!r}, not 'carry512' (AVX-512BW, "
-                            f"the fast path): each sum costs ~4-12x the CPU of the reference "
-                            f"build" + ("; this CPU has AVX-512BW: rebuild with -march=native"
-                                        if "avx512bw" in cpu["isa"] else ""))
+            warnings.append(f"the build's search path is {path!r}, not 'carry512' (the carried "
+                            f"path): each sum costs ~4-12x the CPU of the reference build"
+                            + rebuild)
+        elif "avx512bw" not in bisa:
+            warnings.append("the build has no AVX-512BW: the carried path with the portable "
+                            "kernels (the same nodes), ~2.5-3.5x the CPU of the reference build "
+                            "per plain sum, ~1.9-2x per d-first sum on x86" + rebuild)
         miss = [f for f in FAST_EXT if f not in bisa]
-        if path == "carry512" and miss:
+        if path == "carry512" and miss and "avx512bw" in bisa:
             warnings.append(f"the build lacks {', '.join(miss)} (cascadelake class: ~1.05x the "
                             f"CPU)" + ("; the CPU has them: rebuild with -march=native"
                                        if all(f in cpu["isa"] for f in miss) else ""))

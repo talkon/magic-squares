@@ -16,3 +16,8 @@ diagonals per sum, pooled over the units run (a prefix of the plan, in order) an
 N' band, x and exponent class, with Poisson and between-unit intervals; the selection
 effect (units ranked first vs later); the laptop's time / predicted x86 time.
 x86 check of the first 40 units (here): squares 1686 vs 1698 predicted.
+
+Superseded (2026-10-10, integ/stage1, before any unit ran on the laptop): the laptop
+runs research/stage1/plan-stage1.jsonl.xz instead (research/stage1/PREREGISTERED.txt),
+whose first 15,164 units are this plan's, unit for unit (the same arguments), so the
+outputs of either count for both. This file and the plan are kept as registered.

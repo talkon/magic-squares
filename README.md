@@ -137,11 +137,17 @@ python3 scripts/scheduler.py run --machine cal.json --workers K   # K: cal.json 
 hashes of its search path), runs four fixed sums as 1, cores and logical
 CPUs concurrent copies, and writes the instance's plain and d-first speeds
 (reference CPU-hours per instance-hour) at the best worker count. It warns
-when the build is not the carry512 path (AVX2 or ARM: ~4-12x the CPU per
-sum) or lacks VPOPCNTDQ/VBMI/GFNI/BITALG, and when SMT vCPUs add less than
-their count. `forecast --machine` reports E and P(>=1 magic square) after H
+when the build has no AVX-512BW (AVX2 or ARM: the carried path with portable
+kernels, the same nodes at ~2.5-3.5x the CPU per plain sum and ~1.9-2x per
+d-first sum, measured on x86 with clang and gcc; the matrix path of a
+-DCARRY_MAX_W=0 build ~4-12x) or lacks VPOPCNTDQ/VBMI/GFNI/BITALG, and when
+SMT vCPUs add less than their count. `forecast --machine` reports E and P(>=1 magic square) after H
 instance-hours; `run --machine` learns the time laws in reference CPU
 (research/ideas.md, "Machine calibration").
+
+A laptop runs a static, pre-registered plan without the scheduler: the
+stage-1 plan, which measures the SP coupling f_rho before the spend is
+decided (research/laptop/README.md, research/stage1.md).
 
 ## Performance
 
