@@ -20,9 +20,7 @@ count for the stage-1 plan too (the same unit numbers).
    python3). Check that `uname -m` prints `arm64`.
 2. Get the branch: `git clone -b claude/magic-search-speedups <repo>` (or
    `git pull` in an existing clone), and check that
-   `research/stage1/plan-stage1.jsonl.xz` is there (the stage-1 plan and
-   tools are on integ/stage1 until that is merged into this branch; until
-   then, clone integ/stage1).
+   `research/stage1/plan-stage1.jsonl.xz` is there.
 3. Build and check (about 2 minutes):
 
        ./scripts/laptop/build.sh
