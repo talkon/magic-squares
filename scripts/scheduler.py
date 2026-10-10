@@ -1481,7 +1481,10 @@ CALIB_PHI = 2.5
 # sum at weight 1 (d-first records them through the star cover, 1 in K d,
 # and only where the summary holds d-first pairs), so the SP coupling f_rho
 # is learned fastest from plain squares at N' 3-6k, where d-first / plain
-# is 0.9-1.0 and almost no E is lost (scripts/decide.py fits it).
+# is 0.9-1.0 and almost no E is lost (scripts/decide.py fits it). HOURS is
+# the total of stage 1: the clock of a band keeps running across runs, so
+# --stage1 120 after a finished --stage1 60 adds 60 hours; another band
+# starts a new clock.
 STAGE1_DEFAULT = (60.0, 3000.0, 6000.0)
 
 
@@ -1515,7 +1518,8 @@ class Stage1:
         try:
             with open(self.path) as f:
                 d = json.load(f)
-            if spec is not None and tuple(d.get("spec", ())) == tuple(spec):
+            # (the same band continues its clock, whatever its HOURS were)
+            if spec is not None and tuple(d.get("spec", ()))[1:] == tuple(spec)[1:]:
                 self.spent = float(d.get("spent", 0.0))
         except (OSError, ValueError):
             pass
@@ -1535,10 +1539,12 @@ class Stage1:
         return (math.log(self.spec[1]), math.log(self.spec[2]))
 
     def charge(self, seconds):
-        """count a unit; True when this ends stage 1"""
-        was = self.active
+        """count a unit launched while stage 1 is on; True when this ends
+        stage 1 (units launched after it are not counted)"""
+        if not self.active:
+            return False
         self.spent += float(seconds)
-        return was and not self.active
+        return not self.active
 
     def save(self):
         if self.spec is None:
@@ -4432,7 +4438,7 @@ def sp_kappa():
     return math.sqrt(_am().KAPPA / 1.1) / (TRAV_BASE[0] * TRAV_BASE[1])
 
 
-def unit_predictions(sc, u):
+def unit_predictions(sc, u, band=None):
     """the model's predictions of the records of a planned unit u at the
     scorer's calibration and f_rho = 1: squares recorded (plain: its sums';
     d-first: its calibration stream's, 1 in k first rows), their S and P
@@ -4441,7 +4447,10 @@ def unit_predictions(sc, u):
     traversals predicted"), their (square, SP traversal) pairs (sp_kappa()
     r_S r_P 720 e^{lpSP}, scripts/decide.py's model pairs), the pairs of a
     d-first unit's part of the d loop (found through the star cover; not
-    in decide.py), and the unit's N' (of its first and last sum)"""
+    in decide.py), and the unit's N' (of its first and last sum); with
+    band = (ln LO, ln HI) also the pairs of its sums with N' in the band
+    (pred_pairs_band: decide.py fits by sum, so a unit that starts below
+    LO brings its later sums' pairs)"""
     np = _np()
     am = _am()
     a = u.a
@@ -4468,10 +4477,14 @@ def unit_predictions(sc, u):
     else:
         rec = sq
         dpairs = 0.0
-    return {"pred_squares": float(rec.sum()), "pred_S": float((rec * eS * rS).sum()),
-            "pred_P": float((rec * eP * rP).sum()), "pred_SP": float((rec * eSP).sum()),
-            "pred_pairs": float((rec * q).sum()), "pred_pairs_dfirst": dpairs,
-            "lNp": [float(lNp[0]), float(lNp[-1])]}
+    out = {"pred_squares": float(rec.sum()), "pred_S": float((rec * eS * rS).sum()),
+           "pred_P": float((rec * eP * rP).sum()), "pred_SP": float((rec * eSP).sum()),
+           "pred_pairs": float((rec * q).sum()), "pred_pairs_dfirst": dpairs,
+           "lNp": [float(lNp[0]), float(lNp[-1])]}
+    if band is not None:
+        inb = (lNp >= band[0]) & (lNp < band[1])
+        out["pred_pairs_band"] = float((rec * q)[inb].sum())
+    return out
 
 
 def forecast_truth(args):
@@ -4894,7 +4907,9 @@ def main():
                             "reference CPU (the units' predicted CPU at the scheduler's laws, "
                             "counted in the state's stage1_<n>.json) search the sums with N' "
                             "in [LO, HI) plain, to learn the SP coupling f_rho from their "
-                            "pairs (scripts/decide.py); default %(const)s; off = none")
+                            "pairs (scripts/decide.py); default %(const)s; off = none. HOURS "
+                            "is the total: the same band keeps its clock, so a larger HOURS "
+                            "extends a finished stage 1")
         p.add_argument("--calib-frac", type=float, default=CALIB_FRAC,
                        help="analytic: CPU of a d-first sum's calibration stream (msearch "
                             "--calib-r1-stride, semi-magic squares for the models) as a share "

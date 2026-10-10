@@ -2243,11 +2243,16 @@ def test_stage1():
         st = scheduler.Stage1(state, 6, (1.0, 3000.0, 6000.0))
         assert st.active and st.band() == (math.log(3000), math.log(6000))
         assert not st.charge(1800) and st.charge(1800) and not st.active and st.band() is None
+        # (units launched after stage 1 are not counted)
+        assert not st.charge(1800) and st.spent == 3600
         st.save()
         assert scheduler.Stage1(state, 6, (1.0, 3000.0, 6000.0)).spent == 3600
-        # another spec starts a new clock; the sample scales the hours
-        assert scheduler.Stage1(state, 6, (2.0, 3000.0, 6000.0)).spent == 0
-        st2 = scheduler.Stage1(state, 6, (2.0, 3000.0, 6000.0), scale=0.1)
+        # more hours on the same band extend it (HOURS is the total);
+        # another band starts a new clock; the sample scales the hours
+        st3 = scheduler.Stage1(state, 6, (2.0, 3000.0, 6000.0))
+        assert st3.spent == 3600 and st3.active and st3.limit == 7200
+        assert scheduler.Stage1(state, 6, (2.0, 2000.0, 6000.0)).spent == 0
+        st2 = scheduler.Stage1(state, 6, (2.0, 2000.0, 6000.0), scale=0.1)
         assert st2.limit == 720 and st2.active
         assert not scheduler.Stage1(state, 6, None).active
         # plain in the band, the mode elsewhere unchanged
@@ -2268,6 +2273,11 @@ def test_stage1():
         p = scheduler.unit_predictions(sc, u)
         assert abs(p["pred_squares"] - u.squares) < 1e-6 * max(u.squares, 1)
         assert 0 < p["pred_pairs"] < p["pred_SP"] * scheduler.sp_kappa() * 1.5
+        # the band's pairs: all of them for a band around the unit, none outside
+        pb = scheduler.unit_predictions(sc, u, band=(0.0, 99.0))
+        assert abs(pb["pred_pairs_band"] - p["pred_pairs"]) < 1e-9 * p["pred_pairs"]
+        assert scheduler.unit_predictions(sc, u, band=(98.0, 99.0))["pred_pairs_band"] == 0
+        assert "pred_pairs_band" not in p
     # decide.py: the quasi-Poisson gamma fit, the replay of the calibration
     # search (7 pairs / 5.74 at the 'pre' prior: median 1.05, f_rho^2 ln sd 0.46)
     fr = decide.fit_frho([7.0], [5.74], "pre")
@@ -2282,7 +2292,87 @@ def test_stage1():
     assert abs(decide.e_at(pts, 3.0) - 0.1 * 3 ** math.log10(3)) < 1e-9
     pr = decide.predictive(None, pts, [1.0], 20000)[1.0]
     assert abs(pr["P1"] - (1 - math.exp(-0.1))) < 0.01 and pr["E_point"] == 0.1
+    # the shipped prior is the calibration search's posterior by its median
+    fr = decide.fit_frho([], [], "shipped")
+    assert abs(fr["median"] - 1.06) < 1e-3 and fr["mean"] > 1.07, fr
+    assert 1.2 < fr["mean"] ** 2 * (1 + 1 / fr["shape"]) < 1.25    # E f_rho^2
+    # the band must be whole N' bands
+    assert decide.band_cells(3000, 6000) == [2] and decide.band_cells(3000, float("inf")) == [2, 3, 4, 5]
+    for lo, hi in ((2000, 5000), (3000, 5000), (3000, 3000)):
+        try:
+            decide.band_cells(lo, hi)
+            raise AssertionError((lo, hi))
+        except ValueError:
+            pass
+    # each plain (P, S) sum once: a repeat in a later file and the
+    # calibration stream of a sum with a plain record are dropped
+    P = (12, 6, 3, 2, 1, 1)
+    with tempfile.TemporaryDirectory() as d:
+        sq = [(885, 2, 1, 1, 7), (886, 1, 1, 0, 3)]
+        f1 = os.path.join(d, "a.jsonl")
+        f2 = os.path.join(d, "b.jsonl")
+        write_unit(f1, P, [(885, 1), (886, 1)], sq, done=(885, 886))
+        write_unit(f2, P, [(885, 1), (887, 0)], sq[:1], done=(885, 887))
+        with open(f2, "a") as f:
+            f.write(json.dumps({"type": "csquare", "n": 6, "P": list(P), "S": 886, "s_count": 1, "p_count": 1, "sp_count": 1}) + "\n")
+            f.write(json.dumps({"type": "csum", "n": 6, "P": list(P), "S": 886, "mode": "calib"}) + "\n")
+        copies, plain, dd = decide.dedupe_copies([f1, f2], os.path.join(d, "out"))
+        assert plain == {(P, 885), (P, 886), (P, 887)}
+        assert dd["sums_kept"] == 3 and dd["sums_dropped"] == 1 and dd["squares_dropped"] == 1
+        assert dd["pairs_dropped"] == 1 and dd["calib_dropped"] == 1
+        o = decide.file_counts(copies[1])
+        assert o["sums"] == 1 and o["squares"] == 0 and o["complete"] == 1
+        assert decide.file_counts(f2)["pairs"] == 2      # (the raw file)
+    # decide.py without a state: the plan's frozen predictions
+    with tempfile.TemporaryDirectory() as d:
+        plan = os.path.join(d, "plan.jsonl")
+        units = os.path.join(d, "runs")
+        os.makedirs(units)
+        recs = []
+        for i, (S, l0, l1, inb) in enumerate(((885, 8.1, 8.2, True), (900, 7.0, 7.1, False),
+                                              (910, 7.9, 8.1, False))):
+            recs.append({"i": i, "P": list(P), "lo": S, "hi": S, "pred_squares": 2.0,
+                         "pred_pairs": 0.5, "pred_time": 10.0, "lNp": [l0, l1], "stage1": inb})
+            write_unit(os.path.join(units, f"U{i:06d}.jsonl"), P, [(S, 1)],
+                       [(S, 2, 1, 2, 7)], done=(S, S))
+        with open(plan, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in recs))
+        out = os.path.join(d, "o.json")
+        txt = subprocess.run([sys.executable, os.path.join(HERE, "decide.py"), "--plan", plan,
+                              "--units-dir", units, "--json", out, "--draws", "2000"],
+                             capture_output=True, text=True, check=True).stdout
+        r = json.load(open(out))
+        # (1 square found of 2 predicted: M = 0.5 x 1 / 2)
+        assert r["fit"]["Y"] == 2 and abs(r["fit"]["M"] - 0.25) < 1e-9, r["fit"]
+        assert r["fit_outside_flat"]["Y"] == 2 and r["finished"] == 3
+        assert "flat prior" in txt and "1 units across an edge" in txt, txt
     print("stage 1 ok")
+
+
+def test_stage1_machine():
+    """run --stage1 with --machine: the units launched under stage 1 carry
+    their frozen predictions, their files a machine record, and the stage-1
+    clock counts reference CPU; forecast --stage1 --machine reports both"""
+    with tempfile.TemporaryDirectory() as state:
+        cal = os.path.join(state, "cal.json")
+        with open(cal, "w") as f:
+            json.dump({"plain_speed": 0.5, "dfirst_speed": 0.5, "workers": 1,
+                       "per_process": {"plain": 0.5, "dfirst": 0.5},
+                       "cpu": {"model": "test"}, "build": {"path": "carry512"}}, f)
+        run("--state", state, "run", "--workers", "1", "--only", SMALL, "--unit-time", "1",
+            "--hours", "0.002", "--stage1", "1:100:1000000", "--machine", cal)
+        launched = [json.loads(l) for l in open(os.path.join(state, "launched_6.jsonl"))]
+        assert launched and all(r["stage1"] and "pred_pairs" in r for r in launched), launched
+        st = json.load(open(os.path.join(state, "stage1_6.json")))
+        assert st["spec"] == [1, 100, 1000000]
+        assert abs(st["spent"] - sum(r["time"] for r in launched)) < 1e-6
+        for r in launched:
+            first = json.loads(open(os.path.join(state, "units", r["file"])).readline())
+            assert first["type"] == "machine" and first["speed"]["plain"] == 0.5
+        out = run("--state", state, "forecast", "--only", SMALL, "--hours", "1", "--draws", "0",
+                  "--stage1", "1:100:1000000", "--machine", cal, "--instance-hours", "2")
+        assert "stage 1: N' 100-1000000 plain" in out and "on this machine: 2 instance-hours" in out
+    print("stage 1 with --machine ok")
 
 
 if __name__ == "__main__":
@@ -2319,4 +2409,5 @@ if __name__ == "__main__":
     test_commands_v2()
     test_commands()
     test_stage1()
+    test_stage1_machine()
     print(f"all ok ({time.time() - t0:.0f} s)")

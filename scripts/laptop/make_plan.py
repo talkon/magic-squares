@@ -13,10 +13,18 @@ Each line: {"i", "P", "lo", "hi", "mode", "args" (msearch arguments without
 the binary and --out), "pred_time" (CPU-s of the fast x86 build),
 "pred_squares", "pred_magic", "score"}. --time-limit and --node-limit are
 multiplied by --time-factor and --node-factor, because a slower machine
-(e.g. an ARM laptop: the same search with the portable kernels, ~2.4x the
-fast build's time per core on x86 without AVX-512; the node factor was for
-the matrix path's extra nodes, which builds without AVX-512 no longer take)
-would otherwise stop units early. Prints the sha256 of the plan for the pre-registration.
+would otherwise stop units early. An ARM laptop runs the same search with
+the portable kernels: on x86 without AVX-512 they take 2.5-2.6x the fast
+build's time per core on plain sums with clang -march=x86-64-v3 and
+3.2-3.7x with 128-bit vectors (NEON's width), so an M1 is expected at
+~2.5-3.5x (scripts/laptop/build.sh measures it). The scheduler's time
+limit is max(2 x unit time, 3 x predicted) of the fast build; the default
+factor 12 keeps 3.4-4.8x of that margin at 2.5-3.5x (a factor of ~6 would
+do at 3.5x) and still covers a core 6-10x slower (an efficiency core, a
+throttled laptop); the cost is only that a runaway unit runs longer. The
+node factor was for the matrix path's extra nodes, which builds without
+AVX-512 no longer take; the time limit binds first. Prints the sha256 of
+the plan for the pre-registration.
 
 --stage1 (research/stage1.md): the plan of scheduler.py run --stage1
 HOURS:LO:HI (default 60:3000:6000; --dfirst auto unless given): the first
@@ -103,6 +111,7 @@ def main():
         sys.exit(f"the state's stage 1 has run {s.stage1.spent / 3600:.2f} h: a static stage-1 "
                  f"plan starts from a state without it")
     lines = []
+    band_pairs = []   # (--stage1) per unit: the pairs of its sums in the band
     band = (math.log(spec[1]), math.log(spec[2])) if spec else None
     for i, u in enumerate(s.simulate(max_hours=hours)):
         cmd = s.command(u, "OUT", check=False)[1:]
@@ -117,7 +126,9 @@ def main():
                "pred_squares": u.squares, "pred_magic": u.magic, "score": u.score}
         if spec:
             # (s.simulate set the scorer's stage-1 band for this unit)
-            p = sch.unit_predictions(s.scorer, u)
+            p = sch.unit_predictions(s.scorer, u, band=band)
+            # (not in the plan's lines, whose format is frozen)
+            band_pairs.append(p.pop("pred_pairs_band"))
             p["pred_squares"] = u.squares
             rec.update(p)
             rec["stage1"] = bool(band[0] <= p["lNp"][0] < band[1])
@@ -149,15 +160,24 @@ def main():
     totals = {k: sum(r[k] for r in recs) for k in keys} | {"units": len(recs)}
     inb = [r for r in recs if r["stage1"]]
     tb = {k: sum(r[k] for r in inb) for k in keys} | {"units": len(inb)}
-    # reference CPU-hours of the plan at which the band's pairs reach 45
-    cum = h45 = 0.0
+    # reference CPU-hours of the plan at which the band's pairs reach 45:
+    # counting the band units only (the units whose first sum is in the
+    # band, what decide.py fits without a state), and counting every sum in
+    # the band (also the later sums of units that start below LO, what
+    # decide.py fits with the state)
+    cum = cums = h45 = h45s = 0.0
     h = 0.0
-    for r in recs:
+    for r, bp in zip(recs, band_pairs):
         h += r["pred_time"] / 3600
+        cums += bp
+        if cums >= 45 and not h45s:
+            h45s = h
         if r["stage1"]:
             cum += r["pred_pairs"]
             if cum >= 45 and not h45:
                 h45 = h
+    across = [(r, bp) for r, bp in zip(recs, band_pairs) if bp > 0 and not r["stage1"]]
+    nb = [math.exp(x) for r in inb for x in r["lNp"]]
     try:
         with open(a.decision_table, "rb") as f:
             dt = f.read()
@@ -182,8 +202,13 @@ def main():
            "totals:", "  all      " + fmt(totals),
            f"  stage-1 band (N' {spec[1]:g}-{spec[2]:g}) " + fmt(tb), "by N' band and mode:"]
     txt += [f"  {k:13} " + fmt(g) for k, g in sorted(by.items())]
-    txt += ["", f"45 pairs predicted in the stage-1 band after {h45:.1f} reference CPU-hours of the "
-                f"plan (0 = not within it)",
+    txt += ["", f"N' of the band units' sums: {min(nb, default=0):.0f}-{max(nb, default=0):.0f}",
+            f"pairs predicted in the band's sums: {sum(band_pairs):.2f} ({tb['pred_pairs']:.2f} in "
+            f"the band units, {sum(bp for _, bp in across):.2f} in the later sums of "
+            f"{len(across)} units that start below N' {spec[1]:g})",
+            f"45 pairs predicted in the stage-1 band after {h45:.1f} reference CPU-hours of the "
+            f"plan counting the band units only, after {h45s:.1f} counting every sum in the band "
+            f"(0 = not within it)",
             "", "analysis plan (scripts/decide.py STATE --plan PLAN): observed / predicted squares, "
                 "S and P traversals, pairs per unit run (a prefix of the plan, in order), pooled and "
                 "by N' band, with Poisson intervals; the f_rho posterior from the band's plain "
