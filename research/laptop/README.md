@@ -44,9 +44,14 @@ run it anywhere without the scheduler or numpy.
   forecast's main remaining uncertainty rests on, plus squares and S/P
   traversals per square. The predictions are frozen in the plan
   (pred_squares, pred_magic, pred_time per unit) and in PREREGISTERED.txt.
-* The laptop's speed: ARM uses the portable search path (no AVX-512), about
-  4-5x slower per core than the fast x86 build (measured on x86 with the
-  same path; to be measured on the M1).
+* The laptop's speed: ARM has no AVX-512, and now runs the same carried
+  search as the fast x86 build with plain C kernels (src/c/arrange_carry.h;
+  the same nodes and squares, which build.sh checks), on x86 without
+  AVX-512 (clang, AVX2) 2.3-2.4x the fast build's time per core, against
+  4.1-4.6x for the matrix path these builds had before (research/ideas.md,
+  "The carried path without AVX-512"; to be measured on the M1). The
+  plan's --node-limit factor of 4 was for the matrix path's extra nodes;
+  with the same nodes it does not bind.
 
 The portable ARM build was checked here by cross-compiling and running under
 qemu: bench quick/full all ok, and three plan units give the same squares,

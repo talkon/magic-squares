@@ -63,8 +63,9 @@ msearch"). V_d comes from a number -> vector posting index (O(sum of the
 posting lengths) per d). Every square of V_d contains all of d, so d's
 numbers get the top labels and only the first rows through the rarest of
 them are roots (`--d-plain-root`: all of V_d, as `bin/dsearch`; a V_d
-searched with the 8-word intersection matrices, i.e. 257-512 labels without
-AVX-512BW, always gets the plain root, which is 1.27x faster there). Each
+searched with the 8-word intersection matrices, i.e. 257-512 labels in a
+build with `-DCARRY_MAX_W` below 8, always gets the plain root, which is
+1.27x faster there). Each
 vector of V_d holds exactly one of d's numbers, its class, so the V_d
 searches also prune with the class support (see the list below; on by
 default, `--no-class-support` turns it off for A/B runs): 0.39-0.63x the
@@ -214,6 +215,9 @@ bin/bench --no-r1-width bench/full.txt # every r1 at the width of all labels (sa
 bin/bench --pretest-min 0 bench/quick.txt    # without the pretest (same nodes)
 bin/bench_matrices bench/quick.txt     # the same with the N x N matrices (CARRY_MAX_W=0)
 bin/bench_matrices --min-words 8 --gather bench/quick.txt   # matrices as for > 512 labels, N > 3072
+cmake-build-release/src/c/bench_portable bench/quick.txt     # without AVX-512: the portable carried path, the same nodes
+cmake-build-release/src/c/bench_carry_portable bench/quick.txt   # its plain C kernels in the native build (-DCARRY_PORTABLE)
+cmake-build-release/src/c/bench_portable_matrices bench/quick.txt  # without AVX-512, the matrices (the search such builds had before)
 bin/bench --node-limit 3000000 big.txt # time the first 3M nodes of larger instances
 bin/bench --update bench/quick.txt     # print instances with observed values
 ```
@@ -312,10 +316,11 @@ versa), plus:
   at N >= 11.7k, for 12-35% of the search's cycles (`-DCLASS_PROF`;
   research/ideas.md, "Class support in the V_d searches");
 - branching on the unmatched cell with the fewest candidates, ties broken by
-  the smallest label; the counts are exact (saturating byte counters) with
-  AVX-512BW and up to 512 labels (256 on the matrix path), where the cell is
-  found with one masked
-  minimum over the counters instead of a scan of the counts class by
+  the smallest label; the counts are exact (saturating byte counters) on
+  the carried path (up to 512 labels, in every build) and on the matrix
+  path with AVX-512BW up to 256 labels; with AVX-512BW the cell is found
+  with one masked minimum over the counters instead of a scan of the
+  counts class by
   class (0-3.5% less time on `bench/prod.txt`, depending on the rest of
   the code; `fuzz_arrange --mode 6` tests the saturated counts, >= 255
   candidates through every unmatched cell), and
@@ -340,9 +345,10 @@ versa), plus:
   selected with a vectorized filter (from the bitsets the lists carry, or
   from a label -> vectors bit matrix, see below), rather than tested one by
   one;
-- with AVX-512BW and up to 512 labels, the candidate lists carry the label
-  bitsets of their entries (one array per 64-bit word), so filtering a list
-  by the vector v just placed computes |u & v| for 8 entries at a time from
+- up to 512 labels, the candidate lists carry the label bitsets of their
+  entries (one array per 64-bit word), and with AVX-512BW (without it, see
+  the portable kernels below) filtering a list by the vector v just
+  placed computes |u & v| for 8 entries at a time from
   contiguous loads (vpopcntq), and compresses the kept entries with their
   bitsets. The support filter is a test of the same carried words against
   the uncovered numbers, 8 entries at a time, and its first pass over the
@@ -366,6 +372,28 @@ versa), plus:
   keep the words of v disjoint (one vpopcntq, or without VPOPCNTDQ one
   exactly-one-bit test instead of a test per word and across words: 5%
   less time with -march=cascadelake);
+- without AVX-512BW (ARM such as Apple M1, AVX2 or older x86), the same
+  carried path runs with plain C kernels (`arrange_carry.h`, or forced with
+  `-DCARRY_PORTABLE`): the same lists, tests, unions, label counts at the
+  unmatched cells and class-support keep masks, so the same nodes and the
+  same squares in the same order as the AVX-512 build (bench quick / full /
+  prod, and `fuzz_arrange -v` per seed and variant, compared). The kernels
+  work on blocks of up to 64 entries: the tests of a block, in a loop
+  without stores that compilers vectorize (NEON, AVX2), give a mask of the
+  kept entries, and only those are copied (most entries are dropped); the
+  label counts are computed only for the unmatched cells, one vectorized
+  sum per cell; the cross test runs over a fixed block of 8 (or 16) cells.
+  Selected automatically when the compiler does not target AVX-512BW, so
+  scripts/laptop/build.sh builds it on ARM. On x86 without AVX-512
+  (paired with the AVX-512 build and the matrix path, min of 2 rounds),
+  clang -march=x86-64-v3, bench quick / full / prod: 0.56 / 6.8 / 30.0 s,
+  2.3-2.4x the AVX-512 build's 0.25 / 2.9 / 12.4 s and 1.8-1.9x faster than
+  the matrix path's 1.00 / 12.7 / 53.0 s (1.6x / 2.35x / 3.4x its nodes);
+  gcc: 0.71 / 9.9 / 41.7 s with -march=x86-64-v3 (matrices 1.18 / 14.7 /
+  62.6), 0.82 / 10.6 / 45.6 s with x86-64-v2 (matrices 1.16 / 14.6 / 61.4).
+  d-first, 13 7 4 3 1 1, S = 2200, d < 100: 3.7 s AVX-512, 6.3 s clang
+  v3, 9.1 s gcc v3, 36.4 s on the matrix path (no class support, 4.9x the
+  nodes) (research/ideas.md, "The carried path without AVX-512");
 - each first row r1 is searched with only the 64-bit words it needs: its
   subproblem has the vectors after it, whose labels are all at most its
   largest label x, so the r1 are searched in runs of equal width
@@ -379,11 +407,12 @@ versa), plus:
   2.8-3.1x less time at N = 21-32k with 259-279 labels (5 words only for
   the first r1), 2.2x inside the d-first V_d searches (research/ideas.md,
   "Carried bitsets up to 512 labels");
-- otherwise (more than 512 labels, or no AVX-512BW), the candidate lists are
-  indices filtered with N x N intersection bit matrices: with AVX-512, 16 at
-  a time against a row of a matrix, looking the bits up with permutes from
-  the row held in registers when N <= 3072 (gathers otherwise), and
-  compressed; vectorized counting; plain C otherwise.
+- otherwise (more than 512 labels, or built with `-DCARRY_MAX_W=0`), the
+  candidate lists are indices filtered with N x N intersection bit
+  matrices: with AVX-512, 16 at a time against a row of a matrix, looking
+  the bits up with permutes from the row held in registers when N <= 3072
+  (gathers otherwise), and compressed; vectorized counting; plain C
+  otherwise.
 
 ## Legacy arrangement program
 

@@ -11,8 +11,10 @@ Each line: {"i", "P", "lo", "hi", "mode", "args" (msearch arguments without
 the binary and --out), "pred_time" (CPU-s of the fast x86 build),
 "pred_squares", "pred_magic", "score"}. --time-limit and --node-limit are
 multiplied by --time-factor and --node-factor, because a slower machine
-(e.g. the portable build on ARM, ~4-5x slower) would otherwise stop units
-early. Prints the sha256 of the plan for the pre-registration.
+(e.g. an ARM laptop: the same search with the portable kernels, ~2.4x the
+fast build's time per core on x86 without AVX-512; the node factor was for
+the matrix path's extra nodes, which builds without AVX-512 no longer take)
+would otherwise stop units early. Prints the sha256 of the plan for the pre-registration.
 """
 import argparse
 import hashlib

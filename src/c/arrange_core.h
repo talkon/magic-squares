@@ -52,10 +52,20 @@
 #define CLS_LOOP CAT(cls_loop, W)
 #define CLASS_PASS CAT(class_pass, W)
 #define CLASS_SUP CAT(class_sup, W)
+#define CARRY_SETUP CAT(carry_setup, W)
+#define CARRY_TEST CAT(carry_test, W)
+#define CARRY_COMPRESS CAT(carry_compress, W)
+#define CARRY_UNION CAT(carry_union, W)
+#define CARRY_SELECT CAT(carry_select, W)
 
 /* whether the candidate lists carry their bitsets (see vw in arrange.c) */
 #if W <= CARRY_MAX_W
 #define CARRY 1
+/* ... with the plain C kernels of arrange_carry.h (no AVX-512BW, or
+ * -DCARRY_PORTABLE): the same lists, tests and results */
+#ifndef CARRY_AVX512
+#define CARRY_P 1
+#endif
 #endif
 /* the kind of label counters for this width (see arrange.c; COUNT_CARRY
  * writes byte counters, so the carried path always has them), and the
@@ -104,9 +114,15 @@
  * in more than t candidates.
  */
 static inline uint64_t COVERED(const uint64_t *g, int w) {
-#ifdef COUNT_BYTES
+#if defined(COUNT_BYTES) && !defined(CARRY_P)
   __m512i x = _mm512_loadu_si512(g + 8 * w);
   return _mm512_test_epi8_mask(x, x);
+#elif defined(COUNT_BYTES)
+  const uint8_t *gb = (const uint8_t *)(g + 8 * w);
+  uint64_t r = 0;
+  for (int i = 0; i < 64; i++)
+    r |= (uint64_t)(gb[i] != 0) << i;
+  return r;
 #else
   return g[w];
 #endif
@@ -121,7 +137,7 @@ static inline uint64_t IN_CLASS(const uint64_t *g, int w, int c) {
 }
 #endif
 
-#ifdef CARRY
+#if defined(CARRY) && !defined(CARRY_P)
 /*
  * Candidate lists that carry their bitsets: word w of entry i of a list is
  * at list[w * cap + i].
@@ -467,6 +483,10 @@ static inline void COUNT_CARRY(const sstate_t *s, uint64_t *list,
 #endif
 }
 
+#elif defined(CARRY)
+#define CARRY_PART 1
+#include "arrange_carry.h"
+#undef CARRY_PART
 #else /* !CARRY */
 
 /*
@@ -734,6 +754,7 @@ static int SUPPORT(sstate_t *s, int d, int a, int union_only) {
  * needs a pairwise test. See TRY_CHILD for where it runs.
  */
 #ifdef CARRY
+#ifndef CARRY_P
 /*
  * The test of a cross pass on carried lists: keeps the entries of
  * fl[0..kf) that meet U_y for every cell y and are disjoint from bad
@@ -918,6 +939,11 @@ static inline uint32_t CROSS_AXIS(sstate_t *s, int d, int f,
   s->nvalid[d][f] = k;
   return k;
 }
+#else
+#define CARRY_PART 2
+#include "arrange_carry.h"
+#undef CARRY_PART
+#endif
 
 /*
  * Cross support on both axes, axis `first` first, each pass with the
@@ -1200,6 +1226,7 @@ static void CLS_BOUNDS(const sstate_t *s, const uint64_t *list, uint32_t cnt,
 #endif
 }
 
+#ifndef CARRY_P
 /* the lanes of block [b0, b1) in group g (entries 8 g .. 8 g + 7) */
 static inline __mmask8 CLS_LANEMASK(uint32_t b0, uint32_t b1, uint32_t g) {
   const uint32_t i = 8 * g;
@@ -1541,6 +1568,11 @@ static __attribute__((noinline)) int CLASS_SUP(sstate_t *s, int d, int a) {
 }
 #ifdef CLASS_SUP_IMPL
 #undef CLASS_SUP_IMPL
+#endif
+#else /* CARRY_P */
+#define CARRY_PART 3
+#include "arrange_carry.h"
+#undef CARRY_PART
 #endif
 #endif
 
@@ -1890,7 +1922,7 @@ static void SEARCH_REC(sstate_t *s, int d) {
     ucol[w] = cc[w] & ~rc[w];
   }
   int x = -1;
-#ifdef COUNT_BYTES
+#if defined(COUNT_BYTES) && !defined(CARRY_P)
   /* with byte counters, the fewest candidates directly: t = count - 1 for
    * the unmatched cells (wrapping, so that a count of 0, which only
    * --no-fc leaves, becomes 255 like the other cells), its minimum over
@@ -1939,6 +1971,46 @@ static void SEARCH_REC(sstate_t *s, int d) {
       }
     }
   }
+#elif defined(COUNT_BYTES)
+  /* the same choice from the byte counters of the unmatched cells (t =
+   * count - 1, wrapping; every other cell reads 255), cell by cell */
+  if (s->opts.mrv) {
+    unsigned mn = 255;
+    for (int w = 0; w < W; w++) {
+      const uint8_t *br = (const uint8_t *)(gr + 8 * w),
+                    *bc = (const uint8_t *)(gc + 8 * w);
+      for (uint64_t m = urow[w]; m; m &= m - 1) {
+        const unsigned t = (uint8_t)(br[__builtin_ctzll(m)] - 1);
+        mn = t < mn ? t : mn;
+      }
+      for (uint64_t m = ucol[w]; m; m &= m - 1) {
+        const unsigned t = (uint8_t)(bc[__builtin_ctzll(m)] - 1);
+        mn = t < mn ? t : mn;
+      }
+    }
+    if (mn == 255) /* no unmatched cell with a candidate */
+      return;
+    if (mn < NCLASS - 1) {
+      for (int w = 0; w < W; w++) {
+        const uint64_t k =
+            mrv_eq(gr + 8 * w, gc + 8 * w, urow[w], ucol[w], mn);
+        if (k) {
+          x = w * 64 + __builtin_ctzll(k);
+          break;
+        }
+      }
+    } else {
+      /* >= NCLASS candidates (saturated): the largest label, see below */
+      for (int w = W - 1; w >= 0; w--) {
+        const uint64_t k =
+            mrv_eq(gr + 8 * w, gc + 8 * w, urow[w], ucol[w], mn);
+        if (k) {
+          x = w * 64 + 63 - __builtin_clzll(k);
+          break;
+        }
+      }
+    }
+  }
 #else
   if (s->opts.mrv)
     for (int c = 0; c < NCLASS - 1 && x < 0; c++)
@@ -1970,7 +2042,7 @@ static void SEARCH_REC(sstate_t *s, int d) {
 
   /* the children are the candidates on axis b through cell x; select them
    * all first (vectorized, no branch per candidate), then search them */
-#ifdef CARRY
+#if defined(CARRY) && !defined(CARRY_P)
   /* the entries whose word xw has bit x, with their bitsets */
   uint64_t *kids = s->kidw[d];
   const size_t cap = s->cap;
@@ -2000,6 +2072,19 @@ static void SEARCH_REC(sstate_t *s, int d) {
   PAD_LIST(s, s->vw[d][ROW], s->nvalid[d][ROW]);
   PAD_LIST(s, s->vw[d][COL], s->nvalid[d][COL]);
   CP_PHASE(pl, CP_SEL);
+  for (uint32_t i = 0; i < nk && !s->stop; i++) {
+    uint64_t m[W];
+    for (int w = 0; w < W; w++)
+      m[w] = kids[w * cap + i];
+    TRY_CHILD(s, d, b, m, 0, 0);
+  }
+#elif defined(CARRY)
+  /* the entries whose word xw has bit x, with their bitsets */
+  uint64_t *kids = s->kidw[d];
+  const size_t cap = s->cap;
+  const uint32_t cnt = s->nvalid[d][b];
+  const uint64_t *in = s->vw[d][b];
+  const uint32_t nk = CARRY_SELECT(s, in, cnt, xw, xb, kids);
   for (uint32_t i = 0; i < nk && !s->stop; i++) {
     uint64_t m[W];
     for (int w = 0; w < W; w++)
@@ -2104,6 +2189,12 @@ static void SEARCH_ROOT(sstate_t *s, uint32_t i0, uint32_t i1) {
 #undef CLS_LOOP
 #undef CLASS_PASS
 #undef CLASS_SUP
+#undef CARRY_SETUP
+#undef CARRY_TEST
+#undef CARRY_COMPRESS
+#undef CARRY_UNION
+#undef CARRY_SELECT
+#undef CARRY_P
 #undef TRY_CHILD_INLINE
 #undef CROSS_SIMD
 #undef COUNT_BYTES

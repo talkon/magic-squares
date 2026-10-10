@@ -1,8 +1,10 @@
 #!/bin/sh
 # Build msearch, bench and fuzz_arrange without CMake (macOS or Linux, x86 or
 # ARM) into build-laptop/, then check the build: every bench/quick.txt and
-# bench/full.txt instance must give the expected squares and hash, and the
-# differential fuzz test must pass. Prints the time of bench/quick.txt.
+# bench/full.txt instance must give the expected squares and hash, with the
+# node counts of the fast x86 build (the same search, also without
+# AVX-512), and the differential fuzz test must pass. Prints the time of
+# bench/quick.txt.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 B=$ROOT/build-laptop
@@ -37,6 +39,21 @@ fi
 for f in quick full; do
   if ! tail -1 "$B/check_$f.txt" | grep -q ' ok '; then
     echo "BUILD CHECK FAILED: see $B/check_$f.txt"; exit 1
+  fi
+done
+# the search is the carried path (with AVX-512BW its AVX-512 kernels,
+# otherwise the plain C ones of src/c/arrange_carry.h, e.g. on ARM), which
+# visits exactly the nodes of the fast x86 build
+if $CC $FLAGS -dM -E -x c /dev/null 2>/dev/null | grep -q __AVX512BW__; then
+  echo "search kernels: AVX-512"
+else
+  echo "search kernels: portable (plain C, no AVX-512BW)"
+fi
+for fn in quick:1770779 full:14958507; do
+  f=${fn%%:*}; n=${fn#*:}
+  got=$(tail -1 "$B/check_$f.txt" | awk '{print $2}')
+  if [ "$got" != "$n" ]; then
+    echo "BUILD CHECK FAILED: bench/$f.txt took $got nodes, the fast x86 build $n (not the same search)"; exit 1
   fi
 done
 echo "checking the search against brute force (fuzz_arrange, 60 seeds, ~1 min)"

@@ -156,13 +156,16 @@ void search_opts_default(search_opts_t *o) {
  * matrices, which cost x2.7 time and x2.8 nodes on the same r1 at N = 23k
  * (8-slice MRV, no cross support); below, each extra word cost x1.38 time.
  */
-#ifdef __AVX512BW__
 #ifndef CARRY_MAX_W
 #define CARRY_MAX_W 8
 #endif
-#else
-#undef CARRY_MAX_W
-#define CARRY_MAX_W 0
+/* the kernels of the carried path: AVX-512 (arrange_core.h) with
+ * AVX-512BW, unless built with -DCARRY_PORTABLE; otherwise plain C
+ * (arrange_carry.h: ARM, AVX2, SSE), the same algorithm with the same
+ * nodes and squares (see research/ideas.md, "The carried path without
+ * AVX-512") */
+#if defined(__AVX512BW__) && !defined(CARRY_PORTABLE)
+#define CARRY_AVX512 1
 #endif
 #if CARRY_MAX_W > 8
 #error "CARRY_MAX_W is at most 8 (see CARRY_WORDS)"
@@ -469,7 +472,7 @@ static void report(sstate_t *s) {
   report_labels(s, lab);
 }
 
-#if CARRY_MAX_W > 0
+#if CARRY_MAX_W > 0 && defined(CARRY_AVX512)
 /* the k-th lowest set bit of y (k < popcount(y)) */
 static inline uint64_t nth_bit(uint64_t y, int k) {
 #ifdef __BMI2__
@@ -481,11 +484,103 @@ static inline uint64_t nth_bit(uint64_t y, int k) {
 #endif
 }
 
+#endif
+
+#if CARRY_MAX_W > 0
 /* y rotated left by r (0 <= r < 64) */
 static inline uint64_t rotl64(uint64_t y, int r) {
   return r ? y << r | y >> (64 - r) : y;
 }
+#endif
 
+#if CARRY_MAX_W > 0 && !defined(CARRY_AVX512)
+/* rotl64 without a branch (a rotate instruction) */
+static inline uint64_t rotl64v(uint64_t y, int r) {
+  return y << r | y >> ((64 - r) & 63);
+}
+
+/* the masks of the tests of up to 64 entries in arrange_carry.h: bit i
+ * or-ed in for each entry (clang vectorizes that loop, with variable
+ * shifts), or a byte per entry turned into the mask by mask_of_bytes (gcc
+ * vectorizes only that loop: x1.15 faster than the bits with gcc, 1.3x
+ * slower than them with clang on x86-64-v3) */
+#ifndef CARRY_MASK_BYTES
+#ifdef __clang__
+#define CARRY_MASK_BYTES 0
+#else
+#define CARRY_MASK_BYTES 1
+#endif
+#endif
+#if CARRY_MASK_BYTES
+/* the bits kb[i] (0 or 1) of i < m <= 64 as a mask (bit i: kb[i]); kb has
+ * room up to the next multiple of 8, which is cleared here. 8 bytes at a
+ * time: with b_i in byte i, the product with 2^(7 - j) in byte j has b_i
+ * at bit 56 + i (the terms have distinct exponents, so no carries) */
+static inline uint64_t mask_of_bytes(uint8_t *kb, uint32_t m) {
+  for (uint32_t i = m; i & 7; i++)
+    kb[i] = 0;
+  uint64_t mask = 0;
+  for (uint32_t g = 0; 8 * g < m; g++) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    uint64_t t;
+    memcpy(&t, kb + 8 * g, 8);
+    mask |= (t * 0x0102040810204080ull) >> 56 << (8 * g);
+#else
+    for (int j = 0; j < 8; j++)
+      mask |= (uint64_t)kb[8 * g + j] << (8 * g + j);
+#endif
+  }
+  return mask;
+}
+
+#define KB_DECL uint8_t kb_[64]
+#define KB_SET(i, v) (kb_[i] = (uint8_t)(v))
+#define KB_MASK(m) mask_of_bytes(kb_, (m))
+#else
+#define KB_DECL uint64_t kb_ = 0
+#define KB_SET(i, v) (kb_ |= (uint64_t)(v) << (i))
+#define KB_MASK(m) kb_
+#endif
+
+/* 8 bytes of keep masks as a word (byte j: bits 8 j .. 8 j + 7), and back */
+static inline uint64_t km_load64(const uint8_t *p) {
+  uint64_t v = 0;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  memcpy(&v, p, 8);
+#else
+  for (int j = 0; j < 8; j++)
+    v |= (uint64_t)p[j] << (8 * j);
+#endif
+  return v;
+}
+static inline void km_store64(uint8_t *p, uint64_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  memcpy(p, &v, 8);
+#else
+  for (int j = 0; j < 8; j++)
+    p[j] = (uint8_t)(v >> (8 * j));
+#endif
+}
+
+/* the unmatched cells of a word whose byte counter (gr for the cells of
+ * ur, gc for those of uc) minus 1, wrapping, is mn (see SEARCH_REC) */
+static inline uint64_t mrv_eq(const uint64_t *gr, const uint64_t *gc,
+                              uint64_t ur, uint64_t uc, unsigned mn) {
+  const uint8_t *br = (const uint8_t *)gr, *bc = (const uint8_t *)gc;
+  uint64_t k = 0;
+  for (uint64_t m = ur; m; m &= m - 1) {
+    const int b = __builtin_ctzll(m);
+    k |= (uint64_t)((uint8_t)(br[b] - 1) == mn) << b;
+  }
+  for (uint64_t m = uc; m; m &= m - 1) {
+    const int b = __builtin_ctzll(m);
+    k |= (uint64_t)((uint8_t)(bc[b] - 1) == mn) << b;
+  }
+  return k;
+}
+#endif
+
+#if CARRY_MAX_W > 0 && defined(CARRY_AVX512)
 /* lane j of the result: the or of the 8 lanes of a[j] */
 static inline __m512i or_lanes8(const __m512i a[8]) {
   /* t[k], 128-bit lane l: the or of lanes 2l, 2l + 1 of a[2k], a[2k + 1] */
@@ -501,7 +596,9 @@ static inline __m512i or_lanes8(const __m512i a[8]) {
   return _mm512_or_si512(_mm512_shuffle_i64x2(u[0], u[1], 0x88),
                          _mm512_shuffle_i64x2(u[0], u[1], 0xDD));
 }
+#endif
 
+#if CARRY_MAX_W > 0
 /* the square of the placed vectors (by bitset, of W words) */
 static void report_bits(sstate_t *s, int W) {
   uint16_t buf[2][SQ_MAX_N][8];

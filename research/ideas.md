@@ -3191,3 +3191,140 @@ renting an AVX2 or ARM instance (E x0.44 measured here) or a build without
 `-march=native` (E x0.44, flagged). It also avoids pricing SMT vCPUs as
 cores (a 1.5-2x miscount, measured by its K = logical pass on the target).
 Exactness risk: none (no search change; the gates above).
+
+## The carried path without AVX-512 (October 2026, branch port/carry)
+
+For the laptop run (an Apple M1 Pro: arm64, NEON, Apple clang): builds
+without AVX-512BW used to take the matrix path (N x N intersection
+matrices, plain C filters, 4 bit-sliced counter classes, no cross support,
+no class support), 1.6x (quick) to 2.35x (full) the nodes of the AVX-512
+build and 4-5x its time per core on x86-64-v2/v3. The carried path's
+pruning (carried lists with their bitsets, exact MRV on byte counters, the
+support filter, cross support, the pretest, per-r1 widths, and in d-first
+the class support with the top-label root) was implemented only with
+AVX-512 intrinsics. `src/c/arrange_carry.h` now has plain C kernels for
+it, selected when the compiler does not target AVX-512BW (or with
+`-DCARRY_PORTABLE`); `-DCARRY_MAX_W=0` still gives the matrices. The rest
+of the carried path (TRY_CHILD, SUPPORT, CROSS, SEARCH_REC, SEARCH_ROOT,
+the class blocks) is shared code, and the AVX-512 builds preprocess to
+the same tokens as before (`gcc -E -P` of arrange.c identical for
+-march=native, cascadelake, skylake-avx512, icelake-server,
+sapphirerapids, znver4, with -mno-gfni -mno-avx512vpopcntdq, with
+CHILD_PROF, CLASS_PROF, ARRANGE_DEBUG, CARRY_MAX_W=0), so their code and
+speed are unchanged.
+
+The AVX-512-only pieces and their replacements (the same results: the same
+entries kept in the same order, the same unions, the same counts where
+they are read, the same keep masks, hence the same nodes and squares):
+
+| piece | AVX-512 | portable |
+|---|---|---|
+| FILTER_CARRY (exactly once / disjoint + support exclusion) | 8 entries per zmm, rolv + ternlogic, vpopcntq (or an exactly-one-bit test), compress, 8-lane stores into padded lists | blocks of 64 entries: a test loop without stores (vectorized: 2 entries per NEON register, 4 per AVX2) giving a 64-bit keep mask, then a copy of the kept entries only, by the set bits, the union or-ed while copying; the same rotations, the same exactly-one-bit test (no popcount, a vector instruction on ARM) |
+| pretest (FILTER_COUNT, FILTER_APPLY) | masked ors, keep-mask bytes | the same test, mask bytes, union over the kept entries; the lists from the masks |
+| PAD_LIST | 8 full sets after each list | not needed (no loop reads past a list) |
+| KEEP_CARRY (support filter pass, in place) | lane-masked compress | block mask, in-place copy of the kept entries |
+| COUNT_CARRY (byte counters) | vpermb + gf2p8affineqb + vpopcntb, or masked byte adds | only the unmatched cells (the only counts MRV reads): one vectorized one-bit sum per cell, saturated at 255 |
+| MRV choice | masked byte subtract, hmin_epu8, byte compares | a scan of the unmatched cells' bytes (count - 1 wrapping, smallest label, the largest when saturated) |
+| children of a node | test + compress per 8 | the same block mask + copy (CARRY_SELECT) |
+| cross support | U_y 8 cells per pass (pdep cell map, masked ors, a lane transpose), 8 entries x 8 cells min tree | U_y per h entry from its cells (an index table), the test of each f entry over a fixed block of 8 (or 16) cells (vectorized over the cells), block mask + copy |
+| class support | a zmm per class (word w in lane w), groups of 8 with lane masks | arrays of W words; the tests per aligned group of 64 entries (one word of keep mask), vectorized, the mask updated once per group |
+
+Variants measured on the way (x86 proxies, `bench/quick.txt` unless noted,
+min of alternating runs on a shared machine, about +-5% noise):
+
+* Per-entry kernels (a branchless store of every entry at the output
+  position, the union by an and and an or per entry and word): 0.94 s
+  (gcc -march=x86-64-v3); chunks with the tests in a separate loop, an
+  index list of the kept entries and a vectorized union: 0.85 s; 64-entry
+  bit masks and a copy by set bits: 0.67 s with clang (gcc did not
+  vectorize the mask loop: 0.96 s).
+* The mask of a test loop: gcc vectorizes only a loop that writes a byte
+  per entry (turned into the mask 8 bytes at a time with one multiply,
+  `mask_of_bytes`), clang vectorizes the loop that ors bit i into the mask
+  (variable shifts) and is slower with the bytes; so the form follows the
+  compiler (gcc 0.87 -> 0.73 s with the bytes, clang 0.58 s with the bits
+  against 0.75 s with the bytes).
+* Cross support: the test of an entry over a fixed block of 8 cells (padded
+  with all-ones U_y), vectorized over the cells, instead of a loop over the
+  ny cells: 1324 -> 909 cycles per (2,2) call on P = 14 7 5 3, S = 1460
+  (CHILD_PROF), full.txt 9.4 -> 8.0 s (clang). Finding an h entry's cells
+  in a fixed number of steps per placed vector of f (it meets each once),
+  instead of a loop over the bits of each word: slower (S = 1460: 4.55-4.78
+  s against 4.10-4.25 s).
+* Counting: a histogram of each entry's cells (a loop over the bits per
+  word, two counter arrays) took 1711 cycles per call at the (1,2)
+  children of S = 1460; the same with a fixed number of steps per placed
+  vector (each entry meets each placed vector of the other axis once):
+  the same; one vectorized sum per cell: 549 cycles.
+* No rotations when the words of v are disjoint already (the usual case):
+  no measurable change. The pretest from 2-4 vectors placed: slower (quick
+  0.73-1.00 s against 0.64-0.70 s at the default 5); off: the same as 5.
+* Class support: the per-entry loop updating the keep-mask bit of each
+  entry did not vectorize and took 865M of the 1.6G instructions of the
+  search on 12 V_d of 13 7 4 3 1 1, S = 2200 (callgrind); the tests per
+  aligned group of 64 entries with one mask update: 344M.
+
+Not tried: lists with an entry's words contiguous (on ARM one ldp/stp or
+one 16-byte move per kept entry with 2 words, instead of 2 loads and 2
+stores; every kernel and the shared code reading the lists would change);
+NEON intrinsics (nothing to time them on here: qemu timings mean nothing,
+and clang's vectorization of the loops above already gives NEON code).
+
+Gates (fresh seeds), all on the final code, against the native AVX-512 build:
+
+* bench quick / full / prod with gcc -march=x86-64-v3, gcc
+  -march=x86-64-v2 and clang -march=x86-64-v3 builds: per instance the
+  same N, labels, nodes, squares and hash check as the native build
+  (1,770,779 / 14,958,507 / 50,375,738 nodes), all ok.
+* `fuzz_arrange -v`, v3 and v2 builds, per seed and variant the same
+  squares (or pairs) and node counts as the native build (lines of the
+  matrix path, more than 512 labels or forced 16/64 words, left out: its
+  counters differ between builds), 0 fails: default mix 500 seeds
+  (50000-50499, 18,759 seed/variant lines), `--mode 7` 500 (51000-, 19,500
+  lines), `--dfirst` 500 (52000-, 1 skipped by the harness; class support
+  and the star cover runs in every seed), `--dfirst --variants cls` 500
+  (55000-), `--mode 6 --noracle` (saturated counts at every unmatched cell,
+  the largest-label branch of MRV) 6 seeds x 5 variants.
+* aarch64 under qemu-aarch64, gcc -mcpu=neoverse-n1, gcc -mcpu=generic and
+  clang -mcpu=apple-m1 (the laptop's compiler and target; the gcc
+  toolchain's libraries): bench quick the same per instance (and full for
+  the clang build); `fuzz_arrange -v` default 100 seeds and `--dfirst` 100
+  seeds, node-identical to the native build, 0 fails; `--mode 6` 6 seeds
+  (clang). A d-first range of a real sum (13 7 4 3 1 1, S = 2200, d < 300)
+  in msearch: 36,665,610 nodes, the same in both builds.
+* `ctest -R fast_` on the native build: 66 of 66 pass, with new tests: node
+  totals of bench quick (also --min-words 3 / 5, --pretest-min 0,
+  --no-cross) equal between the native build and the -mno-avx512f and
+  -mno-avx512bw builds; the portable kernels in a native build
+  (-DCARRY_PORTABLE); the portable matrices (-mno-avx512f
+  -DCARRY_MAX_W=0); `fuzz_arrange_portable --mode 7`; the class-support
+  test with ARRANGE_DEBUG on the portable kernels.
+* The AVX-512 builds: `gcc -E -P` of arrange.c token-identical to 80d15cc
+  (see above), and `objdump -d` of arrange.o identical for -march=native
+  and -march=cascadelake.
+* gcc and clang, x86 and aarch64: arrange.c, dfirst.c and msearch.c
+  compile with `-Wall -Wextra -Werror -std=c17 -pedantic-errors`.
+
+Speed (x86, search seconds, min of 2 alternating rounds on a shared
+machine, the arms interleaved); the gcc builds are those of the gates,
+the matrix arms the same compilers and flags at 80d15cc (where
+builds without AVX-512BW took the matrices).
+
+| build | quick | full | prod |
+|---|---|---|---|
+| native AVX-512, 80d15cc / this branch | 0.265 / 0.247 | 2.88 / 2.95 | 12.36 / 12.57 |
+| clang x86-64-v3: portable carried / matrices | 0.563 / 0.998 | 6.80 / 12.71 | 29.99 / 53.00 |
+| gcc x86-64-v3: portable carried / matrices | 0.714 / 1.182 | 9.92 / 14.67 | 41.71 / 62.63 |
+| gcc x86-64-v2: portable carried / matrices | 0.821 / 1.162 | 10.63 / 14.56 | 45.59 / 61.36 |
+
+So with clang (the compiler on macOS) the portable carried path takes
+2.3-2.4x the AVX-512 build's time per core, against 4.0-4.3x for the
+matrices (1.8-1.9x less time, with 1.6-3.4x fewer nodes); with gcc
+2.9-3.4x (v3) and 3.3-3.7x (v2), 1.5-1.65x and 1.35-1.4x less than the
+matrices (gcc vectorizes less of these loops than clang). d-first, msearch --diag-first
+--d-range 0:100 --sums 2200 13 7 4 3 1 1 (98 V_d, class support in all):
+3.74 s native, 6.34 s clang v3, 9.09 s gcc v3 (5,028,440 nodes each),
+36.4 s on the matrix path at 80d15cc (24,830,673 nodes: no class support there). The time per node on the M1 is not
+known here (qemu timings mean nothing); scripts/laptop/build.sh prints
+the bench/quick.txt time to compare with the ~0.25-0.29 s of the fast
+x86 build.

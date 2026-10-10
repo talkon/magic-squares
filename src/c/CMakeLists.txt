@@ -69,9 +69,12 @@ if (HAVE_NO_GFNI_FLAGS)
   add_test(NAME fast_bench_quick_no_gfni_wide7 COMMAND bench_no_gfni --min-words 7 ${BENCH_DIR}/quick.txt)
   add_test(NAME fast_bench_quick_no_gfni_no_pretest COMMAND bench_no_gfni --pretest-min 0 ${BENCH_DIR}/quick.txt)
 endif()
-# builds for CPUs without AVX-512BW (bit-sliced counters, 8 slices with
-# AVX-512F) and without AVX-512 (plain C filters, 4 slices), which the
-# native build never compiles on an AVX-512BW machine
+# builds for CPUs without AVX-512BW (the carried path with the plain C
+# kernels of arrange_carry.h, the same nodes as the native build; the
+# matrix path above 512 labels with bit-sliced counters, 8 slices with
+# AVX-512F) and without AVX-512 (ARM, AVX2: the same carried path; plain C
+# matrix filters with 4 slices), which the native build never compiles on
+# an AVX-512BW machine
 foreach(variant "no_bw:-mno-avx512bw" "portable:-mno-avx512f")
   string(REPLACE ":" ";" parts ${variant})
   list(GET parts 0 vname)
@@ -84,8 +87,36 @@ foreach(variant "no_bw:-mno-avx512bw" "portable:-mno-avx512f")
     add_test(NAME fast_bench_quick_${vname} COMMAND bench_${vname} ${BENCH_DIR}/quick.txt)
     add_test(NAME fast_bench_quick_${vname}_wide8 COMMAND bench_${vname} --min-words 8 ${BENCH_DIR}/quick.txt)
     add_test(NAME fast_bench_quick_${vname}_no_support COMMAND bench_${vname} --no-support ${BENCH_DIR}/quick.txt)
+    # the portable carried path visits the same nodes as the AVX-512 one
+    # (the node totals of bench/quick.txt, also with 3 and 5 words and
+    # without the pretest)
+    foreach(opt "" "--min-words 3" "--min-words 5" "--pretest-min 0" "--no-cross")
+      string(REPLACE "--" "" oname "nodes ${opt}")
+      string(STRIP "${oname}" oname)
+      string(REGEX REPLACE "[ -]" "_" oname "${oname}")
+      add_test(NAME fast_bench_quick_${vname}_${oname} COMMAND sh -c
+        "a=$($<TARGET_FILE:bench> ${opt} ${BENCH_DIR}/quick.txt | tail -1 | awk '{print $2}'); b=$($<TARGET_FILE:bench_${vname}> ${opt} ${BENCH_DIR}/quick.txt | tail -1 | awk '{print $2}'); [ -n \"$a\" ] && [ \"$a\" = \"$b\" ]")
+    endforeach()
   endif()
 endforeach()
+# the matrix path without AVX-512 (-DCARRY_MAX_W=0: plain C filters and
+# bit-sliced counters, the search of builds without AVX-512BW before the
+# portable carried path)
+if (HAVE_FLAG_portable)
+  add_executable(bench_portable_matrices bench.c enumerate.c arrange.c square.c)
+  target_compile_options(bench_portable_matrices PRIVATE -mno-avx512f)
+  target_compile_definitions(bench_portable_matrices PRIVATE CARRY_MAX_W=0)
+  target_link_libraries(bench_portable_matrices m)
+  add_test(NAME fast_bench_quick_portable_matrices COMMAND bench_portable_matrices ${BENCH_DIR}/quick.txt)
+  add_test(NAME fast_bench_quick_portable_matrices_wide8 COMMAND bench_portable_matrices --min-words 8 ${BENCH_DIR}/quick.txt)
+endif()
+# the portable kernels of the carried path in a native build
+# (-DCARRY_PORTABLE: the same nodes)
+add_executable(bench_carry_portable bench.c enumerate.c arrange.c square.c)
+target_compile_definitions(bench_carry_portable PRIVATE CARRY_PORTABLE)
+target_link_libraries(bench_carry_portable m)
+add_test(NAME fast_bench_quick_carry_portable COMMAND sh -c
+  "a=$($<TARGET_FILE:bench> ${BENCH_DIR}/quick.txt | tail -1 | awk '{print $2}'); b=$($<TARGET_FILE:bench_carry_portable> ${BENCH_DIR}/quick.txt | tail -1 | awk '{print $2}'); [ -n \"$a\" ] && [ \"$a\" = \"$b\" ] && $<TARGET_FILE:bench_carry_portable> --min-words 7 ${BENCH_DIR}/quick.txt > /dev/null")
 # the generic bit-sliced counters (more than 512 labels), on the smaller
 # instances
 add_test(NAME fast_bench_quick_wide16 COMMAND bench --min-words 16 --only "S=3" ${BENCH_DIR}/quick.txt)
@@ -115,9 +146,19 @@ if (HAVE_FLAG_portable)
   target_link_libraries(fuzz_arrange_portable m)
   add_test(NAME fast_fuzz_arrange_portable COMMAND fuzz_arrange_portable 1000 60
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-  # the d-first search with the plain C filters
+  # the d-first search (and its class support) with the plain C kernels
   add_test(NAME fast_fuzz_dfirst_portable COMMAND fuzz_arrange_portable --dfirst 7000 40
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  # the portable carried path with 5-8 words
+  add_test(NAME fast_fuzz_arrange_portable_wide COMMAND fuzz_arrange_portable --mode 7 7100 30
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  # the class support with the plain C kernels, with ARRANGE_DEBUG (its
+  # checks of the class blocks and of the compaction)
+  add_executable(class_support_test_portable class_support_test.c enumerate.c arrange.c square.c)
+  target_compile_options(class_support_test_portable PRIVATE -mno-avx512f)
+  target_compile_definitions(class_support_test_portable PRIVATE ARRANGE_DEBUG)
+  target_link_libraries(class_support_test_portable m)
+  add_test(NAME fast_class_support_plain_root_portable COMMAND class_support_test_portable 1 400)
 endif()
 if (HAVE_NO_GFNI_FLAGS)
   # the carried path with 5-8 words (and the pretest) with the fallbacks
