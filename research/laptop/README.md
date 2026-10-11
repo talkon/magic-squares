@@ -71,15 +71,37 @@ count for the stage-1 plan too (the same unit numbers).
    set; the tool only reports). Here, with the scheduler state the plan was
    made from, `python3 scripts/decide.py STATE --plan ... --units-dir ...`
    also counts the band sums of units that start below N' 3k.
-6. Send the results back:
+6. Send the results back, after each night or whenever you like:
 
        ./scripts/laptop/collect.sh
-       git add research/laptop/results-*.tar.xz && git commit -m "laptop run results" && git push
 
-   The tarball holds the finished units, the meta files (machine, plan
-   hash, build), progress.log and units.tsv (the speed) and the build's
-   record (build_info.txt with the bench/quick.txt time and the search kernels,
-   check_quick.txt). Nothing else needs to be sent.
+   It packs only the units not sent before (and a unit run again with
+   `--rerun-cut`), so each run adds only the new results. It prints the
+   files it wrote and the command to send them, e.g.
+
+       git add research/laptop/results-<host>-<date>.tar.xz && git commit -m "laptop run results" && git push
+
+   Add the files it prints. A large batch is split into parts
+   (`-part01.tar.xz`, ...) of at most ~45 MB each, under GitHub's file
+   limits. With nothing new it says so and writes nothing. Each tarball
+   holds the new units, the meta files (machine, plan hash, build),
+   progress.log and units.tsv (the speed), the build's record
+   (build_info.txt with the bench/quick.txt time and the search kernels,
+   check_quick.txt) and a manifest with the sha256 of each file.
+   `laptop-runs/collected.json` records what was packed; an interrupted
+   collect is simply run again. Nothing else needs to be sent.
+   (Here `scripts/laptop/unpack.py DIR results-*.tar.xz` checks the
+   tarballs and merges them into DIR for decide.py and the scheduler.)
+
+## Disk and memory
+
+Each msearch process holds ~11-14 MB resident (measured: plain sums at
+N 3k, d-first sums at N 6.7k-37k), so 6 workers take under 100 MB.
+`laptop-runs` grows to ~0.8 GB for the whole plan (~13 MB per reference
+CPU-hour of these small-N units, mostly the sum and square records). The
+tarballs come to ~100 MB in all (xz packs the records ~7.5-8x).
+collect.sh takes ~0.15 GB of memory and ~50 s per 100 MB of new units
+(measured on an x86 core; the whole plan at once: ~6 minutes, 3 parts).
 
 ## Throttling, sleep and other load
 
@@ -210,5 +232,6 @@ build.)
   greedy plan (the stage-1 plan's first 15,164 units).
 * `scripts/laptop/make_plan.py`: writes such a plan from a scheduler state
   (`--stage1` for a stage-1 plan).
-* `scripts/laptop/build.sh`, `run.py`, `collect.sh`: build and check, run,
-  pack the results. `scripts/decide.py`: the report.
+* `scripts/laptop/build.sh`, `run.py`, `collect.sh` (`collect.py`): build
+  and check, run, pack the new results. `unpack.py`: check and merge the
+  tarballs on the receiving side. `scripts/decide.py`: the report.

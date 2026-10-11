@@ -2623,6 +2623,153 @@ exec "{ms}" "$@"
     print("laptop wall-clock reruns ok")
 
 
+def test_laptop_collect():
+    """scripts/laptop/collect.py and unpack.py on synthetic units: the
+    first collect packs all units, a second one nothing, after new units
+    only those, a changed unit again; a small part limit gives several
+    parts, each under the limit. unpack.py merges the tarballs (the later
+    version of a unit packed twice) and checks them; a corrupted tarball,
+    one with a member ../x or a wrong sha256 is refused. LAPTOP_PYTHON
+    names the interpreter that runs them (default this one)"""
+    import hashlib
+    import io
+    import tarfile
+    py = os.environ.get("LAPTOP_PYTHON", sys.executable)
+    collect = os.path.join(HERE, "laptop", "collect.py")
+    unpack = os.path.join(HERE, "laptop", "unpack.py")
+    rng = random.Random(5)
+
+    def unit(path, i, n=40):
+        with open(path, "w") as f:
+            for _ in range(n):
+                f.write(json.dumps({"type": "square", "P": [11, 6, 3, 3, 1], "S": 600 + i,
+                                    "hash": "%016x" % rng.getrandbits(64),
+                                    "grid": [[rng.randint(1, 400) for _ in range(6)]
+                                             for _ in range(6)]}) + "\n")
+            f.write(json.dumps({"type": "done", "complete": 1}) + "\n")
+
+    def go(prog, *args, ok=True):
+        r = subprocess.run([py, prog, *args], capture_output=True, text=True, timeout=120)
+        assert (r.returncode == 0) == ok, r.stdout + r.stderr
+        return r.stdout + r.stderr
+
+    def members(tb):
+        with tarfile.open(tb, "r:xz") as tf:
+            man = json.load(tf.extractfile("manifest.json"))
+            return sorted(tf.getnames()), man
+
+    with tempfile.TemporaryDirectory() as d:
+        out, dest = os.path.join(d, "runs"), os.path.join(d, "dest")
+        os.makedirs(out)
+        for i in range(10):
+            unit(os.path.join(out, f"U{i:06d}.jsonl"), i)
+        for name, txt in (("meta_1.json", "{}"), ("progress.log", "x\n"),
+                          ("units.tsv", "i\tpred_time\n"), ("U000003.jsonl.part.7", "partial")):
+            with open(os.path.join(out, name), "w") as f:
+                f.write(txt)
+        opts = ("--dest", dest, "--host", "h", "--preset", "6")
+
+        def tarballs():
+            return sorted(os.listdir(dest)) if os.path.isdir(dest) else []
+        txt = go(collect, out, *opts)
+        assert "packed 10 units" in txt and "git add" in txt, txt
+        tb = tarballs()
+        assert len(tb) == 1 and re.match(r"results-h-\d{8}-\d{4}\.tar\.xz$", tb[0]), tb
+        names, man = members(os.path.join(dest, tb[0]))
+        assert names == sorted(["manifest.json", "meta_1.json", "progress.log", "units.tsv"]
+                               + [f"U{i:06d}.jsonl" for i in range(10)]), names
+        assert len(man["units"]) == 10 and man["host"] == "h", man
+        rec = json.load(open(os.path.join(out, "collected.json")))
+        assert set(rec["units"]) == {f"U{i:06d}.jsonl" for i in range(10)}, rec
+        # nothing new: no tarball
+        txt = go(collect, out, *opts)
+        assert "nothing new to collect" in txt and tarballs() == tb, txt
+        # new units: only those (another name in the same minute)
+        for i in (10, 11):
+            unit(os.path.join(out, f"U{i:06d}.jsonl"), i)
+        go(collect, out, *opts)
+        new = [x for x in tarballs() if x not in tb]
+        assert len(new) == 1, tarballs()
+        assert sorted(members(os.path.join(dest, new[0]))[1]["units"]) == [
+            "U000010.jsonl", "U000011.jsonl"]
+        # a unit touched with the same content: not packed; changed: packed again
+        p3 = os.path.join(out, "U000003.jsonl")
+        os.utime(p3, (time.time() + 5, time.time() + 5))
+        assert "nothing new to collect" in go(collect, out, *opts)
+        unit(p3, 3, n=45)
+        want3 = open(p3).read()
+        txt = go(collect, out, *opts)
+        assert "packed 1 unit (1 changed since" in txt, txt
+        tb3 = [x["name"] for x in json.load(open(os.path.join(out, "collected.json")))["tarballs"]]
+        assert sorted(tb3) == tarballs(), tb3
+        assert list(members(os.path.join(dest, tb3[-1]))[1]["units"]) == ["U000003.jsonl"]
+
+        # unpack: all units, the later U000003, given in any order
+        un = os.path.join(d, "un")
+        txt = go(unpack, un, *[os.path.join(dest, x) for x in reversed(tb3)])
+        assert "3 tarballs checked: 12 units (1 packed more than once" in txt, txt
+        assert "has 12 units" in txt, txt
+        assert open(os.path.join(un, "U000003.jsonl")).read() == want3
+        for i in range(12):
+            name = f"U{i:06d}.jsonl"
+            assert open(os.path.join(un, name)).read() == open(os.path.join(out, name)).read()
+        assert sorted(x for x in os.listdir(un) if not x.startswith("U")) == [
+            "meta_1.json", "progress.log", "units.tsv"], os.listdir(un)
+
+        # a small part limit: several parts, each under it
+        out2, dest2 = os.path.join(d, "runs2"), os.path.join(d, "dest2")
+        os.makedirs(out2)
+        for i in range(30):
+            unit(os.path.join(out2, f"U{i:06d}.jsonl"), i)
+        limit = 0.02
+        txt = go(collect, out2, "--dest", dest2, "--host", "h", "--part-mb", str(limit))
+        parts = sorted(os.listdir(dest2))
+        assert len(parts) >= 3 and all(re.search(r"-part\d\d\.tar\.xz$", x) for x in parts), parts
+        assert all(os.path.getsize(os.path.join(dest2, x)) <= limit * 1e6 for x in parts), [
+            os.path.getsize(os.path.join(dest2, x)) for x in parts]
+        got = [u for x in parts for u in members(os.path.join(dest2, x))[1]["units"]]
+        assert sorted(got) == [f"U{i:06d}.jsonl" for i in range(30)], got
+        un2 = os.path.join(d, "un2")
+        txt = go(unpack, un2, *[os.path.join(dest2, x) for x in parts])
+        assert f"{len(parts)} tarballs checked: 30 units; " in txt, txt
+
+        # refused: a corrupted tarball, a member ../x, a wrong sha256;
+        # nothing is extracted then
+        bad = os.path.join(d, "bad")
+        os.makedirs(bad)
+        data = bytearray(open(os.path.join(dest2, parts[0]), "rb").read())
+        data[len(data) // 2] ^= 0x55
+        corrupt = os.path.join(bad, "corrupt.tar.xz")
+        with open(corrupt, "wb") as f:
+            f.write(data)
+
+        def tarball(path, files, man):
+            with tarfile.open(path, "w:xz") as tf:
+                for name, b in list(files.items()) + [("manifest.json", json.dumps(man).encode())]:
+                    ti = tarfile.TarInfo(name)
+                    ti.size = len(b)
+                    tf.addfile(ti, io.BytesIO(b))
+        u = b'{"type": "done"}\n'
+        h = hashlib.sha256(u).hexdigest()
+        trav = os.path.join(bad, "trav.tar.xz")
+        tarball(trav, {"../x": u}, {"units": {"../x": {"sha256": h}}, "files": {}})
+        wrong = os.path.join(bad, "wrong.tar.xz")
+        tarball(wrong, {"U000001.jsonl": u}, {"units": {"U000001.jsonl": {"sha256": "0" * 64}},
+                                              "files": {}})
+        good = os.path.join(bad, "good.tar.xz")
+        tarball(good, {"U000001.jsonl": u}, {"units": {"U000001.jsonl": {"sha256": h}},
+                                             "files": {}})
+        for t, msg in ((corrupt, "cannot be read"), (trav, "not allowed"),
+                       (wrong, "sha256 does not match")):
+            un3 = os.path.join(d, "un3")
+            txt = go(unpack, un3, good, t, ok=False)
+            assert "refused" in txt and msg in txt, txt
+            assert os.listdir(un3) == [], os.listdir(un3)
+        assert not os.path.exists(os.path.join(d, "x"))
+        assert "1 tarballs checked: 1 units" in go(unpack, os.path.join(d, "un4"), good)
+    print("laptop collect ok")
+
+
 def test_counts_only():
     """ingest --counts-only: the same files ingested with and without it
     give the same counts (sums, coverage, squares, traversals, cells, the
@@ -2798,5 +2945,6 @@ if __name__ == "__main__":
     test_stage1_machine()
     test_laptop_run()
     test_laptop_clock()
+    test_laptop_collect()
     test_counts_only()
     print(f"all ok ({time.time() - t0:.0f} s)")
