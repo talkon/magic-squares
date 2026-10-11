@@ -91,7 +91,9 @@ count for the stage-1 plan too (the same unit numbers).
    `laptop-runs/collected.json` records what was packed; an interrupted
    collect is simply run again. Nothing else needs to be sent.
    (Here `scripts/laptop/unpack.py DIR results-*.tar.xz` checks the
-   tarballs and merges them into DIR for decide.py and the scheduler.)
+   tarballs and merges them into DIR for decide.py and the scheduler. A
+   unit packed twice keeps its later version, also when the tarballs are
+   unpacked in several calls; DIR/unpacked.json records the versions.)
 
 ## Disk and memory
 
@@ -100,8 +102,9 @@ N 3k, d-first sums at N 6.7k-37k), so 6 workers take under 100 MB.
 `laptop-runs` grows to ~0.8 GB for the whole plan (~13 MB per reference
 CPU-hour of these small-N units, mostly the sum and square records). The
 tarballs come to ~100 MB in all (xz packs the records ~7.5-8x).
-collect.sh takes ~0.15 GB of memory and ~50 s per 100 MB of new units
-(measured on an x86 core; the whole plan at once: ~6 minutes, 3 parts).
+collect.sh takes ~0.15 GB of memory and ~50-85 s per 100 MB of new units
+(measured on an x86 core; less with records that pack better; the whole
+plan at once: ~6-12 minutes, 3 parts).
 
 ## Throttling, sleep and other load
 

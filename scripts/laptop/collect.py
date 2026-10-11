@@ -148,6 +148,8 @@ def main():
     # (for tests)
     ap.add_argument("--dest", default=os.path.join(root, "research", "laptop"),
                     help=argparse.SUPPRESS)
+    ap.add_argument("--build", default=os.path.join(root, "build-laptop"),
+                    help=argparse.SUPPRESS)
     ap.add_argument("--part-mb", type=float, default=PART_MB, help=argparse.SUPPRESS)
     ap.add_argument("--host", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--preset", type=int, default=PRESET, help=argparse.SUPPRESS)
@@ -205,7 +207,7 @@ def main():
             data, _, mtime_ns = read(os.path.join(out_dir, name))
             small[name] = (data, mtime_ns / 1e9)
     for name in BUILD:
-        for path in (os.path.join(root, "build-laptop", name),
+        for path in (os.path.join(a.build, name),
                      os.path.join(out_dir, "build-laptop_" + name)):
             if os.path.exists(path):
                 data, _, mtime_ns = read(path)
@@ -251,7 +253,7 @@ def main():
         if size > hard:
             os.remove(tmp)
             sys.exit(f"{packed[0][0]} alone is {size / 1e6:.1f} MB compressed, over the "
-                     f"{hard / 1e6:.0f} MB limit of a part")
+                     f"{hard / 1e6:.1f} MB limit of a part")
         i += len(packed)
         single = part == 1 and i == len(todo)
         name = base + (".tar.xz" if single else f"-part{part:02d}.tar.xz")

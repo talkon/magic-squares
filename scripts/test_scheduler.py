@@ -2628,9 +2628,10 @@ def test_laptop_collect():
     first collect packs all units, a second one nothing, after new units
     only those, a changed unit again; a small part limit gives several
     parts, each under the limit. unpack.py merges the tarballs (the later
-    version of a unit packed twice) and checks them; a corrupted tarball,
-    one with a member ../x or a wrong sha256 is refused. LAPTOP_PYTHON
-    names the interpreter that runs them (default this one)"""
+    version of a unit packed twice, also across calls) and checks them; a
+    corrupted tarball, one with a member ../x, a sparse member or a wrong
+    sha256 is refused. LAPTOP_PYTHON names the interpreter that runs them
+    (default this one)"""
     import hashlib
     import io
     import tarfile
@@ -2667,7 +2668,13 @@ def test_laptop_collect():
                           ("units.tsv", "i\tpred_time\n"), ("U000003.jsonl.part.7", "partial")):
             with open(os.path.join(out, name), "w") as f:
                 f.write(txt)
-        opts = ("--dest", dest, "--host", "h", "--preset", "6")
+        # the build's record from a directory of the test's own (not the
+        # checkout's build-laptop/)
+        build = os.path.join(d, "build")
+        os.makedirs(build)
+        with open(os.path.join(build, "build_info.txt"), "w") as f:
+            f.write("build\n")
+        opts = ("--dest", dest, "--host", "h", "--preset", "6", "--build", build)
 
         def tarballs():
             return sorted(os.listdir(dest)) if os.path.isdir(dest) else []
@@ -2676,7 +2683,8 @@ def test_laptop_collect():
         tb = tarballs()
         assert len(tb) == 1 and re.match(r"results-h-\d{8}-\d{4}\.tar\.xz$", tb[0]), tb
         names, man = members(os.path.join(dest, tb[0]))
-        assert names == sorted(["manifest.json", "meta_1.json", "progress.log", "units.tsv"]
+        assert names == sorted(["manifest.json", "meta_1.json", "progress.log", "units.tsv",
+                                "build-laptop_build_info.txt"]
                                + [f"U{i:06d}.jsonl" for i in range(10)]), names
         assert len(man["units"]) == 10 and man["host"] == "h", man
         rec = json.load(open(os.path.join(out, "collected.json")))
@@ -2714,7 +2722,14 @@ def test_laptop_collect():
             name = f"U{i:06d}.jsonl"
             assert open(os.path.join(un, name)).read() == open(os.path.join(out, name)).read()
         assert sorted(x for x in os.listdir(un) if not x.startswith("U")) == [
-            "meta_1.json", "progress.log", "units.tsv"], os.listdir(un)
+            "build-laptop_build_info.txt", "meta_1.json", "progress.log", "units.tsv",
+            "unpacked.json"], os.listdir(un)
+        # across calls: the newest tarball first, then the older ones
+        un1 = os.path.join(d, "un1")
+        go(unpack, un1, os.path.join(dest, tb3[-1]))
+        txt = go(unpack, un1, *[os.path.join(dest, x) for x in tb3[:-1]])
+        assert "1 older than the copy already in" in txt and "has 12 units" in txt, txt
+        assert open(os.path.join(un1, "U000003.jsonl")).read() == want3
 
         # a small part limit: several parts, each under it
         out2, dest2 = os.path.join(d, "runs2"), os.path.join(d, "dest2")
@@ -2722,7 +2737,8 @@ def test_laptop_collect():
         for i in range(30):
             unit(os.path.join(out2, f"U{i:06d}.jsonl"), i)
         limit = 0.02
-        txt = go(collect, out2, "--dest", dest2, "--host", "h", "--part-mb", str(limit))
+        txt = go(collect, out2, "--dest", dest2, "--host", "h", "--part-mb", str(limit),
+                 "--build", os.path.join(d, "none"))
         parts = sorted(os.listdir(dest2))
         assert len(parts) >= 3 and all(re.search(r"-part\d\d\.tar\.xz$", x) for x in parts), parts
         assert all(os.path.getsize(os.path.join(dest2, x)) <= limit * 1e6 for x in parts), [
@@ -2756,11 +2772,22 @@ def test_laptop_collect():
         wrong = os.path.join(bad, "wrong.tar.xz")
         tarball(wrong, {"U000001.jsonl": u}, {"units": {"U000001.jsonl": {"sha256": "0" * 64}},
                                               "files": {}})
+        sparse = os.path.join(bad, "sparse.tar.xz")
+        with tarfile.open(sparse, "w:xz", format=tarfile.PAX_FORMAT) as tf:
+            # one data block of len(u) bytes at 0; the file reads as 300 MB
+            b = b"1\n0\n%d\n" % len(u)
+            b = b + b"\0" * (512 - len(b)) + u
+            ti = tarfile.TarInfo("U000002.jsonl")
+            ti.size = len(b)
+            ti.pax_headers = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0",
+                              "GNU.sparse.name": "U000002.jsonl",
+                              "GNU.sparse.realsize": "300000000"}
+            tf.addfile(ti, io.BytesIO(b))
         good = os.path.join(bad, "good.tar.xz")
         tarball(good, {"U000001.jsonl": u}, {"units": {"U000001.jsonl": {"sha256": h}},
                                              "files": {}})
         for t, msg in ((corrupt, "cannot be read"), (trav, "not allowed"),
-                       (wrong, "sha256 does not match")):
+                       (wrong, "sha256 does not match"), (sparse, "not a plain file")):
             un3 = os.path.join(d, "un3")
             txt = go(unpack, un3, good, t, ok=False)
             assert "refused" in txt and msg in txt, txt
