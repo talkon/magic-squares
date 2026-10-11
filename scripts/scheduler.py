@@ -119,7 +119,10 @@ usage:
     scheduler.py emit [--units K]         print msearch arguments for a static
                                           plan (e.g. SuperCloud, see
                                           submit-sc-plan.sh)
-    scheduler.py ingest FILE...           add msearch outputs run elsewhere
+    scheduler.py ingest [--counts-only] FILE...
+                                          add msearch outputs run elsewhere
+                                          (--counts-only: their counts but
+                                          not their CPU, e.g. a laptop's)
     scheduler.py pool [--stats]           analytic: the candidate pool
     scheduler.py compact                  gzip finished unit files
 Global options (before the command): --state DIR, --vec-size N. Model and
@@ -1299,9 +1302,23 @@ def cmd_report(args):
 def cmd_ingest(args):
     os.makedirs(os.path.join(args.state, "units"), exist_ok=True)
     for path in args.files:
-        dst = os.path.join(args.state, "units", "ingested_" + os.path.basename(path))
+        name = os.path.basename(path)
+        if getattr(args, "counts_only", False) and name.endswith(".gz"):
+            name = name[:-3]
+        dst = os.path.join(args.state, "units", "ingested_" + name)
         if not dst.endswith(".jsonl"):
             dst += ".jsonl"
+        if getattr(args, "counts_only", False):
+            # (the copy starts with the counts-only record; a .gz is
+            # decompressed)
+            with open_text(path) as f:
+                data = f.read()
+            with open(dst + ".tmp", "wb") as g:
+                g.write((json.dumps(counts_only_record()) + "\n").encode())
+                g.write(data)
+            os.replace(dst + ".tmp", dst)
+            print(f"{path} -> {dst} (counts only)")
+            continue
         shutil.copy(path, dst)
         print(f"{path} -> {dst}")
 
@@ -2248,7 +2265,9 @@ SAMPLED_KEYS = ("sample", "stride", "r1_stride", "r1_sample")
 # the d-first / plain ratio pairs, the CPU of killed d-first units, SP-type
 # squares found d-first; 6 = the star cover: parts merged per (x*, K), the
 # d-first pairs and their estimates, the span of a part with skipped d;
-# 7 = a d-first / plain ratio pair from the parts of one engine only
+# 7 = a d-first / plain ratio pair from the parts of one engine only.
+# (ingest --counts-only kept 7: its flag lives in the file's own entry,
+# files[name]["counts_only"], and every other file reads as before)
 SUMMARY_VERSION = 7
 
 
@@ -2280,6 +2299,18 @@ def machine_record(P, S, mid, speed):
     reference CPU from every machine"""
     return {"type": "machine", "n": None, "P": list(P), "S": S, "machine": mid,
             "speed": {"plain": float(speed["plain"]), "dfirst": float(speed["dfirst"])}}
+
+
+def counts_only_record():
+    """the record `ingest --counts-only` writes at the top of a copied unit
+    file: the summary takes every count of the file (sums, coverage,
+    squares, S and P traversals, pairs, d-first records, calibration
+    streams) as from any file, but none of its CPU or times: they reach no
+    time law, d-first / plain ratio or CPU total (totals["counts_only_cpu"]
+    only). For the output of a machine of unknown and varying speed, such
+    as a laptop's (scripts/laptop/run.py), whose CPU is not reference CPU"""
+    return {"type": "machine", "n": None, "machine": "counts-only", "speed": None,
+            "counts_only": True}
 
 
 def scale_record(r, speed):
@@ -2501,8 +2532,12 @@ class Summary:
             if not isinstance(r, dict) or "type" not in r:
                 continue
             if r["type"] == "machine":
-                # (run --machine: the records after it ran on that machine)
+                # (run --machine: the records after it ran on that machine;
+                # ingest --counts-only: the file's times are not learned
+                # from, kept in st across the incremental reads)
                 st["speed"] = r.get("speed")
+                if r.get("counts_only"):
+                    st["counts_only"] = 1
                 continue
             if r.get("n") != self.n:
                 self.totals["other_n"] += 1
@@ -2528,7 +2563,10 @@ class Summary:
                 if r.get("mode") == "calib":
                     # a d-first sum's calibration stream: into the cells
                     # (see _ingest), not a sampled research record
-                    self.totals["calib_cpu"] += r.get("cpu", 0.0)
+                    if st.get("counts_only"):
+                        self._counts_only_cpu(r.get("cpu", 0.0))
+                    else:
+                        self.totals["calib_cpu"] += r.get("cpu", 0.0)
                     recs.setdefault(norm_p(r["P"]), []).append(dict(r, _csq=mine))
                     continue
             if any(k in r for k in SAMPLED_KEYS):
@@ -2567,10 +2605,18 @@ class Summary:
         self.dirty = True
         return {p_str(P, "_") for P in recs}
 
+    def _counts_only_cpu(self, t):
+        """CPU seconds of a counts-only file (ingest --counts-only): in no
+        other total"""
+        self.totals["counts_only_cpu"] = self.totals.get("counts_only_cpu", 0.0) + t
+
     def _ingest(self, P, rs, fst, store):
         np = _np()
         am = _am()
         key = p_str(P, "_")
+        # (a counts-only file: its counts as any file's, its CPU and times
+        # in no time law, ratio pair or CPU total)
+        timed = not fst.get("counts_only")
         fst["P"] = fst["P"] or key
         cov = []
         sums = [r for r in rs if r["type"] == "sum"]
@@ -2607,12 +2653,15 @@ class Summary:
                 self.dcov.pop(key, None)
         for r in sums:
             t = sum_cpu(r)
-            ps["cpu"] += t
             ps["nsums"] += 1
             fst["sums"] += 1
             fst["cpu"] += t
             self.totals["sums"] += 1
-            self.totals["cpu"] += t
+            if timed:
+                ps["cpu"] += t
+                self.totals["cpu"] += t
+            else:
+                self._counts_only_cpu(t)
         notable_seen = None
         for q in sqs:
             ps["o"][0] += 1
@@ -2642,7 +2691,7 @@ class Summary:
                  and not r.get("truncated") and "cpu" in r
                  and r.get("nvecs_raw", 0) >= DFIRST_TIME_MIN_N
                  and r.get("nd", 0) >= min(DFIRST_TIME_MIN_ND, r["nvecs_raw"])
-                 and dfirst_law_star(r, self.n)]
+                 and dfirst_law_star(r, self.n)] if timed else []
         calibs = [r for r in rs if r["type"] == "csum" and "_csq" in r]
         if not sums and not sqs and not dsums and not calibs:
             self._pair_ratio(ps, rs)
@@ -2704,7 +2753,7 @@ class Summary:
                     b[1] += float(val)
                     b[2] += float(val) ** 2
                 t = sum_cpu(r)
-                if t < 0.01:
+                if t < 0.01 or not timed:
                     continue
                 self._time_row(f"{engine_of(r)}:{r.get('mode', 'plain')}", F[i], math.log(t),
                                band, r["labels"])
@@ -2760,7 +2809,7 @@ class Summary:
                 w = min(1.0, PHI_SUM / (phi + PHI_SUM / kk))
                 c = int(a["cell"][i])
                 acc(c, 0, w)
-                self._calib_time(ps, r, a, i, k, F_cal)
+                self._calib_time(ps, r, a, i, k, F_cal, timed)
                 vals = [w * o, w * esq / kk, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                 for q in r["_csq"]:
                     vals[2] += w * q["s_count"]
@@ -2808,7 +2857,7 @@ class Summary:
             tb[1 + j] += w * float(f[j])
         tb[nt + 1] += w * y
 
-    def _calib_time(self, ps, r, a, i, k, F):
+    def _calib_time(self, ps, r, a, i, k, F, timed=True):
         """a calibration stream as data on the plain search of its sum: its
         unbiased estimate of the plain CPU (est_time plus the reduction and
         the enumeration share, as a "sum" record's cpu) is a row of the
@@ -2828,7 +2877,7 @@ class Summary:
                 b[0] += 1
                 b[1] += float(val)
                 b[2] += float(val) ** 2
-        if est <= 0 or raw < 300:
+        if est <= 0 or raw < 300 or not timed:
             return
         t = est + r.get("reduce_time", 0.0) + r.get("enum_time", 0.0)
         rel = float(r.get("se_time", 0.0) or 0.0) / est
@@ -3021,6 +3070,8 @@ class Summary:
         squares (magic, or best_score >= NOTABLE) join the notable squares
         once. Complete sums are counted in _dcover."""
         fst = fst if fst is not None else {}
+        # (a counts-only file's CPU: in totals["counts_only_cpu"] only)
+        ck = "counts_only_cpu" if fst.get("counts_only") else "dfirst_cpu"
         # d-first CPU: each chunk's d loop as it completes (also those of
         # killed units, whose chunks count as searched), the rest of a dsum
         # (index, reduction, enumeration share) with it
@@ -3028,14 +3079,15 @@ class Summary:
         for r in rs:
             if r["type"] == "dchunk":
                 t = float(r.get("time", 0.0))
-                self.totals["dfirst_cpu"] += t
+                self.totals[ck] = self.totals.get(ck, 0.0) + t
                 kS = str(r["S"])
                 dct[kS] = dct.get(kS, 0.0) + t
             elif r["type"] == "dsum":
                 if not r.get("complete"):
                     self.totals["dfirst_partial"] += 1
                 c = r.get("cpu", r.get("time", 0.0))
-                self.totals["dfirst_cpu"] += max(c - dct.pop(str(r["S"]), 0.0), 0.0)
+                rest = max(c - dct.pop(str(r["S"]), 0.0), 0.0)
+                self.totals[ck] = self.totals.get(ck, 0.0) + rest
                 fst["dcpu"] = fst.get("dcpu", 0.0) + c
             elif r["type"] == "csum" and "_csq" in r:
                 fst["dcpu"] = fst.get("dcpu", 0.0) + r.get("cpu", 0.0)
@@ -4187,6 +4239,11 @@ def report_v2(sch, top=20, out=None):
     pr = lambda *a: print(*a, file=out)  # noqa: E731
     pr(f"\n{len(s.perP)} values of P, {T['sums']} sums, {T['cpu'] / 3600:.2f} CPU-hours, "
        f"{T['squares']} semi-magic squares ({3600 * T['squares'] / max(T['cpu'], 1):.0f}/CPU-hour)")
+    if T.get("counts_only_cpu"):
+        nco = sum(1 for st in s.files.values() if st.get("counts_only"))
+        pr(f"counts-only files (ingest --counts-only): {nco}, their counts in every total, their "
+           f"{T['counts_only_cpu'] / 3600:.2f} CPU-hours in none (and in no time law; the "
+           f"squares per CPU-hour above count their squares)")
     if T.get("dfirst_sums") or T.get("dfirst_partial") or s.dcov:
         pr(f"d-first (in the d-first time law only): {T['dfirst_sums']} sums searched in full, "
            f"{T['dfirst_partial']} parts (dsum records of d ranges or samples), "
@@ -5020,6 +5077,10 @@ def main():
 
     p = sub.add_parser("ingest")
     p.add_argument("files", nargs="+")
+    p.add_argument("--counts-only", action="store_true",
+                   help="take the files' counts (sums, coverage, squares, traversals, pairs) "
+                        "but not their CPU or times, which reach no time law: the output of a "
+                        "machine of unknown speed, e.g. scripts/laptop/run.py's")
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("import-legacy")

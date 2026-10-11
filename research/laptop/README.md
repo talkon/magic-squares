@@ -36,14 +36,17 @@ count for the stage-1 plan too (the same unit numbers).
    report its last two lines (the time and the time per core). Stop if it
    says FAILED. On an M1 it builds with `-mcpu=native -flto` and prints
    `search kernels: portable`.
-4. Run, plugged in, lid open (a closed lid sleeps the Mac):
+4. Run, plugged in, Low Power Mode off, lid open (a closed lid sleeps the
+   Mac; see "Throttling, sleep and other load" below):
 
        caffeinate -i python3 scripts/laptop/run.py research/stage1/plan-stage1.jsonl.xz --hours 9
 
-   That is the plan file to pass. `--hours` is wall-clock hours. It uses
+   That is the plan file to pass. `--hours` is wall-clock hours (sleep
+   included). It uses
    the performance cores (`--workers K` to change; 4 on an M1, 6 or 8 on an
    M1 Pro / Max), runs the units in the plan's order, prints progress every
-   minute (CPU-hours, the reference CPU-hours they stand for, the stage-1
+   minute (CPU-hours, the reference CPU-hours they stand for, the same over
+   the last 30 minutes, the stage-1
    band units finished and their pairs) and announces any magic square
    loudly (also written to `laptop-runs/MAGIC.txt`). After 9 hours, or on
    Ctrl-C, or when the terminal is closed, it stops the running units,
@@ -74,9 +77,50 @@ count for the stage-1 plan too (the same unit numbers).
        git add research/laptop/results-*.tar.xz && git commit -m "laptop run results" && git push
 
    The tarball holds the finished units, the meta files (machine, plan
-   hash, build), progress.log (the speed) and the build's record
-   (build_info.txt with the bench/quick.txt time and the search kernels,
+   hash, build), progress.log and units.tsv (the speed) and the build's
+   record (build_info.txt with the bench/quick.txt time and the search kernels,
    check_quick.txt). Nothing else needs to be sent.
+
+## Throttling, sleep and other load
+
+The search is exact: a unit's squares, traversals, pairs and nodes are the
+same at any speed. The plan's order is fixed; decide.py fits f_rho from
+the pairs against the plan's frozen predictions, with no time in it; and
+run.py counts progress in reference hours from the plan's pred_time of the
+finished units. So throttling (heat, battery, Low Power Mode), sleep and
+other programs change none of the results. They change how many units a
+night finishes, which shows in:
+
+* the progress line: "x the reference per core" (CPU per reference CPU)
+  over the whole run and over the last 30 minutes, which rises when the
+  cores are throttled; and the reference CPU-hours done per hour in the
+  last 30 minutes, which falls with throttling, sleep or other load;
+* `laptop-runs/units.tsv`: per unit its plan line i, pred_time, the CPU
+  and wall seconds it took, when it ended and its status.
+
+Time enters a unit in one place: msearch's `--time-limit`, which is
+wall-clock time (it runs on while the Mac sleeps or the unit waits for a
+core). A unit stopped by it is not complete. If it used less than half of
+the limit in CPU, the machine slept or was busy: run.py removes its
+output and runs it again from the start (a log line, `cut` in units.tsv;
+at most 3 times per unit and run, then it is kept). A unit stopped with
+more CPU really needed that long and is kept, as before (decide.py
+without the state fits complete units only). Each limit is at least
+2,880 s and at least 35.9x the unit's predicted reference CPU, so only a
+sleep or a stall of more than ~40 minutes cuts the units running then.
+
+Advice: plugged in, Low Power Mode off, lid open, no other heavy programs.
+Closing the lid is safe: after a short sleep the units go on, after a
+long one they are run again, which loses the work they had done. `caffeinate -i` prevents idle
+sleep only, not the sleep of a closed lid.
+
+What we do with the results: decide.py reads the unit files (counts only,
+against the frozen predictions), and they enter the scheduler's state as
+counts only: `scheduler.py --state STATE ingest --counts-only U*.jsonl`.
+Their sums, coverage, squares, traversals and pairs count as those of any
+unit; their CPU, which is not the reference machine's and varies with
+throttling, reaches no time law, so the scheduler's predicted CPU stays
+that of the reference machine.
 
 ## How long
 

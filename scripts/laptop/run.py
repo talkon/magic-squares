@@ -20,8 +20,19 @@ usage: run.py PLAN(.jsonl or .jsonl.xz) [--bin BUILD/msearch] [--out DIR] [--wor
 * Progress: the units' measured CPU against their predicted reference CPU
   (the fast x86 build's; the ratio also carries the machine's load and the
   predictions' own error, e.g. the fast build itself ran at 1.32x its
-  predictions on a busy shared machine), and for a stage-1 plan the pairs
-  found in its band units (research/stage1.md; scripts/decide.py fits them).
+  predictions on a busy shared machine), the same over the last 30 minutes
+  with the reference CPU-hours done per hour there (throttling and other
+  load show in these), and for a stage-1 plan the pairs found in its band
+  units (research/stage1.md; scripts/decide.py fits them). DIR/units.tsv
+  has a line per finished unit (and per run cut by the wall clock, below):
+  i, pred_time, CPU and wall seconds, end time, status.
+* The plan's --time-limit is wall-clock time, which runs on while the
+  machine sleeps or the unit waits for a core. A unit stopped by it with
+  less than half of it in CPU is not kept: it is run again from its start
+  (at most 3 times per run; then it is kept as it is). A unit stopped by it
+  with more CPU really needed that long and is kept, as are units
+  incomplete for any other reason. Finished units do not depend on the
+  speed: the search is exact.
 """
 import argparse
 import hashlib
@@ -54,6 +65,46 @@ def done_file(path):
     except (OSError, ValueError):
         return None
     return recs if any(r.get("type") == "done" for r in recs) else None
+
+
+# reruns per run of a unit stopped by the wall-clock limit with little CPU
+RETRIES = 3
+# seconds: the window of the progress line's recent speed
+WINDOW = 1800
+
+
+def time_limit(u):
+    """the unit's --time-limit (msearch's wall-clock seconds), or None"""
+    args = u.get("args", [])
+    for k, x in enumerate(args[:-1]):
+        if x == "--time-limit":
+            try:
+                return float(args[k + 1])
+            except ValueError:
+                return None
+    return None
+
+
+def records_cpu(recs):
+    """the process CPU seconds of a unit's records (sum, csum and dsum
+    records' cpu, else their time)"""
+    return sum(r.get("cpu", r.get("time", 0.0)) for r in recs
+               if r.get("type") in ("sum", "csum", "dsum"))
+
+
+def cut_by_clock(u, recs):
+    """(CPU, wall) seconds if the unit stopped at its wall-clock limit
+    (--time-limit) with less than half of it in CPU: the machine slept or
+    was busy, the unit did not need that long. Else None"""
+    lim = time_limit(u)
+    done = [r for r in recs if r.get("type") == "done"]
+    if not lim or not done or done[-1].get("complete", 1):
+        return None
+    wall = float(done[-1].get("time", 0.0))
+    cpu = records_cpu(recs)
+    if wall >= 0.99 * lim and cpu < 0.5 * lim:
+        return cpu, wall
+    return None
 
 
 def unit_matches(u, recs):
@@ -113,6 +164,18 @@ def main():
     with open(os.path.join(a.out, f"meta_{int(time.time())}.json"), "w") as f:
         json.dump(meta, f, indent=1)
     log = open(os.path.join(a.out, "progress.log"), "a")
+    tsv_path = os.path.join(a.out, "units.tsv")
+    tsv = open(tsv_path, "a")
+    if os.path.getsize(tsv_path) == 0:
+        tsv.write("i\tpred_time\tcpu\twall\tend\tstatus\n")
+        tsv.flush()
+
+    def unit_row(u, cpu, wall, status):
+        # status: done, incomplete (kept), cut (stopped by the wall clock
+        # with little CPU: removed and run again), cut-kept (after RETRIES)
+        tsv.write(f"{u['i']}\t{u.get('pred_time', 0.0):.3f}\t{cpu:.3f}\t{wall:.1f}\t"
+                  f"{int(time.time())}\t{status}\n")
+        tsv.flush()
 
     def say(msg):
         line = time.strftime("[%Y-%m-%d %H:%M:%S] ") + msg
@@ -161,8 +224,10 @@ def main():
         signal.signal(signal.SIGHUP, on_signal)
 
     t0 = time.time()
-    running = {}  # Popen -> (unit, tmp path)
+    running = {}  # Popen -> (unit, tmp path, output path, launch time)
     stats = {"units": 0, "cpu": 0.0, "ref": 0.0, "squares": 0, "sp": 0, "magic": 0}
+    recent = []   # (end time, CPU, pred_time) of the units of the last WINDOW s
+    tries = {}    # unit i -> times stopped by the wall clock with little CPU
     # (a stage-1 plan: pairs in its band units, all finished ones so far)
     band = {"units": 0, "pairs": 0, "pred": 0.0}
     stage1 = any("stage1" in u for u in units)
@@ -172,13 +237,27 @@ def main():
             band["units"] += 1
             band["pred"] += u.get("pred_pairs", 0.0)
             band["pairs"] += sum(r.get("sp_count", 0) for r in recs if r.get("type") == "square")
+    def magic(r):
+        msg = json.dumps(r)
+        say("*** MAGIC SQUARE FOUND *** " + msg)
+        with open(os.path.join(a.out, "MAGIC.txt"), "a") as f:
+            f.write(msg + "\n")
     for u in units:
         if stage1 and u.get("stage1"):
             recs = done_file(os.path.join(a.out, f"U{u['i']:06d}.jsonl"))
             if recs:
                 count_band(u, recs)
     last = 0.0
+    clocks = (time.time(), time.monotonic())
     while (todo and not stop["now"]) or running:
+        # (the wall clock ahead of the monotonic one, which stops while the
+        # machine sleeps: log it; best effort, the units' records decide)
+        now = (time.time(), time.monotonic())
+        gap = (now[0] - clocks[0]) - (now[1] - clocks[1])
+        clocks = now
+        if gap > 120:
+            say(f"the machine seems to have slept for {gap / 60:.0f} min: a unit stopped by its "
+                f"wall-clock limit meanwhile is run again")
         if a.hours and time.time() - t0 > a.hours * 3600 and not stop["now"]:
             stop["now"] = True
             say(f"--hours {a.hours} reached: stopping")
@@ -189,7 +268,7 @@ def main():
             cmd = [a.bin, *u["args"][:-len(u["P"])], "--out", tmp, *map(str, u["P"])]
             p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
-            running[p] = (u, tmp, out)
+            running[p] = (u, tmp, out, time.time())
         if stop["now"]:
             for p in list(running):
                 try:
@@ -200,7 +279,7 @@ def main():
         for p in list(running):
             if p.poll() is None:
                 continue
-            u, tmp, out = running.pop(p)
+            u, tmp, out, t_launch = running.pop(p)
             recs = done_file(tmp) if p.returncode == 0 else None
             if recs is None:
                 if os.path.exists(tmp):
@@ -208,36 +287,72 @@ def main():
                 if not stop["now"]:
                     say(f"unit {u['i']} failed (exit {p.returncode}); it will be retried next run")
                 continue
+            cpu = records_cpu(recs)
+            wall = time.time() - t_launch
+            cut = cut_by_clock(u, recs)
+            if cut:
+                tries[u["i"]] = tries.get(u["i"], 0) + 1
+                if tries[u["i"]] <= RETRIES:
+                    # (its output is never kept: run again from the start;
+                    # a magic square in it is announced all the same)
+                    for r in recs:
+                        if r.get("type") == "square" and r.get("best_score", 0) >= 14:
+                            magic(r)
+                    os.remove(tmp)
+                    unit_row(u, cpu, wall, "cut")
+                    if stop["now"]:
+                        say(f"unit {u['i']}: stopped by the wall-clock limit after {cut[0]:.0f} "
+                            f"CPU-s in {cut[1]:.0f} s: removed, it runs again next run")
+                    else:
+                        say(f"unit {u['i']}: stopped by the wall-clock limit after {cut[0]:.0f} "
+                            f"CPU-s in {cut[1]:.0f} s (the machine slept or was busy): running "
+                            f"it again")
+                        todo.insert(0, u)
+                    continue
+                say(f"unit {u['i']}: stopped by the wall-clock limit {tries[u['i']]} times in "
+                    f"this run (now after {cut[0]:.0f} CPU-s in {cut[1]:.0f} s): kept as it is, "
+                    f"not complete")
             os.replace(tmp, out)
+            done = [r for r in recs if r.get("type") == "done"][-1]
+            unit_row(u, cpu, wall, "cut-kept" if cut else
+                     "done" if done.get("complete", 1) else "incomplete")
             stats["units"] += 1
             stats["ref"] += u.get("pred_time", 0.0)
+            stats["cpu"] += cpu
+            recent.append((time.time(), cpu, u.get("pred_time", 0.0)))
             count_band(u, recs)
             for r in recs:
-                if r.get("type") in ("sum", "csum", "dsum"):
-                    stats["cpu"] += r.get("cpu", r.get("time", 0.0))
-                elif r.get("type") == "square":
+                if r.get("type") == "square":
                     stats["squares"] += 1
                     stats["sp"] += r.get("sp_count", 0) > 0
                     if r.get("best_score", 0) >= 14:
                         stats["magic"] += 1
-                        msg = json.dumps(r)
-                        say("*** MAGIC SQUARE FOUND *** " + msg)
-                        with open(os.path.join(a.out, "MAGIC.txt"), "a") as f:
-                            f.write(msg + "\n")
+                        magic(r)
         if time.time() - last > 60:
             last = time.time()
-            say(progress(n_done, len(units), stats, t0, band if stage1 else None))
+            recent = [x for x in recent if x[0] > last - WINDOW]
+            say(progress(n_done, len(units), stats, t0, band if stage1 else None, recent))
     say("finished: " + progress(n_done, len(units), stats, t0, band if stage1 else None))
 
 
-def progress(n_done, n, stats, t0, band):
-    el = (time.time() - t0) / 3600
+def progress(n_done, n, stats, t0, band, recent=None):
+    now = time.time()
+    el = (now - t0) / 3600
     ref = stats["ref"] / 3600
     msg = (f"{n_done + stats['units']}/{n} units done; this run: {stats['units']} units, "
            f"{stats['cpu'] / 3600:.2f} CPU-h in {el:.2f} h = {ref:.2f} reference CPU-h"
            + (f" ({stats['cpu'] / stats['ref']:.2f}x the reference per core)" if stats["ref"] else "")
            + f", {stats['squares']} squares, {stats['sp']} with an SP diagonal, "
            f"{stats['magic']} magic")
+    if recent is not None and now - t0 >= 60:
+        # (the units finished in the last WINDOW seconds: throttling, sleep
+        # and other load show here)
+        span = max(min(WINDOW, now - t0), 1.0)
+        rc = sum(c for _, c, _ in recent)
+        rr = sum(r for _, _, r in recent)
+        msg += (f"; last {span / 60:.0f} min: {len(recent)} units, "
+                f"{rr / span:.2f} reference CPU-h per hour"
+                + (f" ({rc / rr:.2f}x the reference per core)" if rr else ""))
     if band is not None:
         msg += (f"; stage-1 band units so far: {band['units']}, pairs {band['pairs']} "
                 f"(predicted {band['pred']:.1f} at f_rho = 1)")

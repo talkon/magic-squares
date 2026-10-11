@@ -2472,6 +2472,248 @@ def test_laptop_run():
     print("laptop run ok")
 
 
+def test_laptop_clock():
+    """scripts/laptop/run.py and msearch's wall-clock --time-limit: a unit
+    stopped by it with less than half of it in CPU (the machine slept or
+    was busy) is removed and run again, and kept once an attempt completes;
+    one stopped with more CPU, or before the limit, is kept as it is; the
+    reruns stop after RETRIES; units.tsv has a line per attempt. Then the
+    real msearch stopped (SIGSTOP) for longer than its limit on a small
+    unit: the rerun's file has the squares and nodes of an uninterrupted
+    run"""
+    runpy = os.path.join(HERE, "laptop", "run.py")
+    with tempfile.TemporaryDirectory() as d:
+        plan = os.path.join(d, "plan.jsonl")
+        P = [10, 4, 3, 2]
+        with open(plan, "w") as f:
+            for i in range(2):
+                f.write(json.dumps({"i": i, "P": P, "lo": 300 + i, "hi": 300 + i, "mode": "plain",
+                                    "args": ["--sums", str(300 + i), "--time-limit", "100",
+                                             *map(str, P)], "pred_time": 1.0}) + "\n")
+        # a stand-in msearch: its first CUTS attempts per unit stop with
+        # complete 0 after TIME wall seconds and CPU CPU, the next complete
+        stand = os.path.join(d, "stand.py")
+        with open(stand, "w") as f:
+            f.write(f"#!{sys.executable}\n" + """import json, os, sys
+a = sys.argv[1:]
+out, S = a[a.index("--out") + 1], int(a[a.index("--sums") + 1])
+cnt = os.path.join(os.environ["STAND_DIR"], f"n{S}")
+n = int(open(cnt).read()) if os.path.exists(cnt) else 0
+open(cnt, "w").write(str(n + 1))
+cut = n < int(os.environ["STAND_CUTS"])
+cpu = float(os.environ["STAND_CPU"]) if cut else 2.0
+with open(out, "w") as f:
+    f.write(json.dumps({"type": "sum", "n": 6, "P": [10, 4, 3, 2], "S": S, "cpu": cpu}) + "\\n")
+    f.write(json.dumps({"type": "done", "n": 6, "P": [10, 4, 3, 2], "min_sum": S,
+                        "last_sum": S, "complete": int(not cut),
+                        "time": float(os.environ["STAND_TIME"]) if cut else 2.0}) + "\\n")
+""")
+        os.chmod(stand, 0o755)
+
+        def go(name, cuts, cpu, wall):
+            out = os.path.join(d, name)
+            cdir = os.path.join(d, name + "_n")
+            os.makedirs(cdir)
+            env = dict(os.environ, STAND_DIR=cdir, STAND_CUTS=str(cuts), STAND_CPU=str(cpu),
+                       STAND_TIME=str(wall))
+            r = subprocess.run([sys.executable, runpy, plan, "--bin", stand, "--out", out,
+                                "--workers", "2"], capture_output=True, text=True, env=env,
+                               timeout=60)
+            assert r.returncode == 0, r.stdout + r.stderr
+            n = [int(open(os.path.join(cdir, f"n{300 + i}")).read()) for i in range(2)]
+            done = [[x for x in map(json.loads, open(os.path.join(out, f"U{i:06d}.jsonl")))
+                     if x["type"] == "done"][0] for i in range(2)]
+            rows = [l.split("\t") for l in open(os.path.join(out, "units.tsv")).read().split("\n")
+                    if l]
+            assert rows[0] == ["i", "pred_time", "cpu", "wall", "end", "status"], rows
+            assert not [x for x in os.listdir(out) if ".part" in x], os.listdir(out)
+            return r.stdout, n, done, [r_[5] for r_ in rows[1:]]
+        # cut twice with 1 CPU-s of a 100 s limit: run again, then kept
+        txt, n, done, st = go("again", 2, 1.0, 101.0)
+        assert n == [3, 3] and all(x["complete"] == 1 for x in done), (n, done, txt)
+        assert txt.count("stopped by the wall-clock limit after 1 CPU-s in 101 s (the machine "
+                         "slept or was busy): running it again") == 4, txt
+        assert sorted(st) == ["cut"] * 4 + ["done"] * 2, st
+        assert "finished: 2/2 units done" in txt and "2.00x the reference" in txt, txt
+        # 60 CPU-s of 100: it needed that long, kept
+        txt, n, done, st = go("needed", 9, 60.0, 101.0)
+        assert n == [1, 1] and all(x["complete"] == 0 for x in done), (n, txt)
+        assert "running it again" not in txt and st == ["incomplete"] * 2, (txt, st)
+        # stopped before the limit (not by the clock): kept
+        txt, n, done, st = go("early", 9, 1.0, 50.0)
+        assert n == [1, 1] and "running it again" not in txt, (n, txt)
+        # always cut: RETRIES reruns, then kept
+        txt, n, done, st = go("cap", 99, 1.0, 101.0)
+        R = 3
+        assert n == [R + 1, R + 1] and all(x["complete"] == 0 for x in done), (n, txt)
+        assert txt.count("running it again") == 2 * R and txt.count("kept as it is") == 2, txt
+        assert sorted(st) == ["cut"] * (2 * R) + ["cut-kept"] * 2, st
+        # (outputs of older run.py versions, cut or not, are accepted)
+        r = subprocess.run([sys.executable, runpy, plan, "--bin", stand, "--out",
+                            os.path.join(d, "cap"), "--workers", "2"], capture_output=True,
+                           text=True, timeout=60,
+                           env=dict(os.environ, STAND_DIR=d, STAND_CUTS="0", STAND_CPU="1",
+                                    STAND_TIME="1"))
+        assert "2 already done, 0 to run" in r.stdout, r.stdout
+
+        # the real msearch, stopped for 5 s at 0.15 s of a 3 s limit
+        ms = scheduler.binary("msearch")
+        Pm = [10, 6, 3, 1, 0, 1]
+        args = ["--vec-size", "6", "--min-sum", "391", "--max-sum", "410", "--time-limit", "3",
+                *map(str, Pm)]
+        with open(plan, "w") as f:
+            f.write(json.dumps({"i": 0, "P": Pm, "lo": 391, "hi": 410, "mode": "plain",
+                                "args": args, "pred_time": 0.5}) + "\n")
+        wrap = os.path.join(d, "wrap.sh")
+        with open(wrap, "w") as f:
+            f.write(f"""#!/bin/sh
+if [ ! -e "{d}/stopped" ]; then
+  : > "{d}/stopped"
+  "{ms}" "$@" &
+  pid=$!
+  sleep 0.15
+  kill -STOP $pid
+  sleep 5
+  kill -CONT $pid
+  wait $pid
+  exit $?
+fi
+exec "{ms}" "$@"
+""")
+        os.chmod(wrap, 0o755)
+        out = os.path.join(d, "real")
+        r = subprocess.run([sys.executable, runpy, plan, "--bin", wrap, "--out", out,
+                            "--workers", "1"], capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0 and "running it again" in r.stdout, r.stdout + r.stderr
+        ref = os.path.join(d, "ref.jsonl")
+        subprocess.run([ms, *args[:-len(Pm)], "--out", ref, *map(str, Pm)], check=True,
+                       stdout=subprocess.DEVNULL)
+
+        def key(path):
+            recs = [json.loads(l) for l in open(path)]
+            sums = [(x["S"], x["nodes"], x["squares"]) for x in recs if x.get("type") == "sum"]
+            sqs = sorted((x["S"], x["hash"]) for x in recs if x.get("type") == "square")
+            done = [x for x in recs if x.get("type") == "done"]
+            return sums, sqs, done[-1]["complete"], done[-1]["last_sum"]
+        got, want = key(os.path.join(out, "U000000.jsonl")), key(ref)
+        assert got == want and want[2] == 1 and want[3] == 410 and want[1], (got, want)
+        st = [l.split("\t")[5] for l in open(os.path.join(out, "units.tsv")).read().split("\n")[1:]
+              if l]
+        assert st == ["cut", "done"], st
+    print("laptop wall-clock reruns ok")
+
+
+def test_counts_only():
+    """ingest --counts-only: the same files ingested with and without it
+    give the same counts (sums, coverage, squares, traversals, cells, the
+    d-first sums and their pairs, the calibration streams), but a
+    counts-only state's time laws, band offsets and d-first / plain ratio
+    are those of a state that never saw the files, and its CPU totals
+    too; the flag survives incremental reads and a saved summary; forecast
+    --shipped gives the same numbers with and without it"""
+    P1, S1 = (12, 6, 3, 2, 1, 1), 880
+    P2, S2, raw, loop, ovh = (13, 7, 4, 3, 1, 1), 2400, 22000, 9000.0, 20.0
+
+    def plain(path, P, sums, cpu, squares=()):
+        write_unit(path, P, [(S, S % 3) for S in sums], squares, done=(sums[0], sums[-1]))
+        recs = [json.loads(l) for l in open(path)]
+        for r in recs:
+            if r["type"] == "sum":
+                r["cpu"] = cpu * (1 + (r["S"] % 5) / 10)
+        _write(path, recs)
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "src")
+        os.makedirs(src)
+        base = os.path.join(src, "base.jsonl")
+        plain(base, P1, range(S1, S1 + 10), 2.0)
+        lap1 = os.path.join(src, "U000001.jsonl")
+        plain(lap1, P1, range(S1 + 10, S1 + 20), 7.0, [(S1 + 12, 2, 1, 1, 7), (S1 + 15, 1, 0, 0, 3)])
+        cs = {"type": "csum", "mode": "calib", "n": 6, "P": list(P2), "S": S2, "nvecs": raw - 10,
+              "nvecs_raw": raw, "labels": 250, "squares": 40, "est_squares": 1600,
+              "se_squares": 300.0, "cpu": 400.0, "time": 400.0, "truncated": 0, "engine": 3,
+              "r1_stride": 40, "est_time": 16000.0, "se_time": 1000.0, "reduce_time": 5.0,
+              "enum_time": 15.0}
+        lap2 = os.path.join(src, "U000002.jsonl")
+        _write(lap2, _parts(P2, S2, raw, [0, 5000, 12000, raw], loop, ovh) + [cs])
+        with open(lap2, "rb") as f, gzip.open(lap2 + ".gz", "wb") as g:
+            g.write(f.read())
+        states = {}
+        for name, extra in (("never", None), ("normal", ()), ("counts", ("--counts-only",))):
+            st = os.path.join(d, name)
+            os.makedirs(os.path.join(st, "units"))
+            with open(base) as f, open(os.path.join(st, "units", "base.jsonl"), "w") as g:
+                g.write(f.read())
+            if extra is not None:
+                files = [lap1, lap2 + ".gz" if extra else lap2]
+                out = run("--state", st, "ingest", *extra, *files)
+                assert ("(counts only)" in out) == bool(extra), out
+            states[name] = st
+        store = scheduler.ProfileStore(d, None, 6)
+        S = {}
+        for name, st in states.items():
+            S[name] = scheduler.Summary(st, 6)
+            S[name].update(os.path.join(st, "units"), store)
+        N, A, C = S["never"], S["normal"], S["counts"]
+        assert sorted(C.files) == ["base.jsonl", "ingested_U000001.jsonl", "ingested_U000002.jsonl"]
+        assert [n for n, f in C.files.items() if f.get("counts_only")] == sorted(C.files)[1:]
+        assert not [n for n, f in A.files.items() if f.get("counts_only")]
+        # the counts: as a normal ingest
+        for k in ("cover", "dcov", "notable", "types", "nbias", "lbias"):
+            assert getattr(C, k) == getattr(A, k), k
+        cpu_keys = ("cpu", "dfirst_cpu", "calib_cpu", "counts_only_cpu")
+        assert {k: v for k, v in C.totals.items() if k not in cpu_keys} == \
+            {k: v for k, v in A.totals.items() if k not in cpu_keys}
+        assert C.totals["squares"] == 2 and C.totals["dfirst_sums"] == 1
+        assert C.totals["calib_sums"] == 1 and C.totals["sums"] == 20
+        assert C.cover["12_6_3_2_1_1"] == [[S1, S1 + 19]] and C.cover["13_7_4_3_1_1"] == [[S2, S2]]
+        for key in A.perP:
+            for k in ("o", "nsums", "cells", "pcov", "calS", "dfirst_S"):
+                assert A.perP[key].get(k) == C.perP[key].get(k), (key, k)
+        # the times: as if never seen
+        assert A.time != N.time and "3:dfirst" in A.time and A.ratio
+        assert C.time == N.time and C.tband == N.tband and C.ratio == N.ratio
+        assert not C.perP["13_7_4_3_1_1"].get("dT") and not C.perP["13_7_4_3_1_1"].get("calT")
+        fc, fn = (scheduler.fit_time_models(x.time_stats()) for x in (C, N))
+        assert sorted(fc) == sorted(fn)
+        for k in fc:
+            assert list(fc[k].th) == list(fn[k].th) and fc[k].sd == fn[k].sd, k
+        assert scheduler.current_ratio_level(C.ratio) == scheduler.current_ratio_level(N.ratio)
+        for k in ("cpu", "dfirst_cpu", "calib_cpu"):
+            assert C.totals[k] == N.totals[k], k
+        assert abs(C.totals["counts_only_cpu"] - sum(A.totals[k] - N.totals[k]
+                                                     for k in ("cpu", "dfirst_cpu", "calib_cpu"))) < 1e-6
+        assert C.perP["12_6_3_2_1_1"]["cpu"] == N.perP["12_6_3_2_1_1"]["cpu"]
+        # incremental reads and a saved summary keep the flag
+        st2 = os.path.join(d, "counts2")
+        os.makedirs(os.path.join(st2, "units"))
+        with open(base) as f, open(os.path.join(st2, "units", "base.jsonl"), "w") as g:
+            g.write(f.read())
+        u1 = os.path.join(st2, "units", "ingested_U000001.jsonl")
+        full = open(os.path.join(states["counts"], "units", "ingested_U000001.jsonl")).read()
+        with open(u1, "w") as f:
+            f.write(full[:len(full) // 3])
+        s2 = scheduler.Summary(st2, 6)
+        s2.update(os.path.join(st2, "units"), store)
+        s2.save()
+        s2 = scheduler.Summary.load(st2, 6)
+        assert s2.files["ingested_U000001.jsonl"].get("counts_only") == 1
+        with open(u1, "w") as f:
+            f.write(full)
+        with open(os.path.join(states["counts"], "units", "ingested_U000002.jsonl")) as f, \
+                open(os.path.join(st2, "units", "ingested_U000002.jsonl"), "w") as g:
+            g.write(f.read())
+        s2.update(os.path.join(st2, "units"), store)
+        assert summary_state(s2) == summary_state(C)
+        # forecast --shipped: the same with and without --counts-only
+        only = "12 6 3 2 1 1;13 7 4 3 1 1"
+        fa, fcs = (run("--state", states[x], "forecast", "--only", only, "--hours", "1",
+                       "--draws", "0", "--shipped") for x in ("normal", "counts"))
+        assert fa == fcs, (fa, fcs)
+        out = run("--state", states["counts"], "report", "--only", only)
+        assert "counts-only files (ingest --counts-only): 2," in out, out
+    print("ingest --counts-only ok")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     if len(sys.argv) > 1:
@@ -2508,4 +2750,6 @@ if __name__ == "__main__":
     test_stage1()
     test_stage1_machine()
     test_laptop_run()
+    test_laptop_clock()
+    test_counts_only()
     print(f"all ok ({time.time() - t0:.0f} s)")
