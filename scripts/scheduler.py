@@ -1308,7 +1308,16 @@ def cmd_ingest(args):
         dst = os.path.join(args.state, "units", "ingested_" + name)
         if not dst.endswith(".jsonl"):
             dst += ".jsonl"
-        if getattr(args, "counts_only", False):
+        # (a file's flag is read once, when the summary first reads it: a
+        # copy already there keeps its flag, or the summary and the file
+        # on disk would disagree until the summary is rebuilt)
+        co = bool(getattr(args, "counts_only", False))
+        for old in (dst, dst + ".gz"):
+            if os.path.exists(old) and ingested_counts_only(old) != co:
+                sys.exit(f"{old} was ingested {'without' if co else 'with'} --counts-only: to "
+                         f"change that, remove it and {os.path.join(args.state, 'summary_*')} "
+                         f"(rebuilt from units/ on the next read), then ingest it again")
+        if co:
             # (the copy starts with the counts-only record; a .gz is
             # decompressed)
             with open_text(path) as f:
@@ -2308,9 +2317,23 @@ def counts_only_record():
     streams) as from any file, but none of its CPU or times: they reach no
     time law, d-first / plain ratio or CPU total (totals["counts_only_cpu"]
     only). For the output of a machine of unknown and varying speed, such
-    as a laptop's (scripts/laptop/run.py), whose CPU is not reference CPU"""
+    as a laptop's (scripts/laptop/run.py), whose CPU is not reference CPU.
+    (Its d-first parts can still complete a sum whose other parts came from
+    timed files: that sum's ratio pair then holds only those files' times.
+    A laptop plan's units are all plain.)"""
     return {"type": "machine", "n": None, "machine": "counts-only", "speed": None,
             "counts_only": True}
+
+
+def ingested_counts_only(path):
+    """whether a unit file starts with the counts-only record"""
+    with open_text(path) as f:
+        line = f.readline()
+    try:
+        r = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(r, dict) and r.get("type") == "machine" and bool(r.get("counts_only"))
 
 
 def scale_record(r, speed):
@@ -2573,7 +2596,9 @@ class Summary:
                 # a sampled search (every k-th first row, research builds):
                 # its counts and times are not those of the sum
                 self.totals["sampled"] = self.totals.get("sampled", 0) + 1
-                if t == "csum":
+                if t == "csum" and st.get("counts_only"):
+                    self._counts_only_cpu(r.get("cpu", 0.0))
+                elif t == "csum":
                     self.totals["sampled_cpu"] = self.totals.get("sampled_cpu", 0.0) + r.get("cpu", 0.0)
                 continue
             if r["type"] == "square":

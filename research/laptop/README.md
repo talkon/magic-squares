@@ -100,14 +100,22 @@ night finishes, which shows in:
 
 Time enters a unit in one place: msearch's `--time-limit`, which is
 wall-clock time (it runs on while the Mac sleeps or the unit waits for a
-core). A unit stopped by it is not complete. If it used less than half of
-the limit in CPU, the machine slept or was busy: run.py removes its
-output and runs it again from the start (a log line, `cut` in units.tsv;
-at most 3 times per unit and run, then it is kept). A unit stopped with
-more CPU really needed that long and is kept, as before (decide.py
-without the state fits complete units only). Each limit is at least
-2,880 s and at least 35.9x the unit's predicted reference CPU, so only a
-sleep or a stall of more than ~40 minutes cuts the units running then.
+core). A unit stopped by it is not complete. If its wall time was ahead
+of its CPU by more than a quarter of the limit, the machine slept or was
+busy for that long: run.py removes its output and runs it again from the
+start (a log line, `cut` in units.tsv; at most 3 times per unit and run,
+then it is kept, `cut-kept`, and later runs skip it). Throttling slows
+the CPU and the wall clock alike, so it does not count as a stall. A
+unit stopped with its CPU close to its wall time really needed that long
+and is kept, as before (decide.py without the state fits complete units
+only). Each limit is at least 2,880 s and at least 35.9x the unit's
+predicted reference CPU, so only a sleep or a stall of more than ~40
+minutes makes the units running then reach their limits.
+
+Units cut this way by an older run.py (before this rule) are kept: run.py
+counts and names them when it starts. `--rerun-cut` runs them again (and
+the `cut-kept` ones too); add it once to the command of step 4 if your
+earlier nights had a long sleep.
 
 Advice: plugged in, Low Power Mode off, lid open, no other heavy programs.
 Closing the lid is safe: after a short sleep the units go on, after a
@@ -120,7 +128,8 @@ counts only: `scheduler.py --state STATE ingest --counts-only U*.jsonl`.
 Their sums, coverage, squares, traversals and pairs count as those of any
 unit; their CPU, which is not the reference machine's and varies with
 throttling, reaches no time law, so the scheduler's predicted CPU stays
-that of the reference machine.
+that of the reference machine. A file keeps the flag of its first ingest:
+ingest refuses it again with the other flag.
 
 ## How long
 

@@ -4,7 +4,7 @@ Run a static plan (scripts/laptop/make_plan.py) on any machine, in the plan's
 order, with K parallel msearch processes. Python 3.8+, standard library only.
 
 usage: run.py PLAN(.jsonl or .jsonl.xz) [--bin BUILD/msearch] [--out DIR] [--workers K]
-              [--hours H] [--max-units U]
+              [--hours H] [--max-units U] [--rerun-cut]
 
 * Resumable: a unit whose output has a "done" record is skipped; a unit that
   was interrupted is run again from the start (its output is replaced).
@@ -27,12 +27,16 @@ usage: run.py PLAN(.jsonl or .jsonl.xz) [--bin BUILD/msearch] [--out DIR] [--wor
   has a line per finished unit (and per run cut by the wall clock, below):
   i, pred_time, CPU and wall seconds, end time, status.
 * The plan's --time-limit is wall-clock time, which runs on while the
-  machine sleeps or the unit waits for a core. A unit stopped by it with
-  less than half of it in CPU is not kept: it is run again from its start
-  (at most 3 times per run; then it is kept as it is). A unit stopped by it
-  with more CPU really needed that long and is kept, as are units
-  incomplete for any other reason. Finished units do not depend on the
-  speed: the search is exact.
+  machine sleeps or the unit waits for a core. A unit stopped by it whose
+  wall time exceeds its CPU by more than a quarter of the limit lost that
+  time to a sleep or other load: it is not kept but run again from its
+  start (at most 3 times per run; then it is kept as it is, and later runs
+  skip it). Throttling slows CPU and wall time alike, so it opens no such
+  gap. A unit stopped by the limit with CPU close to its wall time really
+  needed that long and is kept, as are units incomplete for any other
+  reason. Finished units do not depend on the speed: the search is exact.
+  --rerun-cut also runs again the finished units cut that way (by an older
+  run.py, or kept after 3 tries); without it they are counted and named.
 """
 import argparse
 import hashlib
@@ -42,6 +46,10 @@ import os
 import platform
 import signal
 import subprocess
+try:
+    import resource
+except ImportError:
+    resource = None
 import sys
 import time
 
@@ -67,8 +75,10 @@ def done_file(path):
     return recs if any(r.get("type") == "done" for r in recs) else None
 
 
-# reruns per run of a unit stopped by the wall-clock limit with little CPU
+# reruns per run of a unit stopped by the wall-clock limit after a stall
 RETRIES = 3
+# a stall: the wall time ahead of the CPU by this part of the limit
+STALL = 0.25
 # seconds: the window of the progress line's recent speed
 WINDOW = 1800
 
@@ -92,19 +102,30 @@ def records_cpu(recs):
                if r.get("type") in ("sum", "csum", "dsum"))
 
 
-def cut_by_clock(u, recs):
+def cut_by_clock(u, recs, proc_cpu=0.0):
     """(CPU, wall) seconds if the unit stopped at its wall-clock limit
-    (--time-limit) with less than half of it in CPU: the machine slept or
-    was busy, the unit did not need that long. Else None"""
+    (--time-limit) with its wall time ahead of its CPU by more than STALL
+    of the limit: the machine slept or was busy for that long, and the unit
+    would have gone further without it. Else None. The CPU is the larger
+    of the records' (which leave out a small enumeration share) and
+    proc_cpu, the process's own (from the OS, when run.py ran it)"""
     lim = time_limit(u)
     done = [r for r in recs if r.get("type") == "done"]
     if not lim or not done or done[-1].get("complete", 1):
         return None
     wall = float(done[-1].get("time", 0.0))
-    cpu = records_cpu(recs)
-    if wall >= 0.99 * lim and cpu < 0.5 * lim:
+    cpu = max(records_cpu(recs), proc_cpu)
+    if wall >= 0.99 * lim and wall - cpu > STALL * lim:
         return cpu, wall
     return None
+
+
+def children_cpu():
+    """CPU seconds of the child processes waited for so far"""
+    if resource is None:
+        return 0.0
+    ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return ru.ru_utime + ru.ru_stime
 
 
 def unit_matches(u, recs):
@@ -132,6 +153,9 @@ def main():
     ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--hours", type=float, default=0, help="stop after this long (0 = never)")
     ap.add_argument("--max-units", type=int, default=0)
+    ap.add_argument("--rerun-cut", action="store_true",
+                    help="also run again finished units stopped by the wall-clock limit "
+                         "after a stall (an older run.py's, or kept after 3 tries)")
     a = ap.parse_args()
 
     with open(a.plan, "rb") as f:
@@ -172,7 +196,7 @@ def main():
 
     def unit_row(u, cpu, wall, status):
         # status: done, incomplete (kept), cut (stopped by the wall clock
-        # with little CPU: removed and run again), cut-kept (after RETRIES)
+        # after a stall: removed and run again), cut-kept (after RETRIES)
         tsv.write(f"{u['i']}\t{u.get('pred_time', 0.0):.3f}\t{cpu:.3f}\t{wall:.1f}\t"
                   f"{int(time.time())}\t{status}\n")
         tsv.flush()
@@ -196,6 +220,7 @@ def main():
                 pass
     todo = []
     n_done = 0
+    old_cut = []    # finished units stopped by the wall clock after a stall
     for u in units:
         path = os.path.join(a.out, f"U{u['i']:06d}.jsonl")
         recs = done_file(path)
@@ -203,11 +228,21 @@ def main():
             if not unit_matches(u, recs):
                 sys.exit(f"{path} is not the output of line {u['i']} of {a.plan} (another "
                          f"plan's?): use another --out")
+            if cut_by_clock(u, recs):
+                old_cut.append(u["i"])
+                if a.rerun_cut:
+                    todo.append(u)
+                    continue
             n_done += 1
         else:
             todo.append(u)
     say(f"plan {meta['plan']} ({meta['plan_sha256'][:12]}): {len(units)} units, "
         f"{n_done} already done, {len(todo)} to run with {a.workers} workers")
+    if old_cut:
+        names = " ".join(f"U{i:06d}" for i in old_cut[:10]) + (" ..." if len(old_cut) > 10 else "")
+        say(f"{len(old_cut)} finished units were stopped by the wall-clock limit after a stall "
+            f"({names}): " + ("running them again" if a.rerun_cut else
+                              "kept; --rerun-cut runs them again"))
 
     stop = {"now": False}
 
@@ -227,7 +262,7 @@ def main():
     running = {}  # Popen -> (unit, tmp path, output path, launch time)
     stats = {"units": 0, "cpu": 0.0, "ref": 0.0, "squares": 0, "sp": 0, "magic": 0}
     recent = []   # (end time, CPU, pred_time) of the units of the last WINDOW s
-    tries = {}    # unit i -> times stopped by the wall clock with little CPU
+    tries = {}    # unit i -> times stopped by the wall clock after a stall
     # (a stage-1 plan: pairs in its band units, all finished ones so far)
     band = {"units": 0, "pairs": 0, "pred": 0.0}
     stage1 = any("stage1" in u for u in units)
@@ -242,8 +277,9 @@ def main():
         say("*** MAGIC SQUARE FOUND *** " + msg)
         with open(os.path.join(a.out, "MAGIC.txt"), "a") as f:
             f.write(msg + "\n")
+    rerun = set(old_cut) if a.rerun_cut else set()
     for u in units:
-        if stage1 and u.get("stage1"):
+        if stage1 and u.get("stage1") and u["i"] not in rerun:
             recs = done_file(os.path.join(a.out, f"U{u['i']:06d}.jsonl"))
             if recs:
                 count_band(u, recs)
@@ -277,8 +313,10 @@ def main():
                     pass
         time.sleep(0.05)
         for p in list(running):
+            c0 = children_cpu()
             if p.poll() is None:
                 continue
+            proc_cpu = children_cpu() - c0
             u, tmp, out, t_launch = running.pop(p)
             recs = done_file(tmp) if p.returncode == 0 else None
             if recs is None:
@@ -289,7 +327,7 @@ def main():
                 continue
             cpu = records_cpu(recs)
             wall = time.time() - t_launch
-            cut = cut_by_clock(u, recs)
+            cut = cut_by_clock(u, recs, proc_cpu)
             if cut:
                 tries[u["i"]] = tries.get(u["i"], 0) + 1
                 if tries[u["i"]] <= RETRIES:
