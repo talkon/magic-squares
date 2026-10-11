@@ -2797,6 +2797,194 @@ def test_laptop_collect():
     print("laptop collect ok")
 
 
+def test_laptop_digest():
+    """scripts/laptop/digest.py on synthetic units (complete, incomplete with
+    an orphan square, cut-kept with a truncated sum, a magic square, SP
+    squares): its columns, notable squares and MAGIC.txt; decide.py's
+    report from the digest is the one from the directory (but its first
+    line), without and with a state; two digests merge (a unit in both
+    counts once; with another sha256 the later digest's); a digest of
+    another plan, and a directory of two plans, are refused; a unit file
+    without a done record is left out. LAPTOP_PYTHON runs digest.py and
+    decide.py's no-state mode (without numpy: everything but the
+    predictive E, and a note)"""
+    import hashlib
+    import lzma
+    import shutil
+    import decide
+    py = os.environ.get("LAPTOP_PYTHON", sys.executable)
+    dig = os.path.join(HERE, "laptop", "digest.py")
+    dec = os.path.join(HERE, "decide.py")
+    P1, P2 = (12, 6, 3, 2, 1, 1), (10, 4, 3, 2)
+    only = "12 6 3 2 1 1;10 4 3 2"
+
+    def go(prog, *args, ok=True, exe=None):
+        r = subprocess.run([exe or py, prog, *args], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, PYTHONHASHSEED="0"))
+        assert (r.returncode == 0) == ok, r.stdout + r.stderr
+        return r.stdout, r.stderr
+
+    def unit(path, P, sums, squares, complete=1, truncated=(), orphan=None):
+        write_unit(path, P, [(S, sum(1 for q in squares if q[0] == S)) for S in sums],
+                   squares, done=(sums[0], sums[-1]))
+        recs = [json.loads(x) for x in open(path)]
+        for r in recs:
+            if r["type"] == "sum":
+                r["cpu"] = 0.1 + (r["S"] % 7) / 3
+                r["truncated"] = int(r["S"] in truncated)
+            if r["type"] == "done":
+                r["complete"] = complete
+        if orphan is not None:
+            recs.insert(-1, {"type": "square", "n": 6, "P": list(P), "S": orphan, "s_count": 1,
+                             "p_count": 1, "sp_count": 1, "best_score": 9, "hash": "o"})
+        with open(path, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in recs))
+
+    with tempfile.TemporaryDirectory() as d:
+        plan = os.path.join(d, "plan.jsonl")
+        lines = []
+        for i, (P, lo, hi, lnp, inb) in enumerate((
+                (P1, 880, 889, (8.1, 8.2), True), (P1, 890, 899, (7.9, 8.1), False),
+                (P2, 180, 195, (5.0, 5.4), False), (P2, 196, 205, (5.4, 5.6), False),
+                (P1, 900, 905, (8.2, 8.3), True), (P2, 206, 210, (5.6, 5.7), False))):
+            lines.append({"i": i, "P": list(P), "lo": lo, "hi": hi, "mode": "plain", "args": [],
+                          "pred_squares": 3.0, "pred_pairs": 0.4, "pred_time": 10.0,
+                          "pred_S": 2.0, "pred_P": 1.0, "pred_SP": 0.3, "lNp": list(lnp),
+                          "stage1": inb})
+        with open(plan, "w") as f:
+            f.write("".join(json.dumps(x) + "\n" for x in lines))
+        sha = hashlib.sha256(open(plan, "rb").read()).hexdigest()
+        runs = os.path.join(d, "runs")
+        os.makedirs(runs)
+        U = [os.path.join(runs, f"U{i:06d}.jsonl") for i in range(6)]
+        unit(U[0], P1, range(880, 890), [(S, 2, 1, S % 2, 7) for S in range(880, 890, 3)])
+        unit(U[1], P1, range(890, 895), [(891, 1, 0, 0, 3), (894, 3, 1, 1, 7)], complete=0,
+             orphan=896)
+        unit(U[2], P2, range(180, 196),
+             [(S, 1, S % 2, int(S == 184), 5) for S in range(180, 196, 2)])
+        unit(U[3], P2, range(196, 201), [(197, 2, 0, 0, 3)], complete=0, truncated=(200,))
+        magic_sq = (902, 4, 3, 2, 14)
+        unit(U[4], P1, range(900, 906), [(901, 1, 1, 0, 3), magic_sq, (903, 2, 2, 0, 12)])
+        magic = [json.loads(x) for x in open(U[4]) if '"best_score": 14' in x][0]
+        with open(os.path.join(runs, "MAGIC.txt"), "w") as f:
+            f.write(json.dumps(magic) + "\n")
+        with open(os.path.join(runs, "meta_1.json"), "w") as f:
+            json.dump({"plan": "plan.jsonl", "plan_sha256": sha, "machine": "arm64",
+                       "build": "compiler: test\n"}, f)
+        with open(os.path.join(runs, "units.tsv"), "w") as f:
+            f.write("i\tpred_time\tcpu\twall\tend\tstatus\n")
+            for i, st in ((0, "done"), (1, "incomplete"), (2, "done"), (3, "cut"),
+                          (3, "cut-kept"), (4, "done")):
+                f.write(f"{i}\t10.000\t{20 + i:.3f}\t{25 + i:.1f}\t{1791620000 + 60 * i}\t{st}\n")
+        with open(os.path.join(runs, "progress.log"), "w") as f:
+            f.write("[t0] plan plan.jsonl (abc): 6 units, 0 already done, 6 to run with 2 workers\n"
+                    "[t1] 1/6 units done; this run: 1 units\n[t2] 2/6 units done; this run: 2 "
+                    "units\n[t3] unit 3: stopped by the wall-clock limit\n[t4] 5/6 units done; "
+                    "this run: 5 units\n")
+        out = os.path.join(d, "dig", "digest-h.json.xz")
+        txt, _ = go(dig, runs, "--host", "h", "--out", out)
+        assert "digest-h.json.xz" in txt and "units: 5 finished (2 not complete): 0-4" in txt, txt
+        assert "1 magic" in txt and "git add" in txt and "git push" in txt, txt
+        dj = json.loads(lzma.open(out).read())
+        u = dj["units"]
+        assert dj["version"] == 1 and dj["plan_sha256"] == sha and dj["host"] == "h", dj
+        assert u["i"] == [0, 1, 2, 3, 4] and u["complete"] == [1, 0, 1, 0, 1], u
+        assert u["sha256"] == [hashlib.sha256(open(x, "rb").read()).hexdigest() for x in U[:5]]
+        assert u["size"] == [os.path.getsize(x) for x in U[:5]]
+        assert u["truncated"] == [0, 0, 0, 1, 0] and u["sums"] == [10, 5, 16, 5, 6], u
+        for k in range(5):
+            fc = decide.file_counts(U[k])
+            assert (u["squares"][k], u["s"][k], u["p"][k], u["sp"][k], u["cpu"][k]) == (
+                fc["squares"], fc["S"], fc["P"], fc["pairs"], fc["cpu"]), (k, u, fc)
+        # (the orphan square of U1 is in no count, but notable)
+        assert u["squares"][1] == 2 and u["sq_sp"] == [2, 1, 1, 0, 1], u
+        nb = sorted((r["i"], r["S"], r["best_score"]) for r in dj["notable"])
+        assert nb == [(0, 883, 7), (0, 889, 7), (1, 894, 7), (1, 896, 9), (2, 184, 5), (4, 902, 14),
+                      (4, 903, 12)], nb
+        assert [r["magic"] for r in dj["notable"] if r["i"] == 4] == [1, 0]
+        assert [json.loads(x) for x in dj["magic"]] == [magic]
+        sp = dj["speed"]
+        assert sp["totals"]["status"] == {"done": 3, "incomplete": 1, "cut": 1, "cut-kept": 1}, sp
+        assert sp["units_tsv"]["i"] == [0, 1, 2, 3, 3, 4], sp
+        assert abs(sp["totals"]["cpu"] - 133.0) < 1e-9, sp
+        assert [x[:4] for x in sp["progress_events"]] == ["[t0]", "[t2]", "[t3]", "[t4]"], sp
+        assert dj["meta"][0]["machine"] == "arm64" and dj["builds"] == ["compiler: test\n"]
+
+        def same(a, b):
+            a, b = a.split("\n"), b.split("\n")
+            assert a[0] != b[0] and a[1:] == b[1:], "\n".join(
+                x for x in __import__("difflib").unified_diff(a, b, lineterm=""))
+        # decide.py: the report from the digest is the directory's
+        for exe in (py, sys.executable):
+            raw, _ = go(dec, "--plan", plan, "--units-dir", runs, "--draws", "2000", exe=exe)
+            got, _ = go(dec, "--plan", plan, "--digest", out, "--draws", "2000", exe=exe)
+            same(raw, got)
+            assert "5 unit files, 3 finished" in got, got
+        st = os.path.join(d, "state")
+        os.makedirs(st)
+        raw, _ = go(dec, st, "--only", only, "--plan", plan, "--units-dir", runs, "--draws", "2000",
+                    exe=sys.executable)
+        got, _ = go(dec, st, "--only", only, "--plan", plan, "--digest", out, "--draws", "2000",
+                    exe=sys.executable)
+        same(raw, got)
+        assert "<1k" in got and "3-6k" in got and "42 sums kept" in got, got
+        # python3 without numpy: everything but the predictive E
+        has_np = subprocess.run([py, "-c", "import numpy"], capture_output=True).returncode == 0
+        got, _ = go(dec, "--plan", plan, "--digest", out, "--draws", "2000")
+        full, _ = go(dec, "--plan", plan, "--digest", out, "--draws", "2000", exe=sys.executable)
+        if not has_np:
+            assert "needs numpy: python3 -m pip install --user numpy" in got, got
+            g = got.split("\npredictive E and the decision table: needs numpy")[0].split("\n")
+            f = [re.sub(r"; x band of E at 1 CPU-year [0-9.]+$", "", x) for x in full.split("\n")]
+            assert g == f[:len(g)] and "\npredictive E (" in full, (got, full)
+            assert "frozen predictions of the 5 units" in got and "f_rho = " in got, got
+        else:
+            assert got == full
+
+        # two digests: U2 again with the same sha256 (once), U3 changed
+        # (the later digest's)
+        a, b = os.path.join(d, "a"), os.path.join(d, "b")
+        for x, ks in ((a, (0, 1, 2, 3)), (b, (2, 3, 4))):
+            os.makedirs(x)
+            shutil.copy(os.path.join(runs, "meta_1.json"), x)
+            for k in ks:
+                shutil.copy(U[k], x)
+        unit(os.path.join(b, "U000003.jsonl"), P2, range(196, 201), [(197, 2, 0, 0, 3),
+                                                                     (199, 1, 1, 1, 7)])
+        da, db = os.path.join(d, "dig", "a.json.xz"), os.path.join(d, "dig", "b.json.xz")
+        go(dig, a, "--host", "a", "--out", da)
+        time.sleep(0.05)
+        go(dig, b, "--host", "b", "--out", db)
+        union = os.path.join(d, "union")
+        os.makedirs(union)
+        for k in range(5):
+            shutil.copy(U[k] if k != 3 else os.path.join(b, "U000003.jsonl"), union)
+        for st_args in ((), (st, "--only", only)):
+            raw, _ = go(dec, *st_args, "--plan", plan, "--units-dir", union, "--draws", "2000",
+                        exe=sys.executable)
+            got, err = go(dec, *st_args, "--plan", plan, "--digest", db, da, "--draws", "2000",
+                          exe=sys.executable)
+            same(raw, got)
+            assert "U000003: the copy in " + db in err and "1 units in more than one" in err, err
+        # refused: a digest of another plan; a directory of two plans
+        plan2 = os.path.join(d, "plan2.jsonl")
+        with open(plan2, "w") as f:
+            f.write("".join(json.dumps(x) + "\n" for x in lines[:3]))
+        _, err = go(dec, "--plan", plan2, "--digest", out, ok=False)
+        assert "not of --plan" in err, err
+        with open(os.path.join(a, "meta_2.json"), "w") as f:
+            json.dump({"plan": "plan2.jsonl", "plan_sha256": "0" * 64}, f)
+        _, err = go(dig, a, "--host", "a", "--out", da, ok=False)
+        assert "holds the outputs of 2 plans" in err, err
+        # a unit file without a done record: left out
+        with open(U[5], "w") as f:
+            f.write(json.dumps({"type": "sum", "n": 6, "P": list(P2), "S": 206, "squares": 0,
+                                "cpu": 1.0, "truncated": 0}) + "\n")
+        txt, _ = go(dig, runs, "--host", "h", "--out", out)
+        assert "left out: 1 unit files without a done record (U000005.jsonl)" in txt, txt
+    print("laptop digest ok")
+
+
 def test_counts_only():
     """ingest --counts-only: the same files ingested with and without it
     give the same counts (sums, coverage, squares, traversals, cells, the
@@ -2973,5 +3161,6 @@ if __name__ == "__main__":
     test_laptop_run()
     test_laptop_clock()
     test_laptop_collect()
+    test_laptop_digest()
     test_counts_only()
     print(f"all ok ({time.time() - t0:.0f} s)")

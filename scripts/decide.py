@@ -9,6 +9,8 @@ usage: decide.py STATE [--select stage1|all] [--plan PLAN --units-dir DIR] [--on
                  [--ecurve FILE] [--table FILE] [--json OUT]
        decide.py --plan PLAN --units-dir DIR [...]     (no state: the plan's
                  frozen per-unit predictions only)
+       (--digest FILE [FILE ...] in place of --units-dir DIR, with or without
+                 STATE: digests of the run, scripts/laptop/digest.py)
        decide.py --simulate PLAN [--reps 1000] [--pairs 45] [--phi 1.41]
 
 STATE is a scheduler state (scripts/scheduler.py --state), fully profiled
@@ -26,6 +28,12 @@ STATE is a scheduler state (scripts/scheduler.py --state), fully profiled
       pred_pairs x observed / predicted squares (so that f_rho, like the
       state's fit, is per square found); the units that start below LO
       and reach into the band are left out.
+  --plan PLAN --digest FILE ...: the same from digests of DIR (scripts/
+      laptop/digest.py, of one host or date each; the plan's sha256 must
+      be theirs): the report is DIR's but its first line. A unit in
+      several digests counts once (with another sha256: the later
+      digest's, with a note). The state's records are rebuilt from the
+      digests' per-sum rows.
 
 Each plain sum (P, S) counts once: of the files that searched it (the
 state's older records hold benchmark and regression sums searched up to 16
@@ -60,12 +68,15 @@ The predictive E at C CPU-years: E_ship(C) (forecast --shipped, f_rho = 1;
 lognormal(0, s(C)^2 + 0.2^2 + 0.12^2) (the class factors' posterior s(C):
 0.115 at 1 CPU-year, 0.097 at 10, calibration-target.md 5; the pair factor;
 selection), applied to all of E, as the calibration search's forecast did;
-P(>=1) = mean over draws of 1 - exp(-E).
+P(>=1) = mean over draws of 1 - exp(-E). The draws are numpy's (no closed
+form gives the same numbers): without numpy (a laptop's python3) the report
+prints everything else and a note.
 """
 import argparse
 import collections
 import glob
 import gzip
+import hashlib
 import json
 import math
 import os
@@ -247,6 +258,17 @@ def class_sd(C):
     return s0 + w * (s1 - s0)
 
 
+NUMPY_NOTE = "needs numpy: python3 -m pip install --user numpy"
+
+
+def have_numpy():
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def predictive(fr, pts, Cs, draws=20000, seed=1):
     """per C: E point (median f_rho^2), E draws' 5/50/95% and mean, P(>=1)"""
     import numpy as np
@@ -326,45 +348,196 @@ def file_counts(path):
     calibration-stream squares, with their S, P and SP traversals; sums;
     CPU (sum records' cpu, else time, of the machine that ran it);
     complete (its "done" record says every sum finished)"""
+    def records(f):
+        for line in f:
+            try:
+                yield json.loads(line)
+            except ValueError:
+                continue
     o = collections.Counter()
-    pend = []
     try:
         with open_any(path) as f:
-            for line in f:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                t = r.get("type")
-                if t in ("square", "csquare"):
-                    pend.append(r)
-                elif t in ("sum", "csum"):
-                    mine = [q for q in pend if q["S"] == r["S"]]
-                    pend = [q for q in pend if q["S"] != r["S"]]
-                    if t == "csum" and r.get("mode") != "calib":
-                        continue
-                    o["sums" if t == "sum" else "csums"] += 1
-                    o["cpu"] += float(r.get("cpu", r.get("time", 0.0)))
-                    for q in mine:
-                        o["squares"] += 1
-                        o["S"] += q["s_count"]
-                        o["P"] += q["p_count"]
-                        o["pairs"] += q["sp_count"]
-                        o["best"] = max(o["best"], q.get("best_score", 0))
-                elif t == "dsum":
-                    o["cpu"] += float(r.get("cpu", 0.0))
-                    o["dpairs"] += float(r.get("pairs", 0))
-                elif t == "done":
-                    o["complete"] = int(bool(r.get("complete")))
+            count_records(records(f), o)
     except OSError:
         pass
     return o
 
 
+def count_records(recs, o=None):
+    """file_counts of parsed records (also scripts/laptop/digest.py's)"""
+    o = collections.Counter() if o is None else o
+    pend = []
+    for r in recs:
+        t = r.get("type")
+        if t in ("square", "csquare"):
+            pend.append(r)
+        elif t in ("sum", "csum"):
+            mine = [q for q in pend if q["S"] == r["S"]]
+            pend = [q for q in pend if q["S"] != r["S"]]
+            if t == "csum" and r.get("mode") != "calib":
+                continue
+            o["sums" if t == "sum" else "csums"] += 1
+            o["cpu"] += float(r.get("cpu", r.get("time", 0.0)))
+            for q in mine:
+                o["squares"] += 1
+                o["S"] += q["s_count"]
+                o["P"] += q["p_count"]
+                o["pairs"] += q["sp_count"]
+                o["best"] = max(o["best"], q.get("best_score", 0))
+        elif t == "dsum":
+            o["cpu"] += float(r.get("cpu", 0.0))
+            o["dpairs"] += float(r.get("pairs", 0))
+        elif t == "done":
+            o["complete"] = int(bool(r.get("complete")))
+    return o
+
+
+# --------------------------------------------------------------------------
+# digests of plan runs (scripts/laptop/digest.py)
+
+DIGEST_FORMAT = "magic-squares laptop digest"
+
+
+def plan_sha256(plan):
+    """the sha256 of a plan's lines (decompressed, as run.py hashes it)"""
+    if plan.endswith(".xz"):
+        import lzma
+        with lzma.open(plan) as f:
+            data = f.read()
+    elif plan.endswith(".gz"):
+        with gzip.open(plan) as f:
+            data = f.read()
+    else:
+        with open(plan, "rb") as f:
+            data = f.read()
+    return hashlib.sha256(data).hexdigest()
+
+
+def digest_units(d, path, rows=True):
+    """the units of a digest: dicts of its columns, min_sum and last_sum
+    restored, and (rows) "rows": per sum [S, squares, truncated, square
+    records, their S, P and SP traversals]"""
+    U, ps = d["units"], d["persum"]
+    tr = set(ps["truncated"])
+    nrec = {k: n for k, n in ps["nrec"]}
+    k = j = 0
+    out = []
+    for x in range(len(U["i"])):
+        u = {c: U[c][x] for c in U}
+        rr = []
+        S = u["S_first"]
+        for m in range(u["sums"] if rows else 0):
+            if m:
+                S += ps["dS"][k]
+            q = ps["q"][k]
+            nr = nrec.get(k, q)
+            if nr:
+                row = [S, q, int(k in tr), nr, ps["s"][j], ps["p"][j], ps["sp"][j]]
+                j += 1
+            else:
+                row = [S, q, int(k in tr), 0, 0, 0, 0]
+            rr.append(row)
+            k += 1
+        for c, b in (("min_sum", "S_first"), ("last_sum", "S_last")):
+            if isinstance(u[c], (int, float)) and isinstance(u[b], (int, float)):
+                u[c] += u[b]
+        u["rows"] = rr
+        out.append(u)
+    if rows and (k != len(ps["dS"]) or k != len(ps["q"]) or j != len(ps["s"])):
+        sys.exit(f"{path}: its per-sum rows do not match its units (damaged?)")
+    return out
+
+
+def load_digests(paths, plan, rows=True):
+    """the finished units of the digests of runs of the plan, merged:
+    [(i, unit)] by i, and notes. A unit in several digests counts once:
+    with the same sha256 they are one, with another the later digest's (by
+    the time it was made, then the order given) wins"""
+    import lzma
+    sha = plan_sha256(plan)
+    ds = []
+    for k, path in enumerate(paths):
+        try:
+            with lzma.open(path) as f:
+                d = json.load(f)
+        except (OSError, ValueError, EOFError, lzma.LZMAError) as e:
+            sys.exit(f"{path}: not a digest ({e})")
+        if not isinstance(d, dict) or d.get("format") != DIGEST_FORMAT:
+            sys.exit(f"{path}: not a digest of scripts/laptop/digest.py")
+        if d.get("version") != 1:
+            sys.exit(f"{path}: digest version {d.get('version')}; this decide.py reads version 1")
+        if d.get("plan_sha256") != sha:
+            sys.exit(f"{path} is of plan {d.get('plan')} (sha256 "
+                     f"{str(d.get('plan_sha256'))[:12]}), not of --plan {plan} ({sha[:12]})")
+        ds.append((float(d.get("created_unix", 0.0)), k, path, d))
+    ds.sort(key=lambda x: x[:2])
+    units = {}
+    notes = []
+    same = 0
+    for _, _, path, d in ds:
+        for u in digest_units(d, path, rows):
+            old = units.get(u["i"])
+            if old is not None:
+                if old[1]["sha256"] == u["sha256"]:
+                    same += 1
+                    continue
+                notes.append(f"U{u['i']:06d}: the copy in {path} ({d.get('created')}) replaces "
+                             f"the one in {old[0]} (another sha256)")
+            units[u["i"]] = (path, u)
+    if same:
+        notes.append(f"{same} units in more than one digest with the same sha256 (counted once)")
+    return [(i, units[i][1]) for i in sorted(units)], notes
+
+
+def digest_counts(u):
+    """file_counts of a digest's unit (the same values and keys)"""
+    o = collections.Counter()
+    if u["sums"]:
+        o["sums"] = u["sums"]
+        o["cpu"] = u["cpu"]
+    if u["squares"]:
+        o["squares"] = u["squares"]
+        o["S"], o["P"], o["pairs"], o["best"] = u["s"], u["p"], u["sp"], u["best"]
+    o["complete"] = u["complete"]
+    return o
+
+
+def digest_files(units, lines, dst):
+    """unit files in dst with the records of the digests' units that
+    decide.py reads (for the state's Summary): per sum its square records
+    (the first with the sum's S, P and SP traversals, the unit's first
+    with its best score) and its sum record (the unit's CPU on its first
+    sum), then the done record; file_counts gives the digest's counts"""
+    os.makedirs(dst, exist_ok=True)
+    for i, u in units:
+        P = list(lines[i]["P"])
+        n = u["n"]
+        best = u["best"]
+        cpu = u["cpu"]
+        out = []
+        for S, q, tr, nr, s, p, sp in u["rows"]:
+            for m in range(nr):
+                out.append({"type": "square", "n": n, "P": P, "S": S,
+                            "s_count": s if m == 0 else 0, "p_count": p if m == 0 else 0,
+                            "sp_count": sp if m == 0 else 0, "best_score": best})
+                best = 0
+            out.append({"type": "sum", "n": n, "P": P, "S": S, "squares": q, "truncated": tr,
+                        "cpu": cpu, "nvecs_raw": 0, "labels": 0})
+            cpu = 0.0
+        out.append({"type": "done", "n": n, "P": P, "min_sum": u["min_sum"],
+                    "last_sum": u["last_sum"], "complete": u["complete"], "time": u["done_time"]})
+        with open(os.path.join(dst, f"U{i:06d}.jsonl"), "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in out))
+
+
+def plan_lines(plan):
+    return [json.loads(x) for x in open_any(plan) if x.strip()]
+
+
 def selected_units(state, sch_obj, select, plan, units_dir):
     """[(path, frozen predictions or {})] of the selected records"""
     if plan:
-        lines = [json.loads(x) for x in open_any(plan) if x.strip()]
+        lines = plan_lines(plan)
         out = []
         for path in sorted(glob.glob(os.path.join(units_dir, "U*.jsonl"))):
             i = int(os.path.basename(path)[1:-6])
@@ -618,9 +791,22 @@ def poisson_interval(o, e, z=1.645):
 def report(a):
     """the decision report: from a scheduler state (a.state), or from a
     static plan's frozen predictions alone (no state)"""
-    pr = print
     out = {"units_dir": a.units_dir, "plan": a.plan}
-    if a.state:
+    a.digest_units = None
+    if a.digest:
+        units, notes = load_digests(a.digest, a.plan, rows=bool(a.state))
+        for x in notes:
+            print("note: " + x, file=sys.stderr)
+        a.digest_units = units
+        out.update({"digests": [os.path.abspath(p) for p in a.digest],
+                    "digest_notes": notes})
+    if a.state and a.digest:
+        # (the state's Summary reads unit files: the digests' records)
+        with tempfile.TemporaryDirectory(prefix="decide_digest_") as tmp:
+            a.units_dir = os.path.join(tmp, "units")
+            digest_files(units, plan_lines(a.plan), a.units_dir)
+            lo, hi, ins, outs = state_part(a, out)
+    elif a.state:
         lo, hi, ins, outs = state_part(a, out)
     else:
         lo, hi, ins, outs = frozen_part(a, out)
@@ -684,7 +870,8 @@ def state_part(a, out):
         bands = band_cells(lo, hi)
     except ValueError as e:
         sys.exit(str(e))
-    pr(f"# stage-1 decision report: {os.path.abspath(a.state)}")
+    pr(f"# stage-1 decision report: {os.path.abspath(a.state)}"
+       + (f" (units: {digest_names(a)})" if a.digest else ""))
     pr(s.stage1_status())
     units = selected_units(a.state, s, select, a.plan, a.units_dir)
     pr(f"records: {'plan ' + a.plan if a.plan else '--select ' + select}: {len(units)} unit files")
@@ -743,6 +930,10 @@ def state_part(a, out):
     return lo, hi, ins, outs
 
 
+def digest_names(a):
+    return "digests " + ", ".join(os.path.abspath(p) for p in a.digest)
+
+
 def frozen_part(a, out):
     """the records of a static plan run without a state: the plan's frozen
     per-unit predictions; per P the pairs of the finished units inside the
@@ -750,15 +941,23 @@ def frozen_part(a, out):
     at or above HI), against pred_pairs x observed / predicted squares"""
     import scheduler as sch
     pr = print
-    if not (a.plan and a.units_dir):
-        sys.exit("without STATE: --plan PLAN --units-dir DIR")
+    if not (a.plan and (a.units_dir or a.digest)):
+        sys.exit("without STATE: --plan PLAN --units-dir DIR (or --digest FILE)")
     lo, hi = parse_band(a, (sch.STAGE1_DEFAULT[1], sch.STAGE1_DEFAULT[2]))
-    pr(f"# stage-1 decision report: plan {a.plan}, units {os.path.abspath(a.units_dir)} "
+    src = digest_names(a) if a.digest else os.path.abspath(a.units_dir)
+    pr(f"# stage-1 decision report: plan {a.plan}, units {src} "
        f"(no state: the plan's frozen predictions)")
-    units = selected_units(None, None, None, a.plan, a.units_dir)
+    if a.digest:
+        lines = plan_lines(a.plan)
+        units = [(f"U{i:06d}.jsonl", lines[i]) for i, _ in a.digest_units]
+        counts = [digest_counts(u) for _, u in a.digest_units]
+    else:
+        units = selected_units(None, None, None, a.plan, a.units_dir)
+        counts = None
     if units and "pred_pairs" not in units[0][1]:
         sys.exit(f"{a.plan}: no pred_pairs (not a stage-1 plan, make_plan.py --stage1)")
-    counts = [file_counts(p) for p, _ in units]
+    if counts is None:
+        counts = [file_counts(p) for p, _ in units]
     fin = [(u, c) for (p, u), c in zip(units, counts) if c["complete"]]
     pr(f"records: plan {a.plan}: {len(units)} unit files, {len(fin)} finished "
        f"(the fit uses these)")
@@ -812,10 +1011,12 @@ def fit_and_decide(a, lo, hi, ins, outs, out):
     fro = fit_frho([y for y, _ in outs], [m for _, m in outs], "flat")
     out["fit"], out["fit_flat"], out["fit_outside_flat"] = fr, frf, fro
     meta, pts = load_ecurve(a.ecurve)
+    # (the predictive E draws with numpy: without it, everything else)
+    nonp = not have_numpy()
     pr(f"\nSP coupling (pairs in {out['band_desc']}):")
     pr("  " + describe_fit(fr))
     if a.prior != "flat":
-        pf = predictive(frf, pts, [1.0], a.draws)[1.0] if frf else None
+        pf = predictive(frf, pts, [1.0], a.draws)[1.0] if frf and not nonp else None
         pr("  the band's pairs alone (flat prior): " + describe_fit(frf)
            + (f"; x band of E at 1 CPU-year {pf['band']:.2f}" if pf else ""))
     pr("  check, outside the band (flat prior, not used): " + describe_fit(fro))
@@ -823,12 +1024,15 @@ def fit_and_decide(a, lo, hi, ins, outs, out):
         # pairs come clustered (by P, and by SP vector within a sum): with
         # few pairs in the band its own dispersion is poorly estimated
         frc = fit_frho([y for y, _ in ins], [m for _, m in ins], a.prior, fro["phi"])
-        pc = predictive(frc, pts, [1.0], a.draws)[1.0]
+        pc = None if nonp else predictive(frc, pts, [1.0], a.draws)[1.0]
         out["fit_phi_outside"] = frc
         pr(f"  sensitivity, at the dispersion outside the band ({fro['phi']:.2f}): "
-           + describe_fit(frc) + f"; x band of E at 1 CPU-year {pc['band']:.2f}")
+           + describe_fit(frc) + (f"; x band of E at 1 CPU-year {pc['band']:.2f}" if pc else ""))
     for line in out.pop("data_lines"):
         pr("  " + line)
+    if nonp:
+        pr(f"\npredictive E and the decision table: {NUMPY_NOTE}")
+        return
     # predictive E
     Cs = sorted(set(MARKS) | {float(x) for x in a.marks.split(",")} if a.marks else set(MARKS))
     pred = predictive(fr, pts, Cs, a.draws)
@@ -968,6 +1172,10 @@ def main():
                                     "and writes the profiles into the state)")
     ap.add_argument("--plan")
     ap.add_argument("--units-dir")
+    ap.add_argument("--digest", nargs="+", metavar="FILE",
+                    help="in place of --units-dir: digests of the plan's run (scripts/laptop/"
+                         "digest.py), from one or more hosts or dates; a unit in several counts "
+                         "once (with another sha256: the later digest's)")
     ap.add_argument("--prior", choices=tuple(FRHO_PRIORS), default="shipped")
     ap.add_argument("--band", help="LO:HI of the N' band whose pairs are fitted (default the "
                                     "state's stage-1 band, else 3000:6000); with a state LO and "
@@ -993,10 +1201,12 @@ def main():
     if a.simulate:
         simulate(a)
         return
-    if not a.state and not (a.plan and a.units_dir):
-        ap.error("STATE, --plan PLAN --units-dir DIR, or --simulate PLAN")
-    if bool(a.plan) != bool(a.units_dir):
-        ap.error("--plan and --units-dir go together")
+    if a.units_dir and a.digest:
+        ap.error("--units-dir or --digest, not both")
+    if not a.state and not (a.plan and (a.units_dir or a.digest)):
+        ap.error("STATE, --plan PLAN --units-dir DIR (or --digest FILE ...), or --simulate PLAN")
+    if bool(a.plan) != bool(a.units_dir or a.digest):
+        ap.error("--plan and --units-dir (or --digest) go together")
     report(a)
 
 

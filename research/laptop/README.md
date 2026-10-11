@@ -57,31 +57,52 @@ count for the stage-1 plan too (the same unit numbers).
    progress line is the laptop's speed mixed with any other load on it and
    with the predictions' own error (the fast build itself ran at 1.32x its
    predictions on a busy shared machine).
-5. The decision report, any morning (needs numpy once:
-   `python3 -m pip install --user numpy`):
+5. The decision report, any morning:
 
        python3 scripts/decide.py --plan research/stage1/plan-stage1.jsonl.xz --units-dir laptop-runs
 
-   It compares the finished units with the predictions frozen in the plan
-   (squares, S and P traversals, pairs, CPU), fits f_rho on the pairs of
+   or the same from the digest of step 6 (the same report):
+   `--digest research/laptop/digest-<host>.json.xz` in place of
+   `--units-dir laptop-runs`. It compares the finished units with the
+   predictions frozen in the plan (squares, S and P traversals, pairs,
+   CPU), fits f_rho on the pairs of
    the finished band units (the shipped prior, and the flat prior on the
    band's pairs alone), and prints the predictive E and P(>=1 magic square)
    at 1 / 3 / 10 CPU-years and the decision table's rows
    (`research/stage1/decision-table.json`: the thresholds X are yours to
-   set; the tool only reports). Here, with the scheduler state the plan was
-   made from, `python3 scripts/decide.py STATE --plan ... --units-dir ...`
-   also counts the band sums of units that start below N' 3k.
+   set; the tool only reports). The predictive E and the decision table
+   need numpy (`python3 -m pip install --user numpy`); without it the
+   report prints everything else and a note. Here, with the scheduler
+   state the plan was made from, `python3 scripts/decide.py STATE --plan
+   ... --units-dir ...` (or `--digest ...`) also counts the band sums of
+   units that start below N' 3k.
 6. Send the results back, after each night or whenever you like:
 
-       ./scripts/laptop/collect.sh
+       python3 scripts/laptop/digest.py
 
-   It packs only the units not sent before (and a unit run again with
-   `--rerun-cut`), so each run adds only the new results. It prints the
-   files it wrote and the command to send them, e.g.
+   It writes one file, `research/laptop/digest-<host>.json.xz`, with
+   everything decide.py needs from all finished units so far (per unit its
+   counts, CPU and the sha256 of its file; per sum its squares and their
+   traversals; every square with an SP diagonal or a best score of 12 or
+   more, and MAGIC.txt in full), the meta files (machine, plan hash,
+   build) and the speed (units.tsv, the events of progress.log). It is
+   replaced each time and stays small: ~1-2 MB for the whole plan (1.8 MB
+   on a synthetic run of all 21,298 units; ~40 s and 0.3 GB of memory on
+   an x86 core). It prints the units it covers and the command to send
+   it:
 
-       git add research/laptop/results-<host>-<date>.tar.xz && git commit -m "laptop run results" && git push
+       git add research/laptop/digest-<host>.json.xz && git commit -m "laptop digest" && git push
 
-   Add the files it prints. A large batch is split into parts
+   The unit files stay on the laptop: please keep `laptop-runs/` until we
+   confirm that we have the results. `decide.py` reads the digest as it
+   reads `laptop-runs` (step 5; several digests, e.g. of two machines or
+   two dates, merge: a unit in both counts once).
+
+   Only if we ask for the unit files themselves (e.g. for the scheduler's
+   state, below): `./scripts/laptop/collect.sh` packs the units not sent
+   before (and a unit run again with `--rerun-cut`) into
+   `research/laptop/results-<host>-<date>.tar.xz` and prints the command
+   to send them. Add the files it prints. A large batch is split into parts
    (`-part01.tar.xz`, ...) of at most ~45 MB each, under GitHub's file
    limits. With nothing new it says so and writes nothing. Each tarball
    holds the new units, the meta files (machine, plan hash, build),
@@ -101,7 +122,8 @@ Each msearch process holds ~11-14 MB resident (measured: plain sums at
 N 3k, d-first sums at N 6.7k-37k), so 6 workers take under 100 MB.
 `laptop-runs` grows to ~0.8 GB for the whole plan (~13 MB per reference
 CPU-hour of these small-N units, mostly the sum and square records). The
-tarballs come to ~100 MB in all (xz packs the records ~7.5-8x).
+digest of all of it is ~1-2 MB (step 6). The tarballs of collect.sh, if
+asked for, come to ~100 MB in all (xz packs the records ~7.5-8x).
 collect.sh takes ~0.15 GB of memory and ~50-85 s per 100 MB of new units
 (measured on an x86 core; less with records that pack better; the whole
 plan at once: ~6-12 minutes, 3 parts).
@@ -147,9 +169,10 @@ Closing the lid is safe: after a short sleep the units go on, after a
 long one they are run again, which loses the work they had done. `caffeinate -i` prevents idle
 sleep only, not the sleep of a closed lid.
 
-What we do with the results: decide.py reads the unit files (counts only,
-against the frozen predictions), and they enter the scheduler's state as
-counts only: `scheduler.py --state STATE ingest --counts-only U*.jsonl`.
+What we do with the results: decide.py reads the digest (counts only,
+against the frozen predictions). Unit files, when sent with collect.sh,
+enter the scheduler's state as counts only:
+`scheduler.py --state STATE ingest --counts-only U*.jsonl`.
 Their sums, coverage, squares, traversals and pairs count as those of any
 unit; their CPU, which is not the reference machine's and varies with
 throttling, reaches no time law, so the scheduler's predicted CPU stays
@@ -249,6 +272,7 @@ build.)
   greedy plan (the stage-1 plan's first 15,164 units).
 * `scripts/laptop/make_plan.py`: writes such a plan from a scheduler state
   (`--stage1` for a stage-1 plan).
-* `scripts/laptop/build.sh`, `run.py`, `collect.sh` (`collect.py`): build
-  and check, run, pack the new results. `unpack.py`: check and merge the
+* `scripts/laptop/build.sh`, `run.py`, `digest.py`: build and check, run,
+  write the digest of the results. `collect.sh` (`collect.py`): pack the
+  unit files themselves, when asked; `unpack.py`: check and merge those
   tarballs on the receiving side. `scripts/decide.py`: the report.
