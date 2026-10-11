@@ -417,9 +417,25 @@ def digest_units(d, path, rows=True):
     """the units of a digest: dicts of its columns, min_sum and last_sum
     restored, and (rows) "rows": per sum [S, squares, truncated, square
     records, their S, P and SP traversals]"""
-    U, ps = d["units"], d["persum"]
-    tr = set(ps["truncated"])
-    nrec = {k: n for k, n in ps["nrec"]}
+    try:
+        U, ps = d["units"], d["persum"]
+        tr = set(ps["truncated"])
+        nrec = {k: n for k, n in ps["nrec"]}
+        nu = len(U["i"])
+        if not all(isinstance(x, int) and x >= 0 for x in U["sums"]):
+            raise ValueError
+        ns = sum(U["sums"])
+        nr = sum(1 for k in range(len(ps["q"])) if nrec.get(k, ps["q"][k]))
+        need = ("i", "complete", "sums", "S_first", "S_last", "min_sum", "last_sum",
+                "done_time", "squares", "s", "p", "sp", "best", "cpu", "n", "sha256")
+        ok = (all(len(U[c]) == nu for c in need) and all(len(c) == nu for c in U.values())
+              and len(ps["dS"]) == ns
+              and len(ps["q"]) == ns and len(ps["s"]) == len(ps["p"]) == len(ps["sp"]) == nr
+              and all(0 <= k < ns for k in tr | set(nrec)))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        ok = False
+    if not ok:
+        sys.exit(f"{path}: its columns do not match (damaged?)")
     k = j = 0
     out = []
     for x in range(len(U["i"])):
@@ -443,8 +459,6 @@ def digest_units(d, path, rows=True):
                 u[c] += u[b]
         u["rows"] = rr
         out.append(u)
-    if rows and (k != len(ps["dS"]) or k != len(ps["q"]) or j != len(ps["s"])):
-        sys.exit(f"{path}: its per-sum rows do not match its units (damaged?)")
     return out
 
 
@@ -507,7 +521,11 @@ def digest_files(units, lines, dst):
     decide.py reads (for the state's Summary): per sum its square records
     (the first with the sum's S, P and SP traversals, the unit's first
     with its best score) and its sum record (the unit's CPU on its first
-    sum), then the done record; file_counts gives the digest's counts"""
+    sum), then the done record; file_counts gives the digest's counts.
+    The report needs no more. The files leave out what it does not print:
+    nvecs_raw and labels are 0 (Summary's nbias, lbias and time rows),
+    each square's own best score (Summary.types and notable) and the
+    orphan squares of cut units. Print one of those and this must change"""
     os.makedirs(dst, exist_ok=True)
     for i, u in units:
         P = list(lines[i]["P"])

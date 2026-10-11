@@ -2870,7 +2870,7 @@ def test_laptop_digest():
             f.write(json.dumps(magic) + "\n")
         with open(os.path.join(runs, "meta_1.json"), "w") as f:
             json.dump({"plan": "plan.jsonl", "plan_sha256": sha, "machine": "arm64",
-                       "build": "compiler: test\n"}, f)
+                       "build": "compiler: test\n", "bin": "/Users/someone/x/msearch"}, f)
         with open(os.path.join(runs, "units.tsv"), "w") as f:
             f.write("i\tpred_time\tcpu\twall\tend\tstatus\n")
             for i, st in ((0, "done"), (1, "incomplete"), (2, "done"), (3, "cut"),
@@ -2909,6 +2909,7 @@ def test_laptop_digest():
         assert abs(sp["totals"]["cpu"] - 133.0) < 1e-9, sp
         assert [x[:4] for x in sp["progress_events"]] == ["[t0]", "[t2]", "[t3]", "[t4]"], sp
         assert dj["meta"][0]["machine"] == "arm64" and dj["builds"] == ["compiler: test\n"]
+        assert dj["meta"][0]["bin"] == "msearch", dj["meta"]
 
         def same(a, b):
             a, b = a.split("\n"), b.split("\n")
@@ -2972,6 +2973,20 @@ def test_laptop_digest():
             f.write("".join(json.dumps(x) + "\n" for x in lines[:3]))
         _, err = go(dec, "--plan", plan2, "--digest", out, ok=False)
         assert "not of --plan" in err, err
+        # refused: a digest whose columns do not agree (in both modes)
+        bad = os.path.join(d, "dig", "bad.json.xz")
+        for cut in ("q", "sums"):
+            x = json.loads(lzma.open(out).read())
+            if cut == "q":
+                x["persum"]["q"] = x["persum"]["q"][:-1]
+            else:
+                x["units"]["sums"][2] += 1
+            with lzma.open(bad, "wt") as f:
+                json.dump(x, f)
+            for st_args in ((), (st, "--only", only)):
+                _, err = go(dec, *st_args, "--plan", plan, "--digest", bad, ok=False,
+                            exe=sys.executable)
+                assert "columns do not match (damaged?)" in err and "Traceback" not in err, err
         with open(os.path.join(a, "meta_2.json"), "w") as f:
             json.dump({"plan": "plan2.jsonl", "plan_sha256": "0" * 64}, f)
         _, err = go(dig, a, "--host", "a", "--out", da, ok=False)

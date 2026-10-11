@@ -26,6 +26,7 @@ import lzma
 import os
 import re
 import socket
+import subprocess
 import sys
 import tarfile
 import time
@@ -135,7 +136,17 @@ def save_record(path, rec):
 
 
 def host_name():
-    h = socket.gethostname().split(".")[0]
+    """this machine's name; on macOS its LocalHostName, which does not
+    change with the network as gethostname() can"""
+    h = ""
+    if sys.platform == "darwin":
+        try:
+            h = subprocess.run(["scutil", "--get", "LocalHostName"], stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, universal_newlines=True,
+                               timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            h = ""
+    h = h or socket.gethostname().split(".")[0]
     h = re.sub(r"[^A-Za-z0-9-]", "-", h).strip("-")
     return h or "host"
 

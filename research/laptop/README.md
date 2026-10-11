@@ -91,12 +91,20 @@ count for the stage-1 plan too (the same unit numbers).
    an x86 core). It prints the units it covers and the command to send
    it:
 
-       git add research/laptop/digest-<host>.json.xz && git commit -m "laptop digest" && git push
+       cd <repo> && git add research/laptop/digest-<host>.json.xz && git commit -m 'laptop digest' research/laptop/digest-<host>.json.xz && git push
+
+   `<host>` is the Mac's LocalHostName (System Settings, General,
+   Sharing). If the printed name changes from one night to the next, pass
+   the old one with `--host NAME`. The file names the machine (host name,
+   macOS version, compiler) and the times of the runs; the path of the
+   binary is kept from the repo's root.
 
    The unit files stay on the laptop: please keep `laptop-runs/` until we
    confirm that we have the results. `decide.py` reads the digest as it
    reads `laptop-runs` (step 5; several digests, e.g. of two machines or
-   two dates, merge: a unit in both counts once).
+   two dates, merge: a unit in both counts once). If a unit is in two
+   digests with different files (it was run twice), the copy in the digest
+   made last counts, and decide.py says so.
 
    Only if we ask for the unit files themselves (e.g. for the scheduler's
    state, below): `./scripts/laptop/collect.sh` packs the units not sent

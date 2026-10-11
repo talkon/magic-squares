@@ -40,6 +40,7 @@ import json
 import lzma
 import os
 import re
+import shlex
 import sys
 import time
 
@@ -214,6 +215,11 @@ def build(out_dir, host, plan=None):
         except (OSError, ValueError):
             sys.exit(f"{os.path.join(out_dir, name)}: not a meta file run.py wrote")
         m = dict(m, file=name)
+        if isinstance(m.get("bin"), str) and os.path.isabs(m["bin"]):
+            # (the path names the user and the home directory: keep it
+            # from the repo's root, or the file's name)
+            r = os.path.relpath(m["bin"], ROOT)
+            m["bin"] = os.path.basename(m["bin"]) if r.startswith("..") else r
         if "build" in m:
             if m["build"] not in builds:
                 builds.append(m["build"])
@@ -331,7 +337,7 @@ def main():
         ", ..." if len(ranges) > 8 else "")
     rel = os.path.relpath(out, ROOT)
     if rel.startswith(".."):
-        rel = out
+        rel = os.path.abspath(out)
     size = f"{len(data) / 1e6:.2f} MB" if len(data) >= 1e5 else f"{len(data) / 1e3:.1f} kB"
     print(f"{rel}: {size}, plan {d['plan']} ({str(d['plan_sha256'])[:12]}), "
           f"made in {time.time() - t0:.0f} s")
@@ -341,7 +347,9 @@ def main():
     if d["unfinished"]:
         print(f"left out: {len(d['unfinished'])} unit files without a done record "
               f"({' '.join(d['unfinished'][:5])}{' ...' if len(d['unfinished']) > 5 else ''})")
-    print(f"to send it: git add {rel} && git commit -m 'laptop digest' && git push")
+    q = shlex.quote(rel)
+    print(f"to send it: cd {shlex.quote(ROOT)} && git add {q} && "
+          f"git commit -m 'laptop digest' {q} && git push")
 
 
 if __name__ == "__main__":
