@@ -169,12 +169,18 @@ at 2.5-4.5x per core is 9 K / (2.5-4.5) reference CPU-hours of the plan
 | 8 (10-core M1 Pro / Max) | 16.0-28.8 h | 1.8-3.2 nights | 2.1-3.8 nights |
 
 Measured on the user's M1 Pro (2026-10-11): build.sh's bench/quick.txt
-took 0.632 s, 2.3x the fast x86 build per core, the low end of the range
-above. Plain plan units ran 1.0-1.2x their bench ratio on x86 (clang), so
-the plan is expected at ~2.3-3.0x per core on the M1; with 6 workers a
-9-hour night (54 CPU-hours) is ~18-23 reference hours: the 45 band pairs
-after ~2-3 nights (40.3-51.4 h) and the whole plan in ~2.6-3.3 nights.
-run.py's progress line gives the real ratio on the plan's units.
+took 0.632 s, 2.3x the fast x86 build per core. Its first progress lines,
+with 6 workers, read 3.8-3.9x "the reference per core": that ratio is CPU
+against the plan's pred_time, and the plan's predictions are low for the
+fast build itself on these units (its own CPU / pred_time, measured here
+on an x86 VM whose bench/quick.txt took 0.30 s against the reference's
+0.27 s: 1.62x on units 0-25, single worker 1.65x on units 0-11, 1.42x on
+a 43-unit sample of the whole plan, every 500th unit). So the M1 runs at
+~2.3-2.4x the fast build, as its bench said, and the progress line will
+read ~3.3-3.8x. With 6 workers that is ~14-17 reference hours per 9-hour
+night (54 CPU-hours), or, run without --hours: the 45 band pairs after
+~21-33 hours (40.3-51.4 reference hours) and the whole plan after ~35-42
+hours.
 
 The plan predicts 45 (square, SP traversal) pairs in its band units after
 51.4 reference hours (decide.py without the state; with it, counting every
