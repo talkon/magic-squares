@@ -168,6 +168,14 @@ at 2.5-4.5x per core is 9 K / (2.5-4.5) reference CPU-hours of the plan
 | 6 (8-core M1 Pro) | 12.0-21.6 h | 2.4-4.3 nights | 2.8-5.0 nights |
 | 8 (10-core M1 Pro / Max) | 16.0-28.8 h | 1.8-3.2 nights | 2.1-3.8 nights |
 
+Measured on the user's M1 Pro (2026-10-11): build.sh's bench/quick.txt
+took 0.632 s, 2.3x the fast x86 build per core, the low end of the range
+above. Plain plan units ran 1.0-1.2x their bench ratio on x86 (clang), so
+the plan is expected at ~2.3-3.0x per core on the M1; with 6 workers a
+9-hour night (54 CPU-hours) is ~18-23 reference hours: the 45 band pairs
+after ~2-3 nights (40.3-51.4 h) and the whole plan in ~2.6-3.3 nights.
+run.py's progress line gives the real ratio on the plan's units.
+
 The plan predicts 45 (square, SP traversal) pairs in its band units after
 51.4 reference hours (decide.py without the state; with it, counting every
 sum in the band, after 40.3 h). run.py resumes, so nights of any length add
