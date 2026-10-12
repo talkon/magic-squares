@@ -160,12 +160,9 @@ def small_files(out_dir, build_dir, rootdir):
         out = []
         with open(os.path.join(out_dir, "MAGIC.txt"), errors="replace") as f:
             for x in f:
-                try:
-                    r = json.loads(x)
-                except ValueError:
-                    continue
-                if isinstance(r, dict):
-                    out.append(json.dumps(r) + "\n")
+                r = scrub.magic_line(x)
+                if r is not None:
+                    out.append(r + "\n")
         small["MAGIC.txt"] = "".join(out).encode()
     for name, fn in (("build_info.txt", scrub.scrub_build), ("check_quick.txt", scrub.scrub_bench)):
         for path in (os.path.join(build_dir, name),
@@ -306,7 +303,7 @@ def main():
     print("(here the counts go to decide.py and into the scheduler's state; the laptop's "
           "times stay out of its time laws)")
     files = " ".join(os.path.join(rel, w[0]) for w in written)
-    print(f"to send them back: git add {files} && git commit -m 'laptop run results' && git push")
+    print(f"to send them back: git add {files} && TZ=UTC0 git commit -m 'laptop run results' && git push")
 
 
 if __name__ == "__main__":

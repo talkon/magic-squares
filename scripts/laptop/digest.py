@@ -30,7 +30,7 @@ usage: digest.py [DIR] [--name NAME] [--out FILE] [--plan PLAN]
   (it rebuilds the records' counts from them): per sum the S step and its
   squares, and for the sums with squares their S, P and SP traversals.
   Every notable square in full (an SP traversal, best_score >= 12, or
-  magic) and the lines of MAGIC.txt.
+  magic) and the square records of MAGIC.txt (their own keys only).
 * Counted as scripts/decide.py counts a unit file (decide.count_records):
   a square counts once its sum record is there; the squares of a sum not
   finished count nowhere (but a notable one is kept).
@@ -260,18 +260,15 @@ def build(out_dir, plan=None, seq=None):
         with open(os.path.join(out_dir, "MAGIC.txt"), errors="replace") as f:
             # (msearch's square records, as run.py wrote them)
             for x in f:
-                try:
-                    r = json.loads(x)
-                except ValueError:
-                    continue
-                if isinstance(r, dict):
-                    magic.append(json.dumps(r))
+                r = scrub.magic_line(x)
+                if r is not None:
+                    magic.append(r)
     except OSError:
         pass
     for r in notable:
         r["magic"] = int(r.get("best_score", 0) >= MAGIC_BEST)
     d = {"format": FORMAT, "version": VERSION, "plan": plans[0][0], "plan_sha256": plans[0][1],
-         "seq": seq, "made_s": sd["runs"].rel_now(), "made_on": scrub.machine_info(),
+         "seq": seq, "made_on": scrub.machine_info(),
          "meta": metas, "builds": builds, "speed": speed(sd),
          "units": cols,
          "persum": dict(per, note="per sum of the units in order: dS (S minus the previous "
@@ -351,8 +348,8 @@ def main():
         print(f"left out: {len(d['unfinished'])} unit files without a done record "
               f"({' '.join(d['unfinished'][:5])}{' ...' if len(d['unfinished']) > 5 else ''})")
     q = shlex.quote(rel)
-    print(f"to send it: cd {shlex.quote(ROOT)} && git add {q} && "
-          f"git commit -m 'laptop digest' {q} && git push")
+    print(f"to send it, in the repo: git add {q} && "
+          f"TZ=UTC0 git commit -m 'laptop digest' {q} && git push")
 
 
 if __name__ == "__main__":

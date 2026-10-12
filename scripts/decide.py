@@ -36,8 +36,9 @@ STATE is a scheduler state (scripts/scheduler.py --state), fully profiled
       number (version 2's seq, which counts the digests of one output
       directory; a version-1 digest comes before all of version 2, and
       version-1 digests by their time), then the later on the command
-      line. The state's records are rebuilt from the digests' per-sum
-      rows.
+      line. The numbers of two machines are compared too, though they
+      say nothing about which is newer: run a unit on one machine only.
+      The state's records are rebuilt from the digests' per-sum rows.
 
 Each plain sum (P, S) counts once: of the files that searched it (the
 state's older records hold benchmark and regression sums searched up to 16
@@ -472,7 +473,8 @@ def load_digests(paths, plan, rows=True):
     [(i, unit)] by i, and notes. A unit in several digests counts once:
     with the same sha256 they are one, with another the later digest's
     wins: version 2 after version 1, then by the digest's number (version
-    2's seq) or time (version 1's), then by the order given"""
+    2's seq, also between machines) or time (version 1's), then by the
+    order given"""
     import lzma
     sha = plan_sha256(plan)
     ds = []

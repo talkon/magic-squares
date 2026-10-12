@@ -84,7 +84,7 @@ count for the stage-1 plan too (the same unit numbers).
    everything decide.py needs from all finished units so far (per unit its
    counts, CPU and the sha256 of its file; per sum its squares and their
    traversals; every square with an SP diagonal or a best score of 12 or
-   more, and MAGIC.txt in full), what the speed needs (units.tsv, the
+   more, and the squares of MAGIC.txt), what the speed needs (units.tsv, the
    events of progress.log) and the machine: its architecture, chip (e.g.
    "Apple M1 Pro"), performance cores, workers, python version (major and
    minor), the compiler's family and major version (e.g. "Apple clang
@@ -97,13 +97,14 @@ count for the stage-1 plan too (the same unit numbers).
    of all 21,298 units; ~40 s and 0.3 GB of memory on an x86 core). It
    prints the units it covers and the command to send it:
 
-       cd <repo> && git add research/laptop/digest.json.xz && git commit -m 'laptop digest' research/laptop/digest.json.xz && git push
+       git add research/laptop/digest.json.xz && TZ=UTC0 git commit -m 'laptop digest' research/laptop/digest.json.xz && git push
 
    A second machine: `--name NAME` writes `digest-NAME.json.xz`. An older
    `digest-<host>.json.xz` can go (`git rm` it; git's history keeps it).
-   Git itself records the commit's author name, email and time (your git
-   config; GitHub's noreply address can be used there); no script
-   controls that.
+   Git itself records the commit's author name, email, time and time
+   zone (your git config; GitHub's noreply address can be used there);
+   no script controls that. `TZ=UTC0` in the command above makes git
+   record +0000 in place of your time zone.
 
    The unit files stay on the laptop: please keep `laptop-runs/` until we
    confirm that we have the results. `decide.py` reads the digest as it
@@ -113,8 +114,9 @@ count for the stage-1 plan too (the same unit numbers).
    digest counts, and decide.py says so. Later means a higher digest
    number (`laptop-runs/digest_seq.txt` counts the digests of that
    directory; no clock time is used), then later on decide.py's command
-   line (two machines' numbers are not comparable). An older version-1
-   digest comes before all numbered ones.
+   line. Two machines' numbers are compared the same way, but they say
+   nothing about which is newer, so run each unit on one machine only.
+   An older version-1 digest comes before all numbered ones.
 
    Only if we ask for the unit files themselves (e.g. for the scheduler's
    state, below): `./scripts/laptop/collect.sh` packs the units not sent

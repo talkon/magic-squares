@@ -3062,6 +3062,9 @@ def test_laptop_privacy():
         assert (r.returncode == 0) == ok, r.stdout + r.stderr
         return r.stdout, r.stderr
 
+    def dj_magic(raw):
+        return [json.loads(x) for x in json.loads(raw)["magic"]]
+
     def clean(name, text):
         for x in bad:
             assert x not in text, (name, x, text[max(0, text.find(x) - 200):text.find(x) + 200])
@@ -3103,6 +3106,13 @@ def test_laptop_privacy():
             for i in range(3):
                 f.write(f"{i}\t10.000\t{20 + i:.3f}\t{25 + i:.1f}\t{t0 + 3600 + 60 * i}\tdone\n")
             f.write(f"3\t1.0\t1.0\t1.0\t{t0 + 4000}\t{host}\n")
+        # a MAGIC record with fields added by hand: only the square's own stay
+        sq = {"type": "square", "n": 6, "P": list(P1), "S": 900, "s_count": 1, "p_count": 1,
+              "sp_count": 1, "best_score": 14, "hash": "0123abcd", "grid": [[1, 2], [3, 4]]}
+        mg = json.dumps(dict(sq, path=host, isa=["avx2", "/Users/alice"],
+                             note=f"{host} /Users/alice 2026-10-10T04:13:20-0400"))
+        with open(os.path.join(runs, "MAGIC.txt"), "w") as f:
+            f.write(mg + "\n")
         with open(os.path.join(runs, "progress.log"), "w") as f:
             f.write(f"[2026-10-10 04:13:20] plan plan.jsonl ({sha[:12]}): 3 units, 0 already "
                     f"done, 3 to run with 8 workers\n"
@@ -3112,6 +3122,7 @@ def test_laptop_privacy():
                     f"Traceback: /Users/alice/magic-squares/scripts/laptop/run.py\n"
                     f"[2026-10-10 05:13:20] plan plan.jsonl ({sha[:12]}): 3 units, 0 already "
                     f"done, 3 to run with 8 workers\n"
+                    f"[2026-10-10 05:15:20] *** MAGIC SQUARE FOUND *** {mg}\n"
                     f"[2026-10-10 05:16:20] finished: 3/3 units done; this run: 3 units, 0.02 "
                     f"CPU-h in 0.05 h = 0.01 reference CPU-h (2.20x the reference per core), "
                     f"3 squares, 1 with an SP diagonal, 0 magic\n")
@@ -3127,8 +3138,11 @@ def test_laptop_privacy():
         # the digest
         out = os.path.join(d, "dig", "digest.json.xz")
         txt, _ = go(dig, runs, "--out", out)
+        assert "cd " not in txt and "TZ=UTC0 git commit" in txt, txt
         raw = lzma.open(out).read().decode()
         clean("digest", raw)
+        assert "made_s" not in raw, raw
+        assert dj_magic(raw) == [sq], raw
         dj = json.loads(raw)
         m = dj["meta"]
         assert [x["started_s"] for x in m] == [0, 3600] and [x["run"] for x in m] == [1, 2], m
@@ -3146,8 +3160,10 @@ def test_laptop_privacy():
         assert sp["units_tsv"]["end_step"] == [3600, 60, 60], sp
         assert sp["progress_lines_not_run_py"] == 2, sp
         assert [x[:11] for x in sp["progress_events"]] == [
-            "[+0:00:00] ", "[+0:01:00] ", "[+1:00:00] ", "[+1:03:00] "], sp
-        assert dj["seq"] == 1 and isinstance(dj["made_s"], int), dj
+            "[+0:00:00] ", "[+0:01:00] ", "[+1:00:00] ", "[+1:02:00] ", "[+1:03:00] "], sp
+        assert sp["progress_events"][3] == "[+1:02:00] *** MAGIC SQUARE FOUND *** " + json.dumps(
+            sq), sp
+        assert dj["seq"] == 1, dj
         assert set(dj["made_on"]) == {"machine", "chip", "perf_cores", "python"}, dj
 
         # the report from DIR and from the digest
@@ -3171,7 +3187,7 @@ def test_laptop_privacy():
                 clean(ti.name, ti.name + "\n" + tf.extractfile(ti).read().decode())
             got = {n: tf.extractfile(n).read().decode() for n in names}
         assert sorted(names) == sorted(["manifest.json", "meta_001.json", "meta_002.json",
-                                        "progress.log", "units.tsv",
+                                        "progress.log", "units.tsv", "MAGIC.txt",
                                         "build-laptop_build_info.txt",
                                         "build-laptop_check_quick.txt"]
                                        + [f"U{i:06d}.jsonl" for i in range(3)]), names
@@ -3180,6 +3196,9 @@ def test_laptop_privacy():
                                                     "0\t10.000\t20.000\t25.0\t3600\tdone"], got
         assert got["build-laptop_build_info.txt"] == dj["builds"][0], got
         assert got["build-laptop_check_quick.txt"].startswith("instance "), got
+        assert got["MAGIC.txt"] == json.dumps(sq) + "\n", got["MAGIC.txt"]
+        assert "MAGIC SQUARE FOUND *** " + json.dumps(sq) + "\n" in got["progress.log"], got
+        assert "TZ=UTC0 git commit" in txt, txt
         for i in range(3):
             n = f"U{i:06d}.jsonl"
             assert got[n] == open(os.path.join(runs, n)).read()

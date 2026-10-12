@@ -15,7 +15,8 @@ and collect.py write. Python 3.8+, standard library only.
   found in DIR). Only the fields and lines named here are kept: a meta
   field, a build_info.txt line or a progress.log line of any other kind
   is left out (a progress.log line is kept only if all its words are
-  run.py's own).
+  run.py's own). A MAGIC line keeps only msearch's square record keys
+  with numbers, lists of numbers and its own words.
 """
 import calendar
 import datetime
@@ -254,10 +255,6 @@ class Runs:
             return None
         return int(round(t - self.base))
 
-    def rel_now(self):
-        """now in seconds from the first run's start (None if unknown: no
-        start known, or a scrubbed DIR)"""
-        return None if self.relative else self.rel(time.time())
 
 
 def read_tsv(out_dir):
@@ -287,15 +284,57 @@ def read_tsv(out_dir):
     return rows, rel
 
 
+# msearch's square record (rec_begin, build_fields in msearch.c); a MAGIC
+# line keeps only these keys
+SQUARE_KEYS = ("type", "path", "isa", "n", "P", "S", "s_count", "p_count", "sp_count",
+               "best_score", "hash", "grid", "weight")
+
+
+def _numbers(v):
+    """True if v is a number or a (nested) list of numbers"""
+    if isinstance(v, (int, float)):
+        return True
+    return isinstance(v, list) and all(_numbers(x) for x in v)
+
+
+# the string values a square record has (anything else is dropped)
+SQUARE_WORDS = {"type": r"square", "path": r"carry\d{1,4}|matrix", "hash": r"[0-9a-f]{1,32}"}
+
+
+def clean_square(r):
+    """a MAGIC record (msearch's square record) with only its own keys and
+    values: numbers, lists of numbers, the known words and ISA flags"""
+    out = {}
+    for k in SQUARE_KEYS:
+        v = r.get(k)
+        if k in SQUARE_WORDS:
+            if isinstance(v, str) and re.fullmatch(SQUARE_WORDS[k], v):
+                out[k] = v
+        elif k == "isa":
+            if isinstance(v, list) and all(isinstance(x, str) and re.fullmatch(r"[a-z0-9]{1,12}", x)
+                                           for x in v):
+                out[k] = v
+        elif _numbers(v) and not isinstance(v, bool):
+            out[k] = v
+    return out
+
+
+def magic_line(x):
+    """a line of MAGIC.txt (or a MAGIC progress message's JSON) cleaned and
+    dumped again; None if it is not a JSON dict"""
+    try:
+        r = json.loads(x)
+    except ValueError:
+        return None
+    return json.dumps(clean_square(r)) if isinstance(r, dict) else None
+
+
 def clean_message(msg):
     """a progress line's message if it is one of run.py's (scrubbed), else
     None"""
     if msg.startswith("*** MAGIC SQUARE FOUND *** "):
-        try:
-            r = json.loads(msg[len("*** MAGIC SQUARE FOUND *** "):])
-        except ValueError:
-            return None
-        return "*** MAGIC SQUARE FOUND *** " + json.dumps(r) if isinstance(r, dict) else None
+        r = magic_line(msg[len("*** MAGIC SQUARE FOUND *** "):])
+        return None if r is None else "*** MAGIC SQUARE FOUND *** " + r
     m = re.match(r"plan (\S+) \(([0-9a-f]{12})\): (.*)$", msg)
     head = ""
     if m:
