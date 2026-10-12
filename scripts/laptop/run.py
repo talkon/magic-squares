@@ -12,7 +12,8 @@ usage: run.py PLAN(.jsonl or .jsonl.xz) [--bin BUILD/msearch] [--out DIR] [--wor
   launching, stops the running units, removes their partial output, leaves
   everything finished in place and exits. Run it again to continue.
 * Outputs: DIR/U000123.jsonl per unit, DIR/meta_<time>.json (machine, build,
-  plan hash), DIR/progress.log. A magic square (best_score >= 14) is
+  plan hash; digest.py and collect.py send only what scripts/laptop/
+  scrub.py keeps of it), DIR/progress.log. A magic square (best_score >= 14) is
   announced and copied to DIR/MAGIC.txt. U<i> is line i of the plan: a
   finished U<i> whose P or sums are not line i's (another plan's output)
   is refused. Plans that share their first lines (research/stage1's plan
@@ -182,6 +183,13 @@ def main():
             "bin": a.bin, "workers": a.workers, "machine": platform.machine(),
             "system": platform.platform(), "processor": platform.processor(),
             "python": platform.python_version(), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    try:
+        # (the chip's model and performance cores, for the speed)
+        sys.path.insert(0, here)
+        from scrub import chip, perf_cores
+        meta.update(chip=chip(), perf_cores=perf_cores())
+    except Exception:
+        pass
     build_info = os.path.join(os.path.dirname(a.bin), "build_info.txt")
     if os.path.exists(build_info):
         meta["build"] = open(build_info).read()

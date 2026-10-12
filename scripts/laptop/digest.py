@@ -4,18 +4,24 @@ Write the digest of the outputs of scripts/laptop/run.py: one small file
 with everything scripts/decide.py needs, in place of the unit files.
 Python 3.8+, standard library only.
 
-usage: digest.py [DIR] [--host H] [--out FILE] [--plan PLAN]
+usage: digest.py [DIR] [--name NAME] [--out FILE] [--plan PLAN]
                  (DIR: run.py's --out, default laptop-runs)
 
-* Writes research/laptop/digest-<host>.json.xz: one cumulative file per
-  host, replaced each time (written to a temporary file, then renamed).
-  ~1-2 MB for the whole plan. The unit files stay in DIR. It prints the
-  units it covers and the git command that sends the file.
-* Contents (JSON, "version" 1): the plan's name and sha256 (from the meta
+* Writes research/laptop/digest.json.xz (--name NAME: digest-NAME.json.xz,
+  for a second machine): one cumulative file, replaced each time (written
+  to a temporary file, then renamed). ~1-2 MB for the whole plan. The
+  unit files stay in DIR. It prints the units it covers and the git
+  command that sends the file.
+* Contents (JSON, "version" 2): the plan's name and sha256 (from the meta
   files, or --plan for a DIR without them; a DIR with the outputs of two
-  plans is refused), the host, when it was made, the meta files (machine,
-  build_info text), run.py's speed (units.tsv's rows: i, cpu, wall, end,
-  status; totals; the event lines of progress.log). Per finished unit (one
+  plans is refused), the digest's number (seq: DIR/digest_seq.txt counts
+  the digests of DIR; decide.py takes a unit in two digests from the one
+  with the higher number), the meta files and run.py's speed as
+  scripts/laptop/scrub.py leaves them (no host name, OS version, path,
+  time zone or wall-clock time: every time is in seconds from the first
+  run's start), the machine that made it (architecture, chip,
+  performance cores, python), units.tsv's rows (i, cpu, wall, end,
+  status; totals) and the event lines of progress.log. Per finished unit (one
   with a "done" record), as columns: i, complete, sums, first and last S,
   the done record's min_sum, last_sum (less the first and last S) and
   time, squares, their S, P and SP traversals, squares with an SP
@@ -48,13 +54,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-from collect import host_name  # noqa: E402
 from decide import count_records  # noqa: E402
+import scrub  # noqa: E402
 
 FORMAT = "magic-squares laptop digest"
-VERSION = 1
+VERSION = 2
 UNIT = re.compile(r"U(\d+)\.jsonl$")
-META = re.compile(r"meta_.*\.json$")
+SEQ = "digest_seq.txt"
 # a notable square: an SP traversal, or a best score of 12 or more (14: magic)
 NOTABLE_BEST = 12
 MAGIC_BEST = 14
@@ -141,56 +147,42 @@ def read_unit(path):
     return row, sums, notable, other
 
 
-def speed(out_dir):
-    """run.py's speed: units.tsv's rows as columns with totals, and the
-    event lines of progress.log (with the periodic line before each)"""
+def speed(sd):
+    """run.py's speed (scrubbed): units.tsv's rows as columns with totals,
+    and the event lines of progress.log (with the periodic line before
+    each)"""
     cols = {k: [] for k in ("i", "pred_time", "cpu", "wall", "end", "status")}
-    try:
-        with open(os.path.join(out_dir, "units.tsv")) as f:
-            head = f.readline().rstrip("\n").split("\t")
-            for line in f:
-                x = line.rstrip("\n").split("\t")
-                if len(x) != len(head):
-                    continue
-                r = dict(zip(head, x))
-                try:
-                    v = (int(r["i"]), float(r["pred_time"]), float(r["cpu"]), float(r["wall"]),
-                         int(r["end"]), r["status"])
-                except (KeyError, ValueError):
-                    continue
-                for k, x in zip(cols, v):
-                    cols[k].append(x)
-    except OSError:
-        pass
+    for v in sd["tsv"]:
+        for k, x in zip(cols, v):
+            cols[k].append(x)
     st = {}
     for s in cols["status"]:
         st[s] = st.get(s, 0) + 1
     tot = {"rows": len(cols["i"]), "cpu": sum(cols["cpu"]), "wall": sum(cols["wall"]),
            "pred_time": sum(cols["pred_time"]), "status": st}
-    # (end times as steps from the previous row: they pack better)
+    # (end times, in seconds from the first run's start, as steps from the
+    # previous row: they pack better)
     end = cols.pop("end")
     # (pred_time is the plan's: in the totals only)
     cols.pop("pred_time")
-    cols["end_step"] = [e - (end[k - 1] if k else 0) for k, e in enumerate(end)]
+    cols["end_step"] = [None if e is None else e - ((end[k - 1] or 0) if k else 0)
+                        for k, e in enumerate(end)]
     events = []
-    try:
-        with open(os.path.join(out_dir, "progress.log"), errors="replace") as f:
+    last = None
+    for line in sd["progress"]:
+        if PERIODIC in line:
+            last = line
+            continue
+        if last is not None:
+            events.append(last)
             last = None
-            for line in f:
-                line = line.rstrip("\n")
-                if PERIODIC in line:
-                    last = line
-                    continue
-                if last is not None:
-                    events.append(last)
-                    last = None
-                events.append(line)
-            if last is not None:
-                events.append(last)
-    except OSError:
-        pass
+        events.append(line)
+    if last is not None:
+        events.append(last)
     return {"units_tsv": cols, "totals": tot, "progress_events": events[-MAX_EVENTS:],
-            "progress_events_left_out": max(0, len(events) - MAX_EVENTS)}
+            "progress_events_left_out": max(0, len(events) - MAX_EVENTS),
+            "progress_lines_not_run_py": sd["progress_left_out"],
+            "note": "times in seconds from the first run's start; progress lines [+H:MM:SS]"}
 
 
 def plan_sha256(plan):
@@ -201,30 +193,20 @@ def plan_sha256(plan):
     return hashlib.sha256(data).hexdigest()
 
 
-def build(out_dir, host, plan=None):
+def build(out_dir, plan=None, seq=None):
     """the digest of out_dir (a dict); plan: the plan file, for a
-    directory without run.py's meta files"""
-    metas = []
+    directory without run.py's meta files; seq: the digest's number"""
+    try:
+        sd = scrub.scrub_dir(out_dir, ROOT)
+    except ValueError as e:
+        sys.exit(str(e))
+    metas = sd["metas"]
     builds = []
-    for name in sorted(os.listdir(out_dir)):
-        if not META.match(name):
-            continue
-        try:
-            with open(os.path.join(out_dir, name)) as f:
-                m = json.load(f)
-        except (OSError, ValueError):
-            sys.exit(f"{os.path.join(out_dir, name)}: not a meta file run.py wrote")
-        m = dict(m, file=name)
-        if isinstance(m.get("bin"), str) and os.path.isabs(m["bin"]):
-            # (the path names the user and the home directory: keep it
-            # from the repo's root, or the file's name)
-            r = os.path.relpath(m["bin"], ROOT)
-            m["bin"] = os.path.basename(m["bin"]) if r.startswith("..") else r
+    for m in metas:
         if "build" in m:
             if m["build"] not in builds:
                 builds.append(m["build"])
             m["build"] = builds.index(m["build"])
-        metas.append(m)
     plans = sorted({(m.get("plan"), m.get("plan_sha256")) for m in metas})
     if plan:
         given = (os.path.basename(plan), plan_sha256(plan))
@@ -276,14 +258,21 @@ def build(out_dir, host, plan=None):
     magic = []
     try:
         with open(os.path.join(out_dir, "MAGIC.txt"), errors="replace") as f:
-            magic = [x.rstrip("\n") for x in f if x.strip()]
+            # (msearch's square records, as run.py wrote them)
+            for x in f:
+                try:
+                    r = json.loads(x)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    magic.append(json.dumps(r))
     except OSError:
         pass
     for r in notable:
         r["magic"] = int(r.get("best_score", 0) >= MAGIC_BEST)
     d = {"format": FORMAT, "version": VERSION, "plan": plans[0][0], "plan_sha256": plans[0][1],
-         "host": host, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-         "created_unix": time.time(), "meta": metas, "builds": builds, "speed": speed(out_dir),
+         "seq": seq, "made_s": sd["runs"].rel_now(), "made_on": scrub.machine_info(),
+         "meta": metas, "builds": builds, "speed": speed(sd),
          "units": cols,
          "persum": dict(per, note="per sum of the units in order: dS (S minus the previous "
                         "sum's S, 0 at a unit's first sum, whose S is S_first), q (its record's "
@@ -297,20 +286,31 @@ def build(out_dir, host, plan=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dir", nargs="?", default=os.path.join(ROOT, "laptop-runs"))
-    ap.add_argument("--host", default=None,
-                    help="the host's name in the file name (default this machine's)")
+    ap.add_argument("--name", default=None,
+                    help="for a second machine: digest-NAME.json.xz (letters, digits, - and _)")
     ap.add_argument("--out", default=None,
-                    help="the digest (default research/laptop/digest-<host>.json.xz)")
+                    help="the digest (default research/laptop/digest.json.xz)")
     ap.add_argument("--plan", default=None,
                     help="the plan run (checked against the meta files; needed only for a "
                          "directory without them)")
     a = ap.parse_args()
     if not os.path.isdir(a.dir):
         sys.exit(f"{a.dir}: no such directory (run.py's --out)")
-    host = a.host or host_name()
-    out = a.out or os.path.join(ROOT, "research", "laptop", f"digest-{host}.json.xz")
+    if a.name is not None and not re.match(r"[A-Za-z0-9_-]+$", a.name):
+        sys.exit(f"--name {a.name}: letters, digits, - and _ only")
+    out = a.out or os.path.join(ROOT, "research", "laptop",
+                                f"digest-{a.name}.json.xz" if a.name else "digest.json.xz")
     t0 = time.time()
-    d = build(a.dir, host, a.plan)
+    # (the digest's number: one more than the last one of DIR)
+    seq_path = os.path.join(a.dir, SEQ)
+    try:
+        with open(seq_path) as f:
+            seq = int(f.read().strip() or 0) + 1
+    except FileNotFoundError:
+        seq = 1
+    except ValueError:
+        sys.exit(f"{seq_path} is damaged: write in it the number of the last digest (or 0)")
+    d = build(a.dir, a.plan, seq)
     if d["other_records"]:
         names = sorted(d["other_records"])
         sys.exit(f"{len(names)} unit files hold records other than square, sum and done "
@@ -325,6 +325,9 @@ def main():
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, out)
+    with open(seq_path + ".tmp", "w") as f:
+        f.write(f"{seq}\n")
+    os.replace(seq_path + ".tmp", seq_path)
     u = d["units"]
     nu = len(u["i"])
     ranges = []
@@ -339,8 +342,8 @@ def main():
     if rel.startswith(".."):
         rel = os.path.abspath(out)
     size = f"{len(data) / 1e6:.2f} MB" if len(data) >= 1e5 else f"{len(data) / 1e3:.1f} kB"
-    print(f"{rel}: {size}, plan {d['plan']} ({str(d['plan_sha256'])[:12]}), "
-          f"made in {time.time() - t0:.0f} s")
+    print(f"{rel}: {size}, digest no. {seq}, plan {d['plan']} "
+          f"({str(d['plan_sha256'])[:12]}), made in {time.time() - t0:.0f} s")
     print(f"units: {nu} finished ({nu - sum(u['complete'])} not complete): {span}; "
           f"{sum(u['sums'])} sums, {sum(u['squares'])} squares, {sum(u['sq_sp'])} with an SP "
           f"traversal, {sum(1 for r in d['notable'] if r['magic'])} magic")

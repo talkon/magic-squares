@@ -55,7 +55,7 @@ CORE="enumerate.c arrange.c square.c dfirst.c"
 for t in msearch bench fuzz_arrange; do
   $CC $FLAGS -o "$B/$t" $t.c $CORE -lm
 done
-{ echo "compiler: $CC ($($CC --version | head -1))"; echo "flags: $FLAGS"; uname -a;
+{ echo "compiler: $CC ($($CC --version | head -1))"; echo "flags: $FLAGS"; echo "arch: $(uname -m)";
   git -C "$ROOT" rev-parse HEAD 2>/dev/null || true; } > "$B/build_info.txt"
 cd "$ROOT"
 echo "checking bench/quick.txt and bench/full.txt (expected squares and hashes)"

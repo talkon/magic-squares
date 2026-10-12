@@ -62,7 +62,7 @@ count for the stage-1 plan too (the same unit numbers).
        python3 scripts/decide.py --plan research/stage1/plan-stage1.jsonl.xz --units-dir laptop-runs
 
    or the same from the digest of step 6 (the same report):
-   `--digest research/laptop/digest-<host>.json.xz` in place of
+   `--digest research/laptop/digest.json.xz` in place of
    `--units-dir laptop-runs`. It compares the finished units with the
    predictions frozen in the plan (squares, S and P traversals, pairs,
    CPU), fits f_rho on the pairs of
@@ -80,43 +80,55 @@ count for the stage-1 plan too (the same unit numbers).
 
        python3 scripts/laptop/digest.py
 
-   It writes one file, `research/laptop/digest-<host>.json.xz`, with
+   It writes one file, `research/laptop/digest.json.xz`, with
    everything decide.py needs from all finished units so far (per unit its
    counts, CPU and the sha256 of its file; per sum its squares and their
    traversals; every square with an SP diagonal or a best score of 12 or
-   more, and MAGIC.txt in full), the meta files (machine, plan hash,
-   build) and the speed (units.tsv, the events of progress.log). It is
-   replaced each time and stays small: ~1-2 MB for the whole plan (1.8 MB
-   on a synthetic run of all 21,298 units; ~40 s and 0.3 GB of memory on
-   an x86 core). It prints the units it covers and the command to send
-   it:
+   more, and MAGIC.txt in full), what the speed needs (units.tsv, the
+   events of progress.log) and the machine: its architecture, chip (e.g.
+   "Apple M1 Pro"), performance cores, workers, python version (major and
+   minor), the compiler's family and major version (e.g. "Apple clang
+   15"), the build flags, search kernels, bench/quick.txt times and the
+   repo commit of the build. It leaves out the host name, the macOS and
+   kernel versions, user names and paths, the time zone and the clock
+   times: every time is in seconds from the first run's start
+   (`scripts/laptop/scrub.py` says what is kept). It is replaced each time
+   and stays small: ~1-2 MB for the whole plan (1.8 MB on a synthetic run
+   of all 21,298 units; ~40 s and 0.3 GB of memory on an x86 core). It
+   prints the units it covers and the command to send it:
 
-       cd <repo> && git add research/laptop/digest-<host>.json.xz && git commit -m 'laptop digest' research/laptop/digest-<host>.json.xz && git push
+       cd <repo> && git add research/laptop/digest.json.xz && git commit -m 'laptop digest' research/laptop/digest.json.xz && git push
 
-   `<host>` is the Mac's LocalHostName (System Settings, General,
-   Sharing). If the printed name changes from one night to the next, pass
-   the old one with `--host NAME`. The file names the machine (host name,
-   macOS version, compiler) and the times of the runs; the path of the
-   binary is kept from the repo's root.
+   A second machine: `--name NAME` writes `digest-NAME.json.xz`. An older
+   `digest-<host>.json.xz` can go (`git rm` it; git's history keeps it).
+   Git itself records the commit's author name, email and time (your git
+   config; GitHub's noreply address can be used there); no script
+   controls that.
 
    The unit files stay on the laptop: please keep `laptop-runs/` until we
    confirm that we have the results. `decide.py` reads the digest as it
    reads `laptop-runs` (step 5; several digests, e.g. of two machines or
    two dates, merge: a unit in both counts once). If a unit is in two
-   digests with different files (it was run twice), the copy in the digest
-   made last counts, and decide.py says so.
+   digests with different files (it was run twice), the copy in the later
+   digest counts, and decide.py says so. Later means a higher digest
+   number (`laptop-runs/digest_seq.txt` counts the digests of that
+   directory; no clock time is used), then later on decide.py's command
+   line (two machines' numbers are not comparable). An older version-1
+   digest comes before all numbered ones.
 
    Only if we ask for the unit files themselves (e.g. for the scheduler's
    state, below): `./scripts/laptop/collect.sh` packs the units not sent
    before (and a unit run again with `--rerun-cut`) into
-   `research/laptop/results-<host>-<date>.tar.xz` and prints the command
-   to send them. Add the files it prints. A large batch is split into parts
-   (`-part01.tar.xz`, ...) of at most ~45 MB each, under GitHub's file
-   limits. With nothing new it says so and writes nothing. Each tarball
-   holds the new units, the meta files (machine, plan hash, build),
-   progress.log and units.tsv (the speed), the build's record
-   (build_info.txt with the bench/quick.txt time and the search kernels,
-   check_quick.txt) and a manifest with the sha256 of each file.
+   `research/laptop/results-001.tar.xz` (then `-002`, ...; `--name NAME`
+   for a second machine) and prints the command to send them. Add the
+   files it prints. A large batch is split into parts (`-part01.tar.xz`,
+   ...) of at most ~45 MB each, under GitHub's file limits. With nothing
+   new it says so and writes nothing. Each tarball holds the new units,
+   the meta files, progress.log and units.tsv (the speed), the build's
+   record (build_info.txt with the bench/quick.txt time and the search
+   kernels, check_quick.txt), all scrubbed as in the digest (the unit
+   files themselves hold no host or path), and a manifest with the sha256
+   of each file.
    `laptop-runs/collected.json` records what was packed; an interrupted
    collect is simply run again. Nothing else needs to be sent.
    (Here `scripts/laptop/unpack.py DIR results-*.tar.xz` checks the

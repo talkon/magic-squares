@@ -29,11 +29,15 @@ STATE is a scheduler state (scripts/scheduler.py --state), fully profiled
       state's fit, is per square found); the units that start below LO
       and reach into the band are left out.
   --plan PLAN --digest FILE ...: the same from digests of DIR (scripts/
-      laptop/digest.py, of one host or date each; the plan's sha256 must
-      be theirs): the report is DIR's but its first line. A unit in
-      several digests counts once (with another sha256: the later
-      digest's, with a note). The state's records are rebuilt from the
-      digests' per-sum rows.
+      laptop/digest.py, of one machine or date each; the plan's sha256
+      must be theirs; versions 1 and 2): the report is DIR's but its
+      first line. A unit in several digests counts once (with another
+      sha256: the later digest's, with a note). Later: the higher digest
+      number (version 2's seq, which counts the digests of one output
+      directory; a version-1 digest comes before all of version 2, and
+      version-1 digests by their time), then the later on the command
+      line. The state's records are rebuilt from the digests' per-sum
+      rows.
 
 Each plain sum (P, S) counts once: of the files that searched it (the
 state's older records hold benchmark and regression sums searched up to 16
@@ -396,6 +400,7 @@ def count_records(recs, o=None):
 # digests of plan runs (scripts/laptop/digest.py)
 
 DIGEST_FORMAT = "magic-squares laptop digest"
+DIGEST_VERSIONS = (1, 2)
 
 
 def plan_sha256(plan):
@@ -465,8 +470,9 @@ def digest_units(d, path, rows=True):
 def load_digests(paths, plan, rows=True):
     """the finished units of the digests of runs of the plan, merged:
     [(i, unit)] by i, and notes. A unit in several digests counts once:
-    with the same sha256 they are one, with another the later digest's (by
-    the time it was made, then the order given) wins"""
+    with the same sha256 they are one, with another the later digest's
+    wins: version 2 after version 1, then by the digest's number (version
+    2's seq) or time (version 1's), then by the order given"""
     import lzma
     sha = plan_sha256(plan)
     ds = []
@@ -478,12 +484,17 @@ def load_digests(paths, plan, rows=True):
             sys.exit(f"{path}: not a digest ({e})")
         if not isinstance(d, dict) or d.get("format") != DIGEST_FORMAT:
             sys.exit(f"{path}: not a digest of scripts/laptop/digest.py")
-        if d.get("version") != 1:
-            sys.exit(f"{path}: digest version {d.get('version')}; this decide.py reads version 1")
+        if d.get("version") not in DIGEST_VERSIONS:
+            sys.exit(f"{path}: digest version {d.get('version')}; this decide.py reads versions "
+                     + " and ".join(map(str, DIGEST_VERSIONS)))
         if d.get("plan_sha256") != sha:
             sys.exit(f"{path} is of plan {d.get('plan')} (sha256 "
                      f"{str(d.get('plan_sha256'))[:12]}), not of --plan {plan} ({sha[:12]})")
-        ds.append((float(d.get("created_unix", 0.0)), k, path, d))
+        if d["version"] == 1:
+            key = (0, float(d.get("created_unix", 0.0)))
+        else:
+            key = (1, float(d.get("seq") or 0))
+        ds.append((key, k, path, d))
     ds.sort(key=lambda x: x[:2])
     units = {}
     notes = []
@@ -495,7 +506,8 @@ def load_digests(paths, plan, rows=True):
                 if old[1]["sha256"] == u["sha256"]:
                     same += 1
                     continue
-                notes.append(f"U{u['i']:06d}: the copy in {path} ({d.get('created')}) replaces "
+                label = (f"digest no. {d.get('seq')}" if d["version"] != 1 else "version 1")
+                notes.append(f"U{u['i']:06d}: the copy in {path} ({label}) replaces "
                              f"the one in {old[0]} (another sha256)")
             units[u["i"]] = (path, u)
     if same:
@@ -816,7 +828,7 @@ def report(a):
         for x in notes:
             print("note: " + x, file=sys.stderr)
         a.digest_units = units
-        out.update({"digests": [os.path.abspath(p) for p in a.digest],
+        out.update({"digests": [shown(p) for p in a.digest],
                     "digest_notes": notes})
     if a.state and a.digest:
         # (the state's Summary reads unit files: the digests' records)
@@ -888,12 +900,12 @@ def state_part(a, out):
         bands = band_cells(lo, hi)
     except ValueError as e:
         sys.exit(str(e))
-    pr(f"# stage-1 decision report: {os.path.abspath(a.state)}"
+    pr(f"# stage-1 decision report: {shown(a.state)}"
        + (f" (units: {digest_names(a)})" if a.digest else ""))
     pr(s.stage1_status())
     units = selected_units(a.state, s, select, a.plan, a.units_dir)
     pr(f"records: {'plan ' + a.plan if a.plan else '--select ' + select}: {len(units)} unit files")
-    out.update({"state": os.path.abspath(a.state), "select": select, "units": len(units),
+    out.update({"state": shown(a.state), "select": select, "units": len(units),
                 "band": [lo, hi]})
     with tempfile.TemporaryDirectory(prefix="decide_") as tmp:
         copies, plain, dd = dedupe_copies([p for p, _ in units], os.path.join(tmp, "units"),
@@ -949,7 +961,19 @@ def state_part(a, out):
 
 
 def digest_names(a):
-    return "digests " + ", ".join(os.path.abspath(p) for p in a.digest)
+    return "digests " + ", ".join(shown(p) for p in a.digest)
+
+
+def shown(path):
+    """a path as the report prints it: from the repo's root or the current
+    directory when it is inside them (not the absolute path, which names
+    the user's home), else as given"""
+    p = os.path.abspath(path)
+    for base in (ROOT, os.getcwd()):
+        r = os.path.relpath(p, base)
+        if not r.startswith(".."):
+            return r
+    return path
 
 
 def frozen_part(a, out):
@@ -962,7 +986,7 @@ def frozen_part(a, out):
     if not (a.plan and (a.units_dir or a.digest)):
         sys.exit("without STATE: --plan PLAN --units-dir DIR (or --digest FILE)")
     lo, hi = parse_band(a, (sch.STAGE1_DEFAULT[1], sch.STAGE1_DEFAULT[2]))
-    src = digest_names(a) if a.digest else os.path.abspath(a.units_dir)
+    src = digest_names(a) if a.digest else shown(a.units_dir)
     pr(f"# stage-1 decision report: plan {a.plan}, units {src} "
        f"(no state: the plan's frozen predictions)")
     if a.digest:

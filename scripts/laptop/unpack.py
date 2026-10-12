@@ -12,8 +12,12 @@ usage: unpack.py DIR results-*.tar.xz...
   ".."), each under 1 GB and under 4 GB in all. A tarball that fails is
   refused, and then nothing is extracted.
 * The tarballs are merged in the order they were written (the manifests'
-  time and part number): a unit packed twice (run again with run.py
-  --rerun-cut) keeps its later version, as do progress.log and units.tsv.
+  collect number "seq" and part number; an older collect.py's tarball,
+  with a time in place of the number, before all the numbered ones): a
+  unit packed twice (run again with run.py --rerun-cut) keeps its later
+  version, as do progress.log and units.tsv. (The numbers count the
+  collects of one output directory: tarballs of two machines are ordered
+  by number, then by name.)
   DIR/unpacked.json records the version of each file in DIR, so this
   also holds across calls: an older tarball unpacked later into the same
   DIR does not replace a newer file.
@@ -112,8 +116,10 @@ def main():
                 man = stage(path, sdir)
             except Refused as e:
                 sys.exit(f"refused {path}: {e}")
-            staged.append(((float(man.get("created", 0)), int(man.get("part", 0)),
-                            os.path.basename(path)), sdir, path, man))
+            # (seq: collect.py's number; created: an older one's time)
+            new = "seq" in man
+            staged.append(((int(new), float(man.get("seq" if new else "created", 0)),
+                            int(man.get("part", 0)), os.path.basename(path)), sdir, path, man))
         staged.sort(key=lambda x: x[0])
         # the version of each file already in DIR (an earlier call)
         rec_path = os.path.join(a.dir, RECORD)
@@ -125,14 +131,17 @@ def main():
         except ValueError:
             sys.exit(f"{rec_path} is damaged: remove it (then the files given "
                      f"later replace those in {a.dir})")
+        # (an older unpack.py's version [time, part, name]: before the
+        # numbered ones)
+        rec = {n: ([0] + v if len(v) == 3 else v) for n, v in rec.items()}
         seen = {}
         older = 0
         for key, sdir, path, man in staged:
-            ver = [key[0], key[1], key[2]]
+            ver = list(key)
             for name in os.listdir(sdir):
                 if UNIT.match(name):
                     seen[name] = seen.get(name, 0) + 1
-                if name in rec and rec[name][:2] > ver[:2] \
+                if name in rec and rec[name][:3] > ver[:3] \
                         and os.path.exists(os.path.join(a.dir, name)):
                     older += UNIT.match(name) is not None
                     continue

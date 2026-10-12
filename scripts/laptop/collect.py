@@ -3,17 +3,23 @@
 Pack the outputs of scripts/laptop/run.py that were not packed before.
 Python 3.8+, standard library only.
 
-usage: collect.py [DIR]     (DIR: run.py's --out, default laptop-runs)
+usage: collect.py [DIR] [--name NAME]   (DIR: run.py's --out, default laptop-runs)
 
-* Writes research/laptop/results-<host>-<YYYYmmdd-HHMM>[-partNN].tar.xz
-  with the unit files (U<i>.jsonl) not packed before, and those changed
+* Writes research/laptop/results-<seq>[-partNN].tar.xz (--name NAME:
+  results-NAME-<seq>..., for a second machine; seq: 001 for DIR's first
+  collect, then 002, ...) with the unit files (U<i>.jsonl) not packed
+  before, and those changed
   since they were packed (run.py --rerun-cut replaces a unit). The units
   are split over parts of at most ~45 MB each (GitHub warns at 50 MB and
   refuses files over 100 MB); no part is over 49 MB.
-* Every part also carries the small files: meta_*.json, progress.log,
-  units.tsv, MAGIC.txt and the build's record (build-laptop/build_info.txt
-  and check_quick.txt, as build-laptop_*.txt). And a manifest.json: its
-  units and files with their sha256 (scripts/laptop/unpack.py checks them).
+* Every part also carries the small files: meta_NNN.json (run NNN's),
+  progress.log, units.tsv, MAGIC.txt and the build's record
+  (build-laptop/build_info.txt and check_quick.txt, as
+  build-laptop_*.txt), as scripts/laptop/scrub.py leaves them: no host
+  name, OS version, path, time zone or wall-clock time (every time is in
+  seconds from the first run's start; the members' mtimes are 0). And a
+  manifest.json: its units and files with their sha256
+  (scripts/laptop/unpack.py checks them) and the collect's number.
 * DIR/collected.json records each unit packed (sha256, size, tarball). It
   is written after each part is complete, so an interrupted collect is
   simply run again. With nothing new it writes no tarball.
@@ -25,15 +31,14 @@ import json
 import lzma
 import os
 import re
-import socket
-import subprocess
 import sys
 import tarfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import scrub  # noqa: E402
+
 UNIT = re.compile(r"U\d+\.jsonl$")
-SMALL = re.compile(r"(meta_.*\.json|progress\.log|units\.tsv|MAGIC\.txt)$")
-BUILD = ("build_info.txt", "check_quick.txt")
 RECORD = "collected.json"
 # MB: the target size of a part, and the hard limit (a part found over it
 # is written again with fewer units)
@@ -74,10 +79,11 @@ class XzSink:
         self.f.write(x)
 
 
-def add(tf, name, data, mtime):
+def add(tf, name, data):
+    # (mtime 0: a file's time is the wall-clock time)
     ti = tarfile.TarInfo(name)
     ti.size = len(data)
-    ti.mtime = int(mtime)
+    ti.mtime = 0
     ti.mode = 0o644
     tf.addfile(ti, io.BytesIO(data))
 
@@ -102,8 +108,8 @@ def write_part(tmp, small, names, out_dir, limit, cap, info):
     with open(tmp, "wb") as f:
         sink = XzSink(f, info["preset"])
         tf = tarfile.open(fileobj=sink, mode="w|", format=tarfile.PAX_FORMAT)
-        for name, (data, mtime) in small.items():
-            add(tf, name, data, mtime)
+        for name, data in small.items():
+            add(tf, name, data)
         for name in names:
             if cap is not None and len(packed) >= cap:
                 break
@@ -113,12 +119,12 @@ def write_part(tmp, small, names, out_dir, limit, cap, info):
             est = sink.out + (min(sink.raw, LAG) + size + 1024 + 150 * (len(packed) + 1)) / 2
             if packed and est > limit:
                 break
-            add(tf, name, data, mtime_ns / 1e9)
+            add(tf, name, data)
             packed.append((name, sha256(data), size, mtime_ns))
         man = dict(info["manifest"])
         man["units"] = {n: {"sha256": h, "size": s} for n, h, s, _ in packed}
-        man["files"] = {n: sha256(d) for n, (d, _) in small.items()}
-        add(tf, "manifest.json", json.dumps(man, indent=0).encode(), time.time())
+        man["files"] = {n: sha256(d) for n, d in small.items()}
+        add(tf, "manifest.json", json.dumps(man, indent=0).encode())
         tf.close()
         sink.finish()
         f.flush()
@@ -135,20 +141,40 @@ def save_record(path, rec):
     os.replace(tmp, path)
 
 
-def host_name():
-    """this machine's name; on macOS its LocalHostName, which does not
-    change with the network as gethostname() can"""
-    h = ""
-    if sys.platform == "darwin":
-        try:
-            h = subprocess.run(["scutil", "--get", "LocalHostName"], stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, universal_newlines=True,
-                               timeout=10).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            h = ""
-    h = h or socket.gethostname().split(".")[0]
-    h = re.sub(r"[^A-Za-z0-9-]", "-", h).strip("-")
-    return h or "host"
+def small_files(out_dir, build_dir, rootdir):
+    """the small files of a part, scrubbed (scripts/laptop/scrub.py):
+    {name: bytes}"""
+    try:
+        sd = scrub.scrub_dir(out_dir, rootdir)
+    except ValueError as e:
+        sys.exit(str(e))
+    small = {}
+    for m in sd["metas"]:
+        small[f"meta_{m['run']:03d}.json"] = json.dumps(m, indent=1).encode()
+    if os.path.exists(os.path.join(out_dir, "progress.log")):
+        small["progress.log"] = "".join(x + "\n" for x in sd["progress"]).encode()
+    if os.path.exists(os.path.join(out_dir, "units.tsv")):
+        small["units.tsv"] = scrub.tsv_text(sd["tsv"]).encode()
+    if os.path.exists(os.path.join(out_dir, "MAGIC.txt")):
+        # (msearch's square records, as run.py wrote them)
+        out = []
+        with open(os.path.join(out_dir, "MAGIC.txt"), errors="replace") as f:
+            for x in f:
+                try:
+                    r = json.loads(x)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    out.append(json.dumps(r) + "\n")
+        small["MAGIC.txt"] = "".join(out).encode()
+    for name, fn in (("build_info.txt", scrub.scrub_build), ("check_quick.txt", scrub.scrub_bench)):
+        for path in (os.path.join(build_dir, name),
+                     os.path.join(out_dir, "build-laptop_" + name)):
+            if os.path.exists(path):
+                with open(path, errors="replace") as f:
+                    small["build-laptop_" + name] = fn(f.read()).encode()
+                break
+    return small
 
 
 def main():
@@ -162,7 +188,8 @@ def main():
     ap.add_argument("--build", default=os.path.join(root, "build-laptop"),
                     help=argparse.SUPPRESS)
     ap.add_argument("--part-mb", type=float, default=PART_MB, help=argparse.SUPPRESS)
-    ap.add_argument("--host", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--name", default=None,
+                    help="for a second machine: results-NAME-<seq>... (letters, digits, - and _)")
     ap.add_argument("--preset", type=int, default=PRESET, help=argparse.SUPPRESS)
     a = ap.parse_args()
     out_dir = a.dir
@@ -170,7 +197,8 @@ def main():
         sys.exit(f"{out_dir}: no such directory (run.py's --out)")
     limit = a.part_mb * 1e6
     hard = limit * HARD_MB / PART_MB
-    host = a.host or host_name()
+    if a.name is not None and not re.match(r"[A-Za-z0-9_-]+$", a.name):
+        sys.exit(f"--name {a.name}: letters, digits, - and _ only")
     os.makedirs(a.dest, exist_ok=True)
 
     rec_path = os.path.join(out_dir, RECORD)
@@ -212,28 +240,18 @@ def main():
         return
 
     # the small files, read once: every part carries the same copies
-    small = {}
-    for name in sorted(os.listdir(out_dir)):
-        if SMALL.match(name):
-            data, _, mtime_ns = read(os.path.join(out_dir, name))
-            small[name] = (data, mtime_ns / 1e9)
-    for name in BUILD:
-        for path in (os.path.join(a.build, name),
-                     os.path.join(out_dir, "build-laptop_" + name)):
-            if os.path.exists(path):
-                data, _, mtime_ns = read(path)
-                small["build-laptop_" + name] = (data, mtime_ns / 1e9)
-                break
+    small = small_files(out_dir, a.build, root)
 
-    # a name not used yet (a second collect in the same minute)
-    stamp = time.strftime("%Y%m%d-%H%M")
+    # the collect's number: one more than the last one of DIR (and a name
+    # not used yet in dest)
+    seq = int(rec.get("collects", len({re.sub(r"-part\d+\.tar\.xz$|\.tar\.xz$", "", x["name"])
+                                       for x in rec["tarballs"]})))
     existing = os.listdir(a.dest)
-    k = 0
     while True:
-        base = f"results-{host}-{stamp}" + (f"-{k}" if k else "")
+        seq += 1
+        base = "results-" + (f"{a.name}-" if a.name else "") + f"{seq:03d}"
         if not any(x.startswith(base + ".") or x.startswith(base + "-part") for x in existing):
             break
-        k += 1
     for x in existing:
         if x.startswith("results-") and x.endswith(".tar.xz.tmp"):
             os.remove(os.path.join(a.dest, x))
@@ -246,9 +264,7 @@ def main():
         part += 1
         tmp = os.path.join(a.dest, f"{base}-part{part:02d}.tar.xz.tmp")
         info = {"preset": a.preset,
-                "manifest": {"format": 1, "host": host, "collect": base, "part": part,
-                             "created": time.time(),
-                             "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z")}}
+                "manifest": {"format": 2, "collect": base, "seq": seq, "part": part}}
         cap = None
         while True:
             try:
@@ -271,8 +287,8 @@ def main():
         os.replace(tmp, os.path.join(a.dest, name))
         for n, h, s, m in packed:
             rec["units"][n] = {"sha256": h, "size": s, "mtime_ns": m, "tarball": name}
-        rec["tarballs"].append({"name": name, "units": len(packed), "bytes": size,
-                                "created": info["manifest"]["created_iso"]})
+        rec["tarballs"].append({"name": name, "units": len(packed), "bytes": size, "seq": seq})
+        rec["collects"] = seq
         save_record(rec_path, rec)
         written.append((name, size, len(packed), sum(p[2] for p in packed)))
 

@@ -2630,8 +2630,9 @@ def test_laptop_collect():
     parts, each under the limit. unpack.py merges the tarballs (the later
     version of a unit packed twice, also across calls) and checks them; a
     corrupted tarball, one with a member ../x, a sparse member or a wrong
-    sha256 is refused. LAPTOP_PYTHON names the interpreter that runs them
-    (default this one)"""
+    sha256 is refused. The tarballs are numbered (results-001, -002, ...;
+    --name NAME: results-NAME-001). LAPTOP_PYTHON names the interpreter
+    that runs them (default this one)"""
     import hashlib
     import io
     import tarfile
@@ -2674,30 +2675,30 @@ def test_laptop_collect():
         os.makedirs(build)
         with open(os.path.join(build, "build_info.txt"), "w") as f:
             f.write("build\n")
-        opts = ("--dest", dest, "--host", "h", "--preset", "6", "--build", build)
+        opts = ("--dest", dest, "--preset", "6", "--build", build)
 
         def tarballs():
             return sorted(os.listdir(dest)) if os.path.isdir(dest) else []
         txt = go(collect, out, *opts)
         assert "packed 10 units" in txt and "git add" in txt, txt
         tb = tarballs()
-        assert len(tb) == 1 and re.match(r"results-h-\d{8}-\d{4}\.tar\.xz$", tb[0]), tb
+        assert tb == ["results-001.tar.xz"], tb
         names, man = members(os.path.join(dest, tb[0]))
-        assert names == sorted(["manifest.json", "meta_1.json", "progress.log", "units.tsv",
+        assert names == sorted(["manifest.json", "meta_001.json", "progress.log", "units.tsv",
                                 "build-laptop_build_info.txt"]
                                + [f"U{i:06d}.jsonl" for i in range(10)]), names
-        assert len(man["units"]) == 10 and man["host"] == "h", man
+        assert len(man["units"]) == 10 and man["seq"] == 1 and "host" not in man, man
         rec = json.load(open(os.path.join(out, "collected.json")))
         assert set(rec["units"]) == {f"U{i:06d}.jsonl" for i in range(10)}, rec
         # nothing new: no tarball
         txt = go(collect, out, *opts)
         assert "nothing new to collect" in txt and tarballs() == tb, txt
-        # new units: only those (another name in the same minute)
+        # new units: only those (the next number)
         for i in (10, 11):
             unit(os.path.join(out, f"U{i:06d}.jsonl"), i)
         go(collect, out, *opts)
         new = [x for x in tarballs() if x not in tb]
-        assert len(new) == 1, tarballs()
+        assert new == ["results-002.tar.xz"], tarballs()
         assert sorted(members(os.path.join(dest, new[0]))[1]["units"]) == [
             "U000010.jsonl", "U000011.jsonl"]
         # a unit touched with the same content: not packed; changed: packed again
@@ -2722,7 +2723,7 @@ def test_laptop_collect():
             name = f"U{i:06d}.jsonl"
             assert open(os.path.join(un, name)).read() == open(os.path.join(out, name)).read()
         assert sorted(x for x in os.listdir(un) if not x.startswith("U")) == [
-            "build-laptop_build_info.txt", "meta_1.json", "progress.log", "units.tsv",
+            "build-laptop_build_info.txt", "meta_001.json", "progress.log", "units.tsv",
             "unpacked.json"], os.listdir(un)
         # across calls: the newest tarball first, then the older ones
         un1 = os.path.join(d, "un1")
@@ -2737,10 +2738,11 @@ def test_laptop_collect():
         for i in range(30):
             unit(os.path.join(out2, f"U{i:06d}.jsonl"), i)
         limit = 0.02
-        txt = go(collect, out2, "--dest", dest2, "--host", "h", "--part-mb", str(limit),
+        txt = go(collect, out2, "--dest", dest2, "--name", "h", "--part-mb", str(limit),
                  "--build", os.path.join(d, "none"))
         parts = sorted(os.listdir(dest2))
-        assert len(parts) >= 3 and all(re.search(r"-part\d\d\.tar\.xz$", x) for x in parts), parts
+        assert len(parts) >= 3 and all(re.match(r"results-h-001-part\d\d\.tar\.xz$", x)
+                                       for x in parts), parts
         assert all(os.path.getsize(os.path.join(dest2, x)) <= limit * 1e6 for x in parts), [
             os.path.getsize(os.path.join(dest2, x)) for x in parts]
         got = [u for x in parts for u in members(os.path.join(dest2, x))[1]["units"]]
@@ -2803,7 +2805,8 @@ def test_laptop_digest():
     squares): its columns, notable squares and MAGIC.txt; decide.py's
     report from the digest is the one from the directory (but its first
     line), without and with a state; two digests merge (a unit in both
-    counts once; with another sha256 the later digest's); a digest of
+    counts once; with another sha256 the later digest's: the higher
+    number, version 2 after version 1); a digest of
     another plan, and a directory of two plans, are refused; a unit file
     without a done record is left out. LAPTOP_PYTHON runs digest.py and
     decide.py's no-state mode (without numpy: everything but the
@@ -2868,26 +2871,33 @@ def test_laptop_digest():
         magic = [json.loads(x) for x in open(U[4]) if '"best_score": 14' in x][0]
         with open(os.path.join(runs, "MAGIC.txt"), "w") as f:
             f.write(json.dumps(magic) + "\n")
-        with open(os.path.join(runs, "meta_1.json"), "w") as f:
+        # (the run started at 1791620000, 2026-10-10 04:13:20 at UTC-4)
+        with open(os.path.join(runs, "meta_1791620000.json"), "w") as f:
             json.dump({"plan": "plan.jsonl", "plan_sha256": sha, "machine": "arm64",
-                       "build": "compiler: test\n", "bin": "/Users/someone/x/msearch"}, f)
+                       "build": "compiler: test\n", "bin": "/Users/someone/x/msearch",
+                       "started": "2026-10-10T04:13:20-0400"}, f)
         with open(os.path.join(runs, "units.tsv"), "w") as f:
             f.write("i\tpred_time\tcpu\twall\tend\tstatus\n")
             for i, st in ((0, "done"), (1, "incomplete"), (2, "done"), (3, "cut"),
                           (3, "cut-kept"), (4, "done")):
-                f.write(f"{i}\t10.000\t{20 + i:.3f}\t{25 + i:.1f}\t{1791620000 + 60 * i}\t{st}\n")
+                f.write(f"{i}\t10.000\t{20 + i:.3f}\t{25 + i:.1f}\t{1791620100 + 60 * i}\t{st}\n")
         with open(os.path.join(runs, "progress.log"), "w") as f:
-            f.write("[t0] plan plan.jsonl (abc): 6 units, 0 already done, 6 to run with 2 workers\n"
-                    "[t1] 1/6 units done; this run: 1 units\n[t2] 2/6 units done; this run: 2 "
-                    "units\n[t3] unit 3: stopped by the wall-clock limit\n[t4] 5/6 units done; "
-                    "this run: 5 units\n")
+            f.write(f"[2026-10-10 04:13:20] plan plan.jsonl ({sha[:12]}): 6 units, 0 already "
+                    "done, 6 to run with 2 workers\n"
+                    "[2026-10-10 04:14:20] 1/6 units done; this run: 1 units, 0.01 CPU-h\n"
+                    "[2026-10-10 04:15:20] 2/6 units done; this run: 2 units, 0.01 CPU-h\n"
+                    "[2026-10-10 04:15:21] unit 3: stopped by the wall-clock limit after 10 "
+                    "CPU-s in 30 s (the machine slept or was busy): running it again\n"
+                    "[2026-10-10 04:16:20] 5/6 units done; this run: 5 units, 0.02 CPU-h\n")
         out = os.path.join(d, "dig", "digest-h.json.xz")
-        txt, _ = go(dig, runs, "--host", "h", "--out", out)
+        txt, _ = go(dig, runs, "--out", out)
         assert "digest-h.json.xz" in txt and "units: 5 finished (2 not complete): 0-4" in txt, txt
         assert "1 magic" in txt and "git add" in txt and "git push" in txt, txt
+        assert "digest no. 1," in txt, txt
         dj = json.loads(lzma.open(out).read())
         u = dj["units"]
-        assert dj["version"] == 1 and dj["plan_sha256"] == sha and dj["host"] == "h", dj
+        assert dj["version"] == 2 and dj["plan_sha256"] == sha and dj["seq"] == 1, dj
+        assert "host" not in dj and "created" not in dj, dj
         assert u["i"] == [0, 1, 2, 3, 4] and u["complete"] == [1, 0, 1, 0, 1], u
         assert u["sha256"] == [hashlib.sha256(open(x, "rb").read()).hexdigest() for x in U[:5]]
         assert u["size"] == [os.path.getsize(x) for x in U[:5]]
@@ -2906,10 +2916,12 @@ def test_laptop_digest():
         sp = dj["speed"]
         assert sp["totals"]["status"] == {"done": 3, "incomplete": 1, "cut": 1, "cut-kept": 1}, sp
         assert sp["units_tsv"]["i"] == [0, 1, 2, 3, 3, 4], sp
+        assert sp["units_tsv"]["end_step"] == [100, 60, 60, 60, 0, 60], sp
         assert abs(sp["totals"]["cpu"] - 133.0) < 1e-9, sp
-        assert [x[:4] for x in sp["progress_events"]] == ["[t0]", "[t2]", "[t3]", "[t4]"], sp
-        assert dj["meta"][0]["machine"] == "arm64" and dj["builds"] == ["compiler: test\n"]
-        assert dj["meta"][0]["bin"] == "msearch", dj["meta"]
+        assert [x[:10] for x in sp["progress_events"]] == [
+            "[+0:00:00]", "[+0:02:00]", "[+0:02:01]", "[+0:03:00]"], sp
+        assert dj["meta"][0]["machine"] == "arm64" and dj["builds"] == ["compiler: unknown\n"]
+        assert dj["meta"][0]["bin"] == "msearch" and dj["meta"][0]["started_s"] == 0, dj["meta"]
 
         def same(a, b):
             a, b = a.split("\n"), b.split("\n")
@@ -2945,17 +2957,20 @@ def test_laptop_digest():
         # two digests: U2 again with the same sha256 (once), U3 changed
         # (the later digest's)
         a, b = os.path.join(d, "a"), os.path.join(d, "b")
+        # (b: the same directory later, its second digest)
         for x, ks in ((a, (0, 1, 2, 3)), (b, (2, 3, 4))):
             os.makedirs(x)
-            shutil.copy(os.path.join(runs, "meta_1.json"), x)
+            shutil.copy(os.path.join(runs, "meta_1791620000.json"), x)
             for k in ks:
                 shutil.copy(U[k], x)
         unit(os.path.join(b, "U000003.jsonl"), P2, range(196, 201), [(197, 2, 0, 0, 3),
                                                                      (199, 1, 1, 1, 7)])
+        with open(os.path.join(b, "digest_seq.txt"), "w") as f:
+            f.write("1\n")
         da, db = os.path.join(d, "dig", "a.json.xz"), os.path.join(d, "dig", "b.json.xz")
-        go(dig, a, "--host", "a", "--out", da)
-        time.sleep(0.05)
-        go(dig, b, "--host", "b", "--out", db)
+        go(dig, a, "--out", da)
+        go(dig, b, "--out", db)
+        assert json.loads(lzma.open(db).read())["seq"] == 2
         union = os.path.join(d, "union")
         os.makedirs(union)
         for k in range(5):
@@ -2967,6 +2982,17 @@ def test_laptop_digest():
                           exe=sys.executable)
             same(raw, got)
             assert "U000003: the copy in " + db in err and "1 units in more than one" in err, err
+        # a version-1 digest (made before version 2) comes first: b's copy
+        # of U3 as version 1, given last, loses to a's
+        x = json.loads(lzma.open(db).read())
+        x.update(version=1, created_unix=time.time(), created="2026-10-10T10:00:00+0000")
+        del x["seq"]
+        dv1 = os.path.join(d, "dig", "b1.json.xz")
+        with lzma.open(dv1, "wt") as f:
+            json.dump(x, f)
+        _, err = go(dec, "--plan", plan, "--digest", da, dv1, "--draws", "2000",
+                    exe=sys.executable)
+        assert "U000003: the copy in " + da + " (digest no. 1)" in err, err
         # refused: a digest of another plan; a directory of two plans
         plan2 = os.path.join(d, "plan2.jsonl")
         with open(plan2, "w") as f:
@@ -2989,15 +3015,175 @@ def test_laptop_digest():
                 assert "columns do not match (damaged?)" in err and "Traceback" not in err, err
         with open(os.path.join(a, "meta_2.json"), "w") as f:
             json.dump({"plan": "plan2.jsonl", "plan_sha256": "0" * 64}, f)
-        _, err = go(dig, a, "--host", "a", "--out", da, ok=False)
+        _, err = go(dig, a, "--out", da, ok=False)
         assert "holds the outputs of 2 plans" in err, err
         # a unit file without a done record: left out
         with open(U[5], "w") as f:
             f.write(json.dumps({"type": "sum", "n": 6, "P": list(P2), "S": 206, "squares": 0,
                                 "cpu": 1.0, "truncated": 0}) + "\n")
-        txt, _ = go(dig, runs, "--host", "h", "--out", out)
+        txt, _ = go(dig, runs, "--out", out)
         assert "left out: 1 unit files without a done record (U000005.jsonl)" in txt, txt
     print("laptop digest ok")
+
+
+def test_laptop_privacy():
+    """digest.py and collect.py send no host name, OS or kernel version,
+    user name or absolute path, time zone or wall-clock time: an output
+    directory whose meta files, build_info.txt, progress.log and units.tsv
+    hold them gives a digest and tarballs without them (every time in
+    seconds from the first run's start), with what the analysis needs
+    kept; decide.py's report from the digest is the directory's.
+    LAPTOP_PYTHON runs digest.py and collect.py"""
+    import hashlib
+    import lzma
+    import tarfile
+    py = os.environ.get("LAPTOP_PYTHON", sys.executable)
+    dig = os.path.join(HERE, "laptop", "digest.py")
+    collect = os.path.join(HERE, "laptop", "collect.py")
+    dec = os.path.join(HERE, "decide.py")
+    P1 = (12, 6, 3, 2, 1, 1)
+    host = "Alices-MacBook-Pro"
+    kernel = ("Darwin Kernel Version 23.4.0: Fri Mar 15 00:12:49 PDT 2024; "
+              "root:xnu-10063.101.17~1/RELEASE_ARM64_T6020")
+    commit = "61164c4" + "0" * 33
+    build = (f"compiler: cc (Apple clang version 15.0.0 (clang-1500.3.9.4))\n"
+             f"flags: -O3 -DNDEBUG -std=gnu17 -mcpu=native -flto -D_DARWIN_C_SOURCE "
+             f"-I/Users/alice/include\n"
+             f"Darwin {host}.local 23.4.0 {kernel} arm64\n{commit}\n"
+             f"search kernels: portable (plain C, no AVX-512BW)\nall checks passed\n"
+             f"bench/quick.txt search time: 0.700 s (best of 3; fast x86 build: ~0.27 s)\n"
+             f"time per core: ~2.6x the fast x86 build\n")
+    bad = [host, "Alices", "alice", "Alice", "/Users", "Darwin Kernel", "23.4.0", "xnu",
+           "macOS-14.4.1", "14.4.1", "-0400", "2026-", "1500.3.9", "PDT", "3.9.6"]
+
+    def go(prog, *args, ok=True, exe=None):
+        r = subprocess.run([exe or py, prog, *args], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, PYTHONHASHSEED="0"))
+        assert (r.returncode == 0) == ok, r.stdout + r.stderr
+        return r.stdout, r.stderr
+
+    def clean(name, text):
+        for x in bad:
+            assert x not in text, (name, x, text[max(0, text.find(x) - 200):text.find(x) + 200])
+        # (no unix time near now: 10 digits, not part of a hash or a float)
+        now = time.time()
+        for m in re.finditer(r"(?<![0-9a-fA-F.])\d{10}(?![0-9a-fA-F.])", text):
+            assert abs(int(m.group(0)) - now) > 3e8, (name, m.group(0))
+
+    with tempfile.TemporaryDirectory() as d:
+        plan = os.path.join(d, "plan.jsonl")
+        lines = [{"i": i, "P": list(P1), "lo": 880 + 10 * i, "hi": 889 + 10 * i, "mode": "plain",
+                  "args": [], "pred_squares": 3.0, "pred_pairs": 0.4, "pred_time": 10.0,
+                  "pred_S": 2.0, "pred_P": 1.0, "pred_SP": 0.3,
+                  "lNp": [8.1 + 0.1 * i, 8.15 + 0.1 * i], "stage1": True} for i in range(3)]
+        with open(plan, "w") as f:
+            f.write("".join(json.dumps(x) + "\n" for x in lines))
+        sha = hashlib.sha256(open(plan, "rb").read()).hexdigest()
+        runs = os.path.join(d, "runs")
+        os.makedirs(runs)
+        for i in range(3):
+            lo = 880 + 10 * i
+            write_unit(os.path.join(runs, f"U{i:06d}.jsonl"), P1,
+                       [(S, int(S % 3 == 0)) for S in range(lo, lo + 10)],
+                       [(S, 2, 1, S % 2, 7) for S in range(lo, lo + 10) if S % 3 == 0],
+                       done=(lo, lo + 9))
+        # two runs: 2026-10-10 04:13:20 and 05:13:20 at UTC-4
+        t0 = 1791620000
+        for k in range(2):
+            with open(os.path.join(runs, f"meta_{t0 + 3600 * k}.json"), "w") as f:
+                json.dump({"plan": "plan.jsonl", "plan_sha256": sha,
+                           "bin": "/Users/alice/magic-squares/build-laptop/msearch",
+                           "workers": 8, "machine": "arm64",
+                           "system": "macOS-14.4.1-arm64-arm-64bit", "processor": "arm",
+                           "python": "3.9.6", "started": f"2026-10-10T0{4 + k}:13:20-0400",
+                           "node": host + ".local", "chip": "Apple M1 Pro", "perf_cores": 8,
+                           "build": build}, f)
+        with open(os.path.join(runs, "units.tsv"), "w") as f:
+            f.write("i\tpred_time\tcpu\twall\tend\tstatus\n")
+            for i in range(3):
+                f.write(f"{i}\t10.000\t{20 + i:.3f}\t{25 + i:.1f}\t{t0 + 3600 + 60 * i}\tdone\n")
+            f.write(f"3\t1.0\t1.0\t1.0\t{t0 + 4000}\t{host}\n")
+        with open(os.path.join(runs, "progress.log"), "w") as f:
+            f.write(f"[2026-10-10 04:13:20] plan plan.jsonl ({sha[:12]}): 3 units, 0 already "
+                    f"done, 3 to run with 8 workers\n"
+                    f"[2026-10-10 04:14:20] stopping: finishing nothing new, stopping the "
+                    f"running units\n"
+                    f"[2026-10-10 04:30:00] ssh alice@{host}: /Users/alice/magic-squares\n"
+                    f"Traceback: /Users/alice/magic-squares/scripts/laptop/run.py\n"
+                    f"[2026-10-10 05:13:20] plan plan.jsonl ({sha[:12]}): 3 units, 0 already "
+                    f"done, 3 to run with 8 workers\n"
+                    f"[2026-10-10 05:16:20] finished: 3/3 units done; this run: 3 units, 0.02 "
+                    f"CPU-h in 0.05 h = 0.01 reference CPU-h (2.20x the reference per core), "
+                    f"3 squares, 1 with an SP diagonal, 0 magic\n")
+        bdir = os.path.join(d, "build")
+        os.makedirs(bdir)
+        with open(os.path.join(bdir, "build_info.txt"), "w") as f:
+            f.write(build)
+        with open(os.path.join(bdir, "check_quick.txt"), "w") as f:
+            f.write(f"# on {host} at 2026-10-10 04:00:00 -0400\n"
+                    "instance                   N labels        nodes   sq check   time(s)\n"
+                    "TOTAL                                   1770779         ok    0.7000\n")
+
+        # the digest
+        out = os.path.join(d, "dig", "digest.json.xz")
+        txt, _ = go(dig, runs, "--out", out)
+        raw = lzma.open(out).read().decode()
+        clean("digest", raw)
+        dj = json.loads(raw)
+        m = dj["meta"]
+        assert [x["started_s"] for x in m] == [0, 3600] and [x["run"] for x in m] == [1, 2], m
+        assert m[0]["chip"] == "Apple M1 Pro" and m[0]["perf_cores"] == 8, m
+        assert (m[0]["machine"], m[0]["python"], m[0]["workers"]) == ("arm64", "3.9", 8), m
+        assert m[0]["bin"] == "msearch" and m[0]["plan_sha256"] == sha, m
+        assert not {"system", "processor", "node", "started", "file"} & set(m[0]), m
+        assert dj["builds"] == [
+            "compiler: cc (Apple clang 15)\n"
+            "flags: -O3 -DNDEBUG -std=gnu17 -mcpu=native -flto -D_DARWIN_C_SOURCE -Iinclude\n"
+            f"{commit}\nsearch kernels: portable (plain C, no AVX-512BW)\nall checks passed\n"
+            "bench/quick.txt search time: 0.700 s (best of 3; fast x86 build: ~0.27 s)\n"
+            "time per core: ~2.6x the fast x86 build\n"], dj["builds"]
+        sp = dj["speed"]
+        assert sp["units_tsv"]["end_step"] == [3600, 60, 60], sp
+        assert sp["progress_lines_not_run_py"] == 2, sp
+        assert [x[:11] for x in sp["progress_events"]] == [
+            "[+0:00:00] ", "[+0:01:00] ", "[+1:00:00] ", "[+1:03:00] "], sp
+        assert dj["seq"] == 1 and isinstance(dj["made_s"], int), dj
+        assert set(dj["made_on"]) == {"machine", "chip", "perf_cores", "python"}, dj
+
+        # the report from DIR and from the digest
+        a, _ = go(dec, "--plan", plan, "--units-dir", runs, "--draws", "2000")
+        b, _ = go(dec, "--plan", plan, "--digest", out, "--draws", "2000")
+        a, b = a.split("\n"), b.split("\n")
+        assert a[0] != b[0] and a[1:] == b[1:], (a, b)
+        assert "3 unit files, 3 finished" in b[1], b
+
+        # collect's tarball: every member
+        dest = os.path.join(d, "dest")
+        txt, _ = go(collect, runs, "--dest", dest, "--build", bdir)
+        tbs = sorted(os.listdir(dest))
+        assert tbs == ["results-001.tar.xz"], tbs
+        clean("tarball name", tbs[0])
+        with tarfile.open(os.path.join(dest, tbs[0]), "r:xz") as tf:
+            names = []
+            for ti in tf:
+                names.append(ti.name)
+                assert ti.mtime == 0 and not ti.uname and not ti.gname, ti
+                clean(ti.name, ti.name + "\n" + tf.extractfile(ti).read().decode())
+            got = {n: tf.extractfile(n).read().decode() for n in names}
+        assert sorted(names) == sorted(["manifest.json", "meta_001.json", "meta_002.json",
+                                        "progress.log", "units.tsv",
+                                        "build-laptop_build_info.txt",
+                                        "build-laptop_check_quick.txt"]
+                                       + [f"U{i:06d}.jsonl" for i in range(3)]), names
+        assert json.loads(got["meta_002.json"])["started_s"] == 3600, got["meta_002.json"]
+        assert got["units.tsv"].split("\n")[:2] == ["i\tpred_time\tcpu\twall\tend_s\tstatus",
+                                                    "0\t10.000\t20.000\t25.0\t3600\tdone"], got
+        assert got["build-laptop_build_info.txt"] == dj["builds"][0], got
+        assert got["build-laptop_check_quick.txt"].startswith("instance "), got
+        for i in range(3):
+            n = f"U{i:06d}.jsonl"
+            assert got[n] == open(os.path.join(runs, n)).read()
+    print("laptop privacy ok")
 
 
 def test_counts_only():
@@ -3177,5 +3363,6 @@ if __name__ == "__main__":
     test_laptop_clock()
     test_laptop_collect()
     test_laptop_digest()
+    test_laptop_privacy()
     test_counts_only()
     print(f"all ok ({time.time() - t0:.0f} s)")
